@@ -1,5 +1,6 @@
 rich>=13.0
 questionary>=2.0
+prompt_toolkit>=3.0.36,<3.0.47
 # daemon extras (not required for the main tool)
 google-api-python-client>=2.0
 google-auth>=2.0
