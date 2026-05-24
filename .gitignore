@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pytype/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / credentials
+*.env
+.env
+.env.*
+*credentials*.json
+service_account*.json
+google_credentials*.json
+
+# Claude Code project artifacts
+.claude/
+docs/superpowers/
+
+# Audit state (runtime, not source)
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+
+# SLURM job output (generated at runtime)
+slurm-*.out
+slurm-*.err
