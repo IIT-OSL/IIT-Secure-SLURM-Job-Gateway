@@ -1,0 +1,5 @@
+rich>=13.0
+questionary>=2.0
+# daemon extras (not required for the main tool)
+google-api-python-client>=2.0
+google-auth>=2.0
