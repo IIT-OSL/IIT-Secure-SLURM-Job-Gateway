@@ -83,9 +83,28 @@ def test_log_spools_when_socket_missing(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix sockets not available")
-def test_log_or_block_returns_false_when_socket_missing(tmp_path, monkeypatch):
+def test_log_or_block_spools_when_socket_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_SOCKET", str(tmp_path / "bad.sock"))
-    monkeypatch.setenv("AUDIT_SPOOL", str(tmp_path / "spool"))  # spool available but irrelevant
+    spool_dir = tmp_path / "spool"
+    monkeypatch.setenv("AUDIT_SPOOL", str(spool_dir))
+
+    import importlib
+    import iitgpu.auditclient as ac
+    importlib.reload(ac)
+
+    result = ac.log_or_block("job_submit", detail="no_daemon")
+    assert result is True
+    spooled = list(spool_dir.iterdir())
+    assert len(spooled) == 1
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="Unix sockets not available")
+def test_log_or_block_returns_false_when_both_fail(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUDIT_SOCKET", str(tmp_path / "bad.sock"))
+    # Use an existing file as the spool path so mkdir fails
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x")
+    monkeypatch.setenv("AUDIT_SPOOL", str(blocker))
 
     import importlib
     import iitgpu.auditclient as ac

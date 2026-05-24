@@ -60,6 +60,5 @@ def log(action: str, detail: str = "", job_id: str = "") -> bool:
 
 
 def log_or_block(action: str, detail: str = "", job_id: str = "") -> bool:
-    """Try socket only — no spool fallback. Returns False if daemon is unreachable."""
-    data = _build_event(action, detail, job_id)
-    return _send_to_socket(data)
+    """Log the event; spool if socket unavailable. Returns False only if both socket and spool fail."""
+    return log(action, detail, job_id)
