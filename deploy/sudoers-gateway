@@ -1,0 +1,4 @@
+# IIT-GPU-Manager: allow gpuusers to run SLURM commands as slurmsvc only
+Defaults:gpuusers !lecture, timestamp_timeout=0
+
+%gpuusers ALL=(slurmsvc) NOPASSWD: /usr/bin/sbatch, /usr/bin/squeue, /usr/bin/scancel, /usr/bin/sinfo

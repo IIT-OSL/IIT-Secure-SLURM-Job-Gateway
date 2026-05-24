@@ -1,0 +1,20 @@
+[Unit]
+Description=IIT GPU Audit Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=gpusync
+ExecStart=/usr/bin/python3 /opt/iit-gpu/deploy/audit_daemon.py
+Restart=always
+RestartSec=5
+RuntimeDirectory=iit-gpu
+StateDirectory=iit-gpu
+Environment=AUDIT_SOCKET=/run/iit-gpu/audit.sock
+Environment=AUDIT_SPOOL=/run/iit-gpu/spool
+Environment=AUDIT_STATE=/var/lib/iit-gpu
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
