@@ -1,4 +1,3 @@
-# iitgpu/menu.py
 import questionary
 from questionary import Style
 
@@ -17,8 +16,11 @@ _ITEMS = [
     "1. Create & submit GPU job",
     "2. Monitor jobs",
     "3. Cluster status",
-    "4. Settings (read-only)",
-    "5. Quit",
+    "4. Model library",
+    "5. Environments",
+    "6. Templates",
+    "7. Settings (read-only)",
+    "8. Quit",
 ]
 
 
@@ -29,6 +31,9 @@ def _show_settings() -> None:
     kv("JOBS_SUBDIR", cfg.jobs_subdir)
     kv("DEMO_MODE", str(cfg.demo_mode))
     kv("Jobs directory", jobs_dir(cfg))
+    from iitgpu.config import models_dir, templates_dir
+    kv("Models directory", models_dir(cfg))
+    kv("Templates directory", templates_dir(cfg))
     info("[dim]Settings are controlled by your admin. NFS_ROOT cannot be changed here.[/]")
 
 
@@ -36,10 +41,12 @@ def run_menu() -> None:
     from iitgpu.monitor import cluster_status, monitor_menu
     from iitgpu.wizard import run_wizard
 
+    cfg = load_config()
+
     while True:
         header("Main Menu")
         choice = questionary.select("Select an option:", choices=_ITEMS, style=_STYLE).ask()
-        if choice is None or choice.startswith("5."):
+        if choice is None or choice.startswith("8."):
             info("Goodbye.")
             return
         elif choice.startswith("1."):
@@ -49,4 +56,13 @@ def run_menu() -> None:
         elif choice.startswith("3."):
             cluster_status()
         elif choice.startswith("4."):
+            from iitgpu.models import model_menu
+            model_menu(cfg)
+        elif choice.startswith("5."):
+            from iitgpu.envs import env_menu
+            env_menu(cfg)
+        elif choice.startswith("6."):
+            from iitgpu.templates import template_menu
+            template_menu(cfg)
+        elif choice.startswith("7."):
             _show_settings()

@@ -19,6 +19,9 @@ class JobSpec:
     modules: list[str] = field(default_factory=list)
     uploads: list[str] = field(default_factory=list)
     user: str = field(default_factory=getpass.getuser)
+    model_path: str = ""
+    conda_env: str = ""
+    venv_path: str = ""
 
 
 def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
@@ -51,6 +54,20 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
         lines.append(f"module load {mod}")
     if spec.modules:
         lines.append("")
+
+    if spec.conda_env:
+        lines.append("source $(conda info --base)/etc/profile.d/conda.sh")
+        lines.append(f"conda activate {spec.conda_env}")
+        lines.append("")
+    elif spec.venv_path:
+        lines.append(f"source {spec.venv_path}/bin/activate")
+        lines.append("")
+
+    if spec.model_path:
+        lines.append(f"export MODEL_PATH={spec.model_path}")
+        lines.append(f"export HF_HOME={spec.model_path}")
+        lines.append("")
+
     lines.append(f"cd {folder}")
     lines.append(spec.run_command)
     return "\n".join(lines) + "\n"

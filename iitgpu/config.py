@@ -20,3 +20,11 @@ def load_config() -> Config:
 
 def jobs_dir(cfg: Config) -> str:
     return str(Path(cfg.nfs_root) / cfg.jobs_subdir).replace("\\", "/")
+
+
+def models_dir(cfg: Config) -> str:
+    return str(Path(cfg.nfs_root) / "models").replace("\\", "/")
+
+
+def templates_dir(cfg: Config) -> str:
+    return str(Path(cfg.nfs_root) / "templates").replace("\\", "/")

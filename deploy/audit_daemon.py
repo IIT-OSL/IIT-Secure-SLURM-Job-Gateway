@@ -2,15 +2,15 @@
 """
 Audit daemon — runs as gpusync.
 Receives events over a Unix datagram socket, drains the spool dir,
-persists to SQLite (WAL) + JSONL, and appends rows to Google Sheets.
+persists to SQLite (WAL) + JSONL, and periodically uploads audit.jsonl
+to a Google Drive folder via service-account credentials.
 
 Env vars:
   AUDIT_SOCKET   default /run/iit-gpu/audit.sock
   AUDIT_SPOOL    default /run/iit-gpu/spool
   AUDIT_STATE    default /var/lib/iit-gpu
-  SHEET_ID       Google Sheets spreadsheet ID (optional)
-  SHEET_RANGE    default Sheet1!A:H
-  GOOGLE_APPLICATION_CREDENTIALS  path to service-account key JSON
+  GDRIVE_FOLDER_ID               Google Drive folder ID to sync into (optional)
+  GOOGLE_APPLICATION_CREDENTIALS path to service-account key JSON
 """
 import json
 import logging
@@ -31,8 +31,7 @@ SPOOL_DIR = Path(os.environ.get("AUDIT_SPOOL", "/run/iit-gpu/spool"))
 STATE_DIR = Path(os.environ.get("AUDIT_STATE", "/var/lib/iit-gpu"))
 DB_PATH = STATE_DIR / "audit.db"
 JSONL_PATH = STATE_DIR / "audit.jsonl"
-SHEET_ID = os.environ.get("SHEET_ID", "")
-SHEET_RANGE = os.environ.get("SHEET_RANGE", "Sheet1!A:H")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 
 _running = True
 
@@ -74,24 +73,33 @@ def _append_jsonl(event: dict) -> None:
         f.write(json.dumps(event) + "\n")
 
 
-def _sheets_append(event: dict) -> None:
-    if not SHEET_ID:
+def _gdrive_sync() -> None:
+    if not GDRIVE_FOLDER_ID or not JSONL_PATH.exists():
         return
     try:
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
         creds = Credentials.from_service_account_file(
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+            scopes=["https://www.googleapis.com/auth/drive.file"],
         )
-        svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
-        row = [event.get(k,"") for k in ("ts","user","session","action","detail","job_id","remote")]
-        svc.spreadsheets().values().append(
-            spreadsheetId=SHEET_ID, range=SHEET_RANGE,
-            valueInputOption="RAW", body={"values": [row]},
+        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        results = svc.files().list(
+            q=f"name='audit.jsonl' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false",
+            fields="files(id)",
         ).execute()
+        files = results.get("files", [])
+        media = MediaFileUpload(str(JSONL_PATH), mimetype="application/x-ndjson", resumable=False)
+        if files:
+            svc.files().update(fileId=files[0]["id"], media_body=media).execute()
+        else:
+            svc.files().create(
+                body={"name": "audit.jsonl", "parents": [GDRIVE_FOLDER_ID]},
+                media_body=media,
+            ).execute()
     except Exception as exc:
-        _log.warning(f"Google Sheets append failed (non-fatal): {exc}")
+        _log.warning(f"Google Drive sync failed (non-fatal): {exc}")
 
 
 def _process(data: bytes, conn: sqlite3.Connection) -> None:
@@ -102,7 +110,6 @@ def _process(data: bytes, conn: sqlite3.Connection) -> None:
         return
     _insert(conn, event)
     _append_jsonl(event)
-    _sheets_append(event)
     _log.info(f"user={event.get('user')} action={event.get('action')} job={event.get('job_id')}")
 
 

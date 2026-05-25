@@ -38,7 +38,8 @@ def _send_to_socket(data: bytes) -> bool:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
             sock.sendto(data, sock_path)
         return True
-    except OSError:
+    except (OSError, AttributeError):
+        # AttributeError: AF_UNIX not available on this platform (Windows dev)
         return False
 
 
