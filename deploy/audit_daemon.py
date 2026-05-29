@@ -2,15 +2,12 @@
 """
 Audit daemon — runs as gpusync.
 Receives events over a Unix datagram socket, drains the spool dir,
-persists to SQLite (WAL) + JSONL, and periodically uploads audit.jsonl
-to a Google Drive folder via service-account credentials.
+and persists to SQLite (WAL) + JSONL.
 
 Env vars:
   AUDIT_SOCKET   default /run/iit-gpu/audit.sock
   AUDIT_SPOOL    default /run/iit-gpu/spool
   AUDIT_STATE    default /var/lib/iit-gpu
-  GDRIVE_FOLDER_ID               Google Drive folder ID to sync into (optional)
-  GOOGLE_APPLICATION_CREDENTIALS path to service-account key JSON
 """
 import json
 import logging
@@ -31,8 +28,6 @@ SPOOL_DIR = Path(os.environ.get("AUDIT_SPOOL", "/run/iit-gpu/spool"))
 STATE_DIR = Path(os.environ.get("AUDIT_STATE", "/var/lib/iit-gpu"))
 DB_PATH = STATE_DIR / "audit.db"
 JSONL_PATH = STATE_DIR / "audit.jsonl"
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
-
 _running = True
 
 
@@ -71,35 +66,6 @@ def _insert(conn: sqlite3.Connection, event: dict) -> None:
 def _append_jsonl(event: dict) -> None:
     with JSONL_PATH.open("a") as f:
         f.write(json.dumps(event) + "\n")
-
-
-def _gdrive_sync() -> None:
-    if not GDRIVE_FOLDER_ID or not JSONL_PATH.exists():
-        return
-    try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
-        creds = Credentials.from_service_account_file(
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
-            scopes=["https://www.googleapis.com/auth/drive.file"],
-        )
-        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
-        results = svc.files().list(
-            q=f"name='audit.jsonl' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false",
-            fields="files(id)",
-        ).execute()
-        files = results.get("files", [])
-        media = MediaFileUpload(str(JSONL_PATH), mimetype="application/x-ndjson", resumable=False)
-        if files:
-            svc.files().update(fileId=files[0]["id"], media_body=media).execute()
-        else:
-            svc.files().create(
-                body={"name": "audit.jsonl", "parents": [GDRIVE_FOLDER_ID]},
-                media_body=media,
-            ).execute()
-    except Exception as exc:
-        _log.warning(f"Google Drive sync failed (non-fatal): {exc}")
 
 
 def _process(data: bytes, conn: sqlite3.Connection) -> None:

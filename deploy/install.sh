@@ -26,10 +26,13 @@ find "${INSTALL_DIR}" -type f -exec chmod 644 {} \;
 find "${INSTALL_DIR}" -type d -exec chmod 755 {} \;
 
 echo "==> Installing Python dependencies..."
-pip3 install --quiet rich questionary google-api-python-client google-auth
+pip3 install --quiet rich questionary
 
-echo "==> Creating state directory (gpusync-owned, not world-readable)..."
-install -d -o gpusync -g gpusync -m 0750 "${STATE_DIR}"
+echo "==> Setting up audit log access (auditadmin group)..."
+getent group auditadmin >/dev/null || groupadd --system auditadmin
+usermod -aG auditadmin gpusync
+usermod -aG auditadmin slurmadmin
+install -d -o gpusync -g auditadmin -m 0750 "${STATE_DIR}"
 
 echo "==> Installing launcher at ${BIN_PATH}..."
 cat > "${BIN_PATH}" << 'LAUNCHER'
@@ -69,6 +72,9 @@ if ! visudo -cf "${SUDOERS_FILE}"; then
     echo "ERROR: sudoers validation failed — removing file." >&2
     rm -f "${SUDOERS_FILE}"; exit 1
 fi
+
+echo "==> Installing admin log viewer..."
+install -o root -g auditadmin -m 0750 "${SCRIPT_DIR}/iit-gpu-log" /usr/local/bin/iit-gpu-log
 
 echo ""
 echo "Installation complete."

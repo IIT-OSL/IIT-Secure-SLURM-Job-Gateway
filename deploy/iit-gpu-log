@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+iit-gpu-log — admin viewer for IIT-GPU-Manager audit log.
+Must be run by a member of the auditadmin group (or root).
+"""
+import argparse
+import grp
+import os
+import sqlite3
+import sys
+
+DB_PATH = os.environ.get("AUDIT_STATE", "/var/lib/iit-gpu") + "/audit.db"
+
+
+def _check_access() -> None:
+    if os.geteuid() == 0:
+        return
+    try:
+        gid = grp.getgrnam("auditadmin").gr_gid
+    except KeyError:
+        print("Access denied: you must be in the auditadmin group.", file=sys.stderr)
+        sys.exit(1)
+    if gid not in os.getgroups():
+        print("Access denied: you must be in the auditadmin group.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _build_query(args: argparse.Namespace) -> tuple[str, list]:
+    conditions: list[str] = []
+    where_params: list = []
+
+    if args.user:
+        conditions.append("user = ?")
+        where_params.append(args.user)
+    if args.action:
+        conditions.append("action = ?")
+        where_params.append(args.action)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    cols = "id, ts, user, action, detail, job_id, remote"
+
+    if args.all:
+        return (
+            f"SELECT {cols} FROM events {where} ORDER BY id ASC",
+            where_params,
+        )
+
+    return (
+        f"SELECT {cols} FROM "
+        f"(SELECT * FROM events {where} ORDER BY id DESC LIMIT ?) "
+        f"ORDER BY id ASC",
+        where_params + [args.tail],
+    )
+
+
+def main() -> None:
+    _check_access()
+
+    parser = argparse.ArgumentParser(
+        description="View IIT-GPU-Manager audit log",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--tail", type=int, metavar="N", default=50,
+        help="Show last N rows (default: 50)",
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help="Show all rows (overrides --tail)",
+    )
+    parser.add_argument("--user",   metavar="USER", help="Filter by username")
+    parser.add_argument("--action", metavar="ACT",  help="Filter by action type")
+    args = parser.parse_args()
+
+    if not os.path.exists(DB_PATH):
+        print(f"Database not found: {DB_PATH}", file=sys.stderr)
+        sys.exit(1)
+
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console()
+
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.OperationalError as exc:
+        print(f"Cannot open database: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    query, params = _build_query(args)
+
+    try:
+        rows = conn.execute(query, params).fetchall()
+    except sqlite3.Error as exc:
+        print(f"Query error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+    table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        border_style="dim",
+        row_styles=["", "dim"],
+        expand=False,
+    )
+    table.add_column("ID",        style="dim",           justify="right", width=6)
+    table.add_column("Timestamp", style="dim white",     width=22)
+    table.add_column("User",      style="cyan",          width=14)
+    table.add_column("Action",    style="bold magenta",  width=20)
+    table.add_column("Detail",    style="white",         max_width=44, no_wrap=False)
+    table.add_column("Job ID",    style="yellow",        width=10)
+    table.add_column("Remote IP", style="dim",           width=16)
+
+    for row in rows:
+        table.add_row(
+            str(row["id"]),
+            row["ts"]     or "",
+            row["user"]   or "",
+            row["action"] or "",
+            row["detail"] or "",
+            row["job_id"] or "",
+            row["remote"] or "",
+        )
+
+    if not rows:
+        console.print("[dim]No records found.[/]")
+        return
+
+    label = "all" if args.all else f"last {args.tail}"
+    filters = []
+    if args.user:
+        filters.append(f"user={args.user}")
+    if args.action:
+        filters.append(f"action={args.action}")
+    filter_str = "  ·  " + "  ".join(filters) if filters else ""
+    console.print(f"\n[bold]IIT-GPU Audit Log[/]  [dim]({label} rows{filter_str})[/]\n")
+    console.print(table)
+    console.print(f"\n[dim]{len(rows)} row(s)[/]\n")
+
+
+if __name__ == "__main__":
+    main()
