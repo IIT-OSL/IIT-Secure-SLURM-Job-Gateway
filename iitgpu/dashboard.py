@@ -176,6 +176,8 @@ def run_dashboard(job_id: str | None = None) -> None:
                         success, msg = cancel(selected_job.job_id)
                         (ok if success else err)(msg)
                     live.start()
+                elif key == "r":
+                    pass  # fall through — refresh happens below unconditionally
 
                 # Refresh job list
                 jobs = queue(user=user)
