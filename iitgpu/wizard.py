@@ -84,9 +84,14 @@ def run_wizard() -> None:
             _tdefaults = tdata
 
     # ── Step 1: Task type ─────────────────────────────────────────────────────
+    # Pre-select task type from template if loaded
+    _template_task_type = _tdefaults.get("task_type", "")
+    _default_label = _TASK_LABELS.get(_template_task_type, list(_TASK_LABELS.values())[0])
+
     task_choice = questionary.select(
         "What are you doing?",
         choices=list(_TASK_LABELS.values()),
+        default=_default_label,
         style=_STYLE,
     ).ask()
     if task_choice is None:
@@ -201,8 +206,11 @@ def run_wizard() -> None:
         if questionary.confirm(
             "Watch live output now?", default=True, style=_STYLE
         ).ask():
-            from iitgpu.dashboard import run_dashboard
-            run_dashboard(job_id=result)
+            try:
+                from iitgpu.dashboard import run_dashboard
+                run_dashboard(job_id=result)
+            except ImportError:
+                info("Live dashboard not available. Check job output manually.")
     else:
         err(f"Submission failed: {result}")
         auditclient.log("job_submit_failed", detail=result)
