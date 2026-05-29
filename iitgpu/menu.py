@@ -1,3 +1,4 @@
+# iitgpu/menu.py
 import questionary
 from questionary import Style
 
@@ -13,14 +14,11 @@ _STYLE = Style([
 ])
 
 _ITEMS = [
-    "1. Create & submit GPU job",
-    "2. Monitor jobs",
-    "3. Cluster status",
-    "4. Model library",
-    "5. Environments",
-    "6. Templates",
-    "7. Settings (read-only)",
-    "8. Quit",
+    "1. Setup          (environment, data, model, health check)",
+    "2. Run a job      (submit ML training / inference job)",
+    "3. Monitor        (live dashboard, job queue, logs)",
+    "4. Advanced       (SLURM command shell)",
+    "5. Quit",
 ]
 
 
@@ -34,35 +32,85 @@ def _show_settings() -> None:
     from iitgpu.config import models_dir, templates_dir
     kv("Models directory", models_dir(cfg))
     kv("Templates directory", templates_dir(cfg))
-    info("[dim]Settings are controlled by your admin. NFS_ROOT cannot be changed here.[/]")
+    info("[dim]Settings are controlled by your admin via environment variables.[/]")
 
 
 def run_menu() -> None:
-    from iitgpu.monitor import cluster_status, monitor_menu
-    from iitgpu.wizard import run_wizard
-
-    cfg = load_config()
-
     while True:
         header("Main Menu")
-        choice = questionary.select("Select an option:", choices=_ITEMS, style=_STYLE).ask()
-        if choice is None or choice.startswith("8."):
+        choice = questionary.select(
+            "Select an option:", choices=_ITEMS, style=_STYLE
+        ).ask()
+
+        if choice is None or choice.startswith("5."):
             info("Goodbye.")
             return
+
         elif choice.startswith("1."):
-            run_wizard()
+            from iitgpu.setup import run_setup
+            run_setup()
+
         elif choice.startswith("2."):
-            monitor_menu()
+            from iitgpu.wizard import run_wizard
+            run_wizard()
+
         elif choice.startswith("3."):
-            cluster_status()
+            _monitor_menu()
+
         elif choice.startswith("4."):
-            from iitgpu.models import model_menu
-            model_menu(cfg)
-        elif choice.startswith("5."):
-            from iitgpu.envs import env_menu
-            env_menu(cfg)
-        elif choice.startswith("6."):
-            from iitgpu.templates import template_menu
-            template_menu(cfg)
-        elif choice.startswith("7."):
-            _show_settings()
+            from iitgpu.shell import run_shell
+            run_shell()
+
+
+def _monitor_menu() -> None:
+    from iitgpu.dashboard import run_dashboard
+    from iitgpu.monitor import show_queue, cancel_job, browse_and_tail_log
+
+    while True:
+        header("Monitor")
+        choice = questionary.select(
+            "Monitor options:",
+            choices=[
+                "Live dashboard  (auto-refresh)",
+                "View my queue",
+                "Cancel a job",
+                "View job log",
+                "Cluster status",
+                "Back to main menu",
+            ],
+            style=_STYLE,
+        ).ask()
+
+        if choice is None or choice == "Back to main menu":
+            return
+        elif "Live dashboard" in choice:
+            run_dashboard()
+        elif choice == "View my queue":
+            show_queue()
+        elif choice == "Cancel a job":
+            cancel_job()
+        elif choice == "View job log":
+            browse_and_tail_log()
+        elif choice == "Cluster status":
+            _show_cluster_status()
+
+
+def _show_cluster_status() -> None:
+    from iitgpu.slurm import get_partitions
+    from iitgpu.ui import console, warn
+    from rich.table import Table
+
+    header("Cluster Status")
+    partitions = get_partitions()
+    if not partitions:
+        warn("Could not retrieve partition info.")
+        return
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Partition", style="magenta")
+    table.add_column("State", style="cyan")
+    table.add_column("Nodes")
+    table.add_column("GPUs/Node")
+    for p in partitions:
+        s = "green" if p.state == "up" else "red"
+        table.add_row(p.name, f"[{s}]{p.state}[/]", str(p.nodes), str(p.gpus_per_node))
+    console.print(table)
