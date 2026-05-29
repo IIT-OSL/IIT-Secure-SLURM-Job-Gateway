@@ -14,11 +14,12 @@ _STYLE = Style([
 ])
 
 _ITEMS = [
-    "1. Setup          (environment, data, model, health check)",
-    "2. Run a job      (submit ML training / inference job)",
-    "3. Monitor        (live dashboard, job queue, logs)",
-    "4. Advanced       (SLURM command shell)",
-    "5. Quit",
+    "1. Upload files   (store datasets in /shared for jobs)",
+    "2. Setup          (environment, data, model, health check)",
+    "3. Run a job      (submit ML training / inference job)",
+    "4. Monitor        (live dashboard, job queue, logs)",
+    "5. Advanced       (SLURM command shell)",
+    "6. Quit",
 ]
 
 
@@ -42,22 +43,26 @@ def run_menu() -> None:
             "Select an option:", choices=_ITEMS, style=_STYLE
         ).ask()
 
-        if choice is None or choice.startswith("5."):
+        if choice is None or choice.startswith("6."):
             info("Goodbye.")
             return
 
         elif choice.startswith("1."):
+            from iitgpu.upload import run_upload
+            run_upload()
+
+        elif choice.startswith("2."):
             from iitgpu.setup import run_setup
             run_setup()
 
-        elif choice.startswith("2."):
+        elif choice.startswith("3."):
             from iitgpu.wizard import run_wizard
             run_wizard()
 
-        elif choice.startswith("3."):
+        elif choice.startswith("4."):
             _monitor_menu()
 
-        elif choice.startswith("4."):
+        elif choice.startswith("5."):
             from iitgpu.shell import run_shell
             run_shell()
 
