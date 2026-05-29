@@ -7,29 +7,45 @@ from rich import box
 from iitgpu import __version__
 from iitgpu.ui import console
 
+_ART_IIT_GPU = r"""
+  ___ ___ _____      ____ ____  _   _
+ |_ _|_ _|_   _|    / ___|  _ \| | | |
+  | | | |  | |     | |  _| |_) | | | |
+  | | | |  | |     | |_| |  __/| |_| |
+ |___|___| |_|      \____|_|    \___/
+"""
+
+_ART_MANAGER = r"""
+  __  __
+ |  \/  | __ _ _ __   __ _  __ _  ___ _ __
+ | |\/| |/ _` | '_ \ / _` |/ _` |/ _ \ '__|
+ | |  | | (_| | | | | (_| | (_| |  __/ |
+ |_|  |_|\__,_|_| |_|\__,_|\__, |\___|_|
+                             |___/
+"""
+
 
 def show_splash(pause: float = 1.5) -> None:
-    heading = Text("IIT-GPU-Manager", style="bold bright_cyan", justify="center")
+    iit_gpu = Text(_ART_IIT_GPU.strip("\n"), style="bold bright_cyan")
+    manager = Text(_ART_MANAGER.strip("\n"), style="cyan")
 
     tagline = Text(
         "GPU Cluster Job Manager  ·  SLURM 25.11.2  ·  RTX 5090",
         style="dim white",
-        justify="center",
     )
+    sep = Text("─" * 46, style="dim cyan")
 
-    sep = Text("─" * 44, style="dim cyan", justify="center")
-
-    footer = Text(justify="center")
+    footer = Text()
     footer.append(f"v{__version__}", style="bold cyan")
     footer.append("   ·   ", style="dim white")
     footer.append("By: IIT Research Team", style="italic white")
 
     content = Group(
         Text(""),
-        Align.center(heading),
+        Align.center(iit_gpu),
+        Align.center(manager),
         Text(""),
         Align.center(tagline),
-        Text(""),
         Align.center(sep),
         Text(""),
         Align.center(footer),
