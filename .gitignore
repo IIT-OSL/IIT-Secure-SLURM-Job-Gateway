@@ -52,6 +52,7 @@ google_credentials*.json
 # Claude Code project artifacts
 .claude/
 docs/superpowers/
+.superpowers
 
 # Audit state (runtime, not source)
 *.db
