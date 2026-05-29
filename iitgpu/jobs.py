@@ -7,6 +7,27 @@ from datetime import datetime
 from pathlib import Path
 
 
+@dataclass(frozen=True)
+class TaskDefaults:
+    gpus: int
+    cpus: int
+    mem_gb: int
+    time_limit: str  # "" means no time limit (SLURM INFINITE)
+
+
+TASK_DEFAULTS: dict[str, TaskDefaults] = {
+    "train":     TaskDefaults(gpus=1, cpus=16, mem_gb=60, time_limit=""),
+    "finetune":  TaskDefaults(gpus=1, cpus=16, mem_gb=60, time_limit=""),
+    "inference": TaskDefaults(gpus=1, cpus=8,  mem_gb=32, time_limit="04:00:00"),
+    "test":      TaskDefaults(gpus=1, cpus=4,  mem_gb=16, time_limit="00:30:00"),
+    "custom":    TaskDefaults(gpus=1, cpus=16, mem_gb=60, time_limit=""),
+}
+
+
+def resource_defaults(task_type: str) -> TaskDefaults:
+    return TASK_DEFAULTS.get(task_type, TASK_DEFAULTS["custom"])
+
+
 @dataclass
 class JobSpec:
     job_name: str
@@ -22,6 +43,7 @@ class JobSpec:
     model_path: str = ""
     conda_env: str = ""
     venv_path: str = ""
+    task_type: str = "custom"
 
 
 def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
@@ -45,19 +67,27 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
         f"#SBATCH --gres=gpu:{spec.gpus}",
         f"#SBATCH --cpus-per-task={spec.cpus}",
         f"#SBATCH --mem={spec.mem_gb}G",
-        f"#SBATCH --time={spec.time_limit}",
+    ]
+    if spec.time_limit:
+        lines.append(f"#SBATCH --time={spec.time_limit}")
+    lines += [
         f"#SBATCH --output={folder}/slurm-%j.out",
         f"#SBATCH --error={folder}/slurm-%j.err",
         "",
     ]
+
     for mod in spec.modules:
         lines.append(f"module load {mod}")
     if spec.modules:
         lines.append("")
 
     if spec.conda_env:
-        lines.append("source $(conda info --base)/etc/profile.d/conda.sh")
-        lines.append(f"conda activate {spec.conda_env}")
+        if spec.conda_env.startswith("/"):
+            # Path-based conda env (created with conda create -p /path)
+            lines.append(f"source {spec.conda_env}/bin/activate")
+        else:
+            lines.append("source $(conda info --base)/etc/profile.d/conda.sh")
+            lines.append(f"conda activate {spec.conda_env}")
         lines.append("")
     elif spec.venv_path:
         lines.append(f"source {spec.venv_path}/bin/activate")

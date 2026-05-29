@@ -89,3 +89,72 @@ def test_write_sbatch_creates_file(tmp_path):
     path = write_sbatch(spec, folder)
     assert Path(path).exists()
     assert Path(path).read_text().startswith("#!/bin/bash")
+
+
+from iitgpu.jobs import TaskDefaults, resource_defaults, TASK_DEFAULTS
+
+
+def test_resource_defaults_train():
+    d = resource_defaults("train")
+    assert d.gpus == 1
+    assert d.cpus == 16
+    assert d.mem_gb == 60
+    assert d.time_limit == ""
+
+
+def test_resource_defaults_inference():
+    d = resource_defaults("inference")
+    assert d.cpus == 8
+    assert d.mem_gb == 32
+    assert d.time_limit == "04:00:00"
+
+
+def test_resource_defaults_test():
+    d = resource_defaults("test")
+    assert d.cpus == 4
+    assert d.mem_gb == 16
+    assert d.time_limit == "00:30:00"
+
+
+def test_resource_defaults_unknown_falls_back_to_custom():
+    d = resource_defaults("nonexistent_task")
+    assert d == resource_defaults("custom")
+
+
+def test_render_sbatch_empty_time_limit_omits_time_directive(tmp_path):
+    spec = _spec(time_limit="")
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_sbatch(spec, folder)
+    assert "#SBATCH --time=" not in script
+
+
+def test_render_sbatch_nonempty_time_limit_includes_directive(tmp_path):
+    spec = _spec(time_limit="02:00:00")
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_sbatch(spec, folder)
+    assert "#SBATCH --time=02:00:00" in script
+
+
+def test_render_sbatch_path_conda_env_uses_source_activate(tmp_path):
+    spec = _spec(conda_env="/shared/envs/pytorch-2.5", modules=[])
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_sbatch(spec, folder)
+    assert "source /shared/envs/pytorch-2.5/bin/activate" in script
+    assert "conda activate" not in script
+
+
+def test_render_sbatch_named_conda_env_uses_conda_activate(tmp_path):
+    spec = _spec(conda_env="my-env", modules=[])
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_sbatch(spec, folder)
+    assert "conda activate my-env" in script
+
+
+def test_jobspec_has_task_type_default():
+    spec = _spec()
+    assert spec.task_type == "custom"
+
+
+def test_jobspec_task_type_can_be_set():
+    spec = _spec(task_type="train")
+    assert spec.task_type == "train"
