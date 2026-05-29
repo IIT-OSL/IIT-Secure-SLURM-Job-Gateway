@@ -14,6 +14,10 @@ ALLOWED_COMMANDS = {"sbatch", "squeue", "scancel", "sinfo", "tail"}
 # Commands that take a file path argument (sbatch: last positional; tail: last non-flag)
 _PATH_ARG_COMMANDS = {"sbatch", "tail"}
 
+_FORBIDDEN_FLAGS = {
+    "sbatch": {"--wrap"},
+}
+
 
 def _parse_command(line: str) -> tuple[str, list[str]]:
     """Split a raw input line into (command, args). Returns ("", []) for blank."""
@@ -23,15 +27,20 @@ def _parse_command(line: str) -> tuple[str, list[str]]:
     return parts[0].lower(), parts[1:]
 
 
-def _find_path_arg(cmd: str, args: list[str]) -> str | None:
-    """Extract the file path argument from args, if this command has one."""
+def _find_path_args(cmd: str, args: list[str]) -> list[str]:
+    """Return all non-flag positional arguments for commands that take file paths."""
     if cmd not in _PATH_ARG_COMMANDS:
-        return None
-    # The path is the last non-flag argument.
-    for arg in reversed(args):
-        if not arg.startswith("-"):
-            return arg
-    return None
+        return []
+    return [a for a in args if not a.startswith("-")]
+
+
+def _has_forbidden_flag(cmd: str, args: list[str]) -> bool:
+    forbidden = _FORBIDDEN_FLAGS.get(cmd, set())
+    for arg in args:
+        flag = arg.split("=")[0]
+        if flag in forbidden:
+            return True
+    return False
 
 
 def _dispatch(cmd: str, args: list[str]) -> None:
@@ -40,10 +49,14 @@ def _dispatch(cmd: str, args: list[str]) -> None:
         print(f"Not allowed: {cmd!r}. Allowed commands: {', '.join(sorted(ALLOWED_COMMANDS))}")
         return
 
-    path_arg = _find_path_arg(cmd, args)
-    if path_arg is not None and not in_jail(path_arg):
-        print(f"Access denied: {path_arg!r} is outside allowed directories.")
+    if _has_forbidden_flag(cmd, args):
+        print(f"Not allowed: flag not permitted for {cmd!r}.")
         return
+
+    for path_arg in _find_path_args(cmd, args):
+        if not in_jail(path_arg):
+            print(f"Access denied: {path_arg!r} is outside allowed directories.")
+            return
 
     full_cmd = [cmd] + args
     try:

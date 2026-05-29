@@ -79,3 +79,23 @@ def test_dispatch_sbatch_accepts_path_inside_jail(tmp_path, monkeypatch):
         sh._dispatch("sbatch", [str(script)])
 
     assert any("sbatch" in str(c) for c in run_calls)
+
+
+def test_dispatch_tail_rejects_first_path_outside_jail_even_if_second_inside(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    good_file = tmp_path / "ok.txt"
+    good_file.write_text("data")
+    import importlib, iitgpu.shell as sh
+    importlib.reload(sh)
+    sh._dispatch("tail", ["/etc/passwd", str(good_file)])
+    captured = capsys.readouterr()
+    assert "denied" in captured.out.lower() or "denied" in captured.err.lower()
+
+
+def test_dispatch_sbatch_rejects_wrap_flag(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    import importlib, iitgpu.shell as sh
+    importlib.reload(sh)
+    sh._dispatch("sbatch", ["--wrap=echo hi"])
+    captured = capsys.readouterr()
+    assert "not allowed" in captured.out.lower() or "not allowed" in captured.err.lower()

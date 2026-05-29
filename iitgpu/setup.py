@@ -184,6 +184,9 @@ def _run_smoke_test(cfg: Config) -> None:
     user_dir.mkdir(parents=True, exist_ok=True)
 
     auditclient.log("smoke_test_start", detail=env.name)
+    if not auditclient.log_or_block("job_submit", detail="smoke_test"):
+        err("Audit logging failed. Refusing to submit (safety policy).")
+        return
     success, result = submit_job(tmp_path)
     if success:
         ok(f"Smoke test submitted. Job ID: {result}")

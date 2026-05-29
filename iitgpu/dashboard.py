@@ -175,6 +175,9 @@ def run_dashboard(job_id: str | None = None) -> None:
                     ).ask():
                         success, msg = cancel(selected_job.job_id)
                         (ok if success else err)(msg)
+                        if success:
+                            from iitgpu import auditclient as _audit
+                            _audit.log("job_cancel", detail="dashboard", job_id=selected_job.job_id)
                     live.start()
                 elif key == "r":
                     pass  # fall through — refresh happens below unconditionally
