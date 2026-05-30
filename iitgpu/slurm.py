@@ -140,17 +140,88 @@ def queue(user: str | None = None) -> list[QueueEntry]:
 
 
 def _read_gpu_stats_file() -> dict | None:
-    """Read /shared/.gpu_stats.json written by the iit-gpu-stats-writer daemon."""
+    """Return live GPU/CPU/RAM stats.
+
+    Primary source: /shared/.gpu_stats.json written every 2 s by the
+    iit-gpu-stats-writer daemon on the compute node.
+    Fallback: call nvidia-smi + /proc directly when the file is stale or
+    missing (e.g. after a reboot before the daemon restarts).
+    """
     try:
         p = Path(_GPU_STATS_FILE)
-        if not p.exists():
-            return None
-        age = time.time() - p.stat().st_mtime
-        if age > _GPU_STATS_MAX_AGE:
-            return None   # stale — daemon probably died
-        return json.loads(p.read_text())
+        if p.exists():
+            age = time.time() - p.stat().st_mtime
+            if age <= _GPU_STATS_MAX_AGE:
+                return json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
+        pass
+
+    # ── Direct fallback ────────────────────────────────────────────────────────
+    return _read_hw_stats_direct()
+
+
+def _read_hw_stats_direct() -> dict | None:
+    """Query nvidia-smi and /proc directly — used when the stats daemon is down."""
+    stats: dict = {}
+    try:
+        r = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=utilization.gpu,utilization.memory,"
+             "memory.used,memory.total,temperature.gpu,power.draw",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            parts = [p.strip() for p in r.stdout.strip().split(",")]
+            stats["gpu_util"]         = int(parts[0])
+            stats["gpu_mem_util"]     = int(parts[1])
+            stats["gpu_mem_used_mb"]  = int(parts[2])
+            stats["gpu_mem_total_mb"] = int(parts[3])
+            stats["gpu_temp"]         = int(parts[4])
+            stats["gpu_power_w"]      = float(parts[5])
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        pass
+
+    try:
+        vals = Path("/proc/loadavg").read_text().split()
+        import os as _os
+        ncpu = _os.cpu_count() or 1
+        stats["cpu_load1"] = float(vals[0])
+        stats["cpu_load5"] = float(vals[1])
+        stats["cpu_util"]  = min(int(float(vals[0]) / ncpu * 100), 100)
+    except (OSError, ValueError, IndexError):
+        pass
+
+    try:
+        mem: dict[str, int] = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, v = line.split(":", 1)
+            mem[k.strip()] = int(v.strip().split()[0])
+        total = mem.get("MemTotal", 0) // 1024
+        avail = mem.get("MemAvailable", 0) // 1024
+        stats["mem_total_mb"] = total
+        stats["mem_used_mb"]  = total - avail
+    except (OSError, ValueError):
+        pass
+
+    if not stats:
         return None
+    stats["ts"] = time.time()
+    return stats
+
+
+def _count_running_gpu_jobs() -> int:
+    """Return number of currently RUNNING jobs that requested a GPU.
+    Used because AllocTRES omits GPU on this SLURM build."""
+    try:
+        r = subprocess.run(
+            ["sudo", "-u", "daham", "squeue", "--noheader",
+             "--states=RUNNING", "--format=%b"],   # %b = requested GRES
+            capture_output=True, text=True, timeout=5,
+        )
+        return sum(1 for line in r.stdout.splitlines() if "gpu" in line.lower())
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
 
 
 def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
@@ -188,15 +259,12 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
                 except (ValueError, IndexError):
                     gpu_total += 1
 
-        gpu_alloc = 0
+        # AllocTRES doesn't include GPU on this SLURM build — count running GPU
+        # jobs from squeue instead, which is authoritative.
+        gpu_alloc    = _count_running_gpu_jobs()
         mem_alloc_mb = 0
         for item in d.get("AllocTRES", "").split(","):
-            if item.startswith("gres/gpu="):
-                try:
-                    gpu_alloc = int(item.split("=", 1)[1])
-                except (ValueError, IndexError):
-                    pass
-            elif item.startswith("mem="):
+            if item.startswith("mem="):
                 mem_str = item[4:]
                 try:
                     if mem_str.endswith("G"):
