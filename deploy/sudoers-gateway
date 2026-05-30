@@ -1,4 +1,6 @@
-# IIT-GPU-Manager: allow gpuusers to run SLURM commands as slurmsvc only
+# IIT-GPU-Manager: allow gpuusers to run SLURM commands as daham
+# daham (UID 1002) exists on both the login VM and the GPU host with matching
+# UIDs, so slurmstepd can resolve the user and set up the job environment.
 Defaults:gpuusers !lecture, timestamp_timeout=0
 
-%gpuusers ALL=(slurmsvc) NOPASSWD: /usr/bin/sbatch, /usr/bin/squeue, /usr/bin/scancel, /usr/bin/sinfo
+%gpuusers ALL=(daham) NOPASSWD: /usr/bin/sbatch, /usr/bin/squeue, /usr/bin/scancel, /usr/bin/sinfo

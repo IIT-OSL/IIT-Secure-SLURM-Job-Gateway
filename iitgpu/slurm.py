@@ -73,7 +73,7 @@ def submit_job(script_path: str) -> tuple[bool, str]:
         return True, job_id
     try:
         result = subprocess.run(
-            ["sudo", "-u", "slurmsvc", "sbatch", script_path],
+            ["sudo", "-u", "daham", "sbatch", script_path],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
@@ -112,7 +112,7 @@ def cancel(job_id: str) -> tuple[bool, str]:
         return False, f"Job {job_id} not found"
     try:
         result = subprocess.run(
-            ["sudo", "-u", "slurmsvc", "scancel", job_id],
+            ["sudo", "-u", "daham", "scancel", job_id],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:

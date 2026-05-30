@@ -132,8 +132,10 @@ def _run_data_upload(cfg: Config) -> None:
 # ── Smoke test ────────────────────────────────────────────────────────────────
 
 def _build_smoke_test_script(env_path: str, cfg: Config) -> str:
-    user = getpass.getuser()
-    out_path = str(Path(cfg.nfs_root) / user / "smoke_test_%j.out")
+    # Output goes to /shared/smoke_test_<jobid>.out — world-writable so the
+    # job (running as daham on the GPU host) can write it regardless of who
+    # submitted. /home/<user> paths only exist on the login VM, not the GPU host.
+    out_path = str(Path(cfg.nfs_root) / "smoke_test_%j.out")
     conda_sh_path = conda_sh(cfg)
     lines = [
         "#!/bin/bash",
@@ -143,6 +145,7 @@ def _build_smoke_test_script(env_path: str, cfg: Config) -> str:
         "#SBATCH --cpus-per-task=4",
         "#SBATCH --mem=16G",
         "#SBATCH --time=00:05:00",
+        f"#SBATCH --chdir={cfg.nfs_root}",
         f"#SBATCH --output={out_path}",
         "",
         f"[ -f '{conda_sh_path}' ] && source '{conda_sh_path}'",
@@ -182,7 +185,7 @@ def _run_smoke_test(cfg: Config) -> None:
     ) as tmp:
         tmp.write(script)
         tmp_path = tmp.name
-    # NamedTemporaryFile defaults to 0600 (owner-only). sbatch runs as slurmsvc
+    # NamedTemporaryFile defaults to 0600 (owner-only). sbatch runs as daham
     # (a different user) and can't open the script without world-read permission.
     os.chmod(tmp_path, 0o644)
 
