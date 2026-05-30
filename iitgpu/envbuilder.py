@@ -365,14 +365,29 @@ def _run_pip_with_progress(
                         f"  [dim]{_fmt_size(current_total_b)}[/]"
                     )
                     current_pkg = None
+                console.print(
+                    "  [bold yellow]⚠[/]  Linking packages to NFS — "
+                    "this can take [bold]15–30 min[/bold] for large CUDA installs. "
+                    "Do not interrupt."
+                )
                 progress.update(
                     file_task,
                     completed=0, total=None,
-                    pkg="[bold yellow]Linking packages…[/bold yellow]",
+                    pkg="[bold yellow]Linking to NFS…[/bold yellow]",
                     sizes="", speed="", eta="",
                 )
 
+            # Count files being linked so the display shows active progress
+            if "changing mode of" in seg or "copying" in seg.lower():
+                _link_count = getattr(_run_pip_with_progress, "_link_count", 0) + 1
+                _run_pip_with_progress._link_count = _link_count  # type: ignore[attr-defined]
+                progress.update(
+                    file_task,
+                    pkg=f"[bold yellow]Linking to NFS…  ({_link_count} files)[/bold yellow]",
+                )
+
             if "successfully installed" in seg.lower():
+                _run_pip_with_progress._link_count = 0  # type: ignore[attr-defined]
                 progress.update(
                     file_task,
                     completed=1, total=1,
