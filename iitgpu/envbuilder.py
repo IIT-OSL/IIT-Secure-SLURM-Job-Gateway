@@ -23,10 +23,16 @@ from iitgpu.config import Config
 from iitgpu.ui import console, err, info, ok, warn
 
 # pip install args per framework key.
-# PyTorch 2.5 uses cu124 (CUDA 12.4) — the highest stable build available on
-# the PyTorch whl index. cu124 wheels run on CUDA 13.x drivers via backward
-# compatibility, so they work on RTX 5090 nodes.
+#
+# RTX 5090 (sm_120 / Blackwell) requires PyTorch 2.6+.
+# PyTorch 2.5 and earlier have no compiled kernels for sm_120 — CUDA will
+# appear available but crash on the first kernel call.  Driver backward
+# compatibility only covers CUDA runtime ABI, not GPU architecture support.
 FRAMEWORK_PACKAGES: dict[str, list[str]] = {
+    "pytorch-2.6": [
+        "torch==2.6.* torchvision torchaudio "
+        "--index-url https://download.pytorch.org/whl/cu126"
+    ],
     "pytorch-2.5": [
         "torch==2.5.* torchvision torchaudio "
         "--index-url https://download.pytorch.org/whl/cu124"
@@ -42,7 +48,8 @@ FRAMEWORK_PACKAGES: dict[str, list[str]] = {
 
 # Human-readable labels shown in the picker
 FRAMEWORK_LABELS: dict[str, str] = {
-    "pytorch-2.5":     "PyTorch 2.5  (CUDA 12.4 — RTX 5090 compatible)",
+    "pytorch-2.6":     "PyTorch 2.6  (CUDA 12.6 — RTX 5090 / sm_120 native) [recommended]",
+    "pytorch-2.5":     "PyTorch 2.5  (CUDA 12.4 — no RTX 5090 sm_120 support)",
     "pytorch-2.4":     "PyTorch 2.4  (CUDA 12.1)",
     "tensorflow-2.18": "TensorFlow 2.18  (CUDA 12)",
     "jax-0.4":         "JAX 0.4  (CUDA 12)",
