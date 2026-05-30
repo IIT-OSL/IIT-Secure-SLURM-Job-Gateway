@@ -179,6 +179,7 @@ def _run_smoke_test(cfg: Config) -> None:
     user = getpass.getuser()
     out_dir = str(Path(jobs_dir(cfg)) / user / "smoke_test")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
+    os.chmod(out_dir, 0o777)
 
     script = _build_smoke_test_script(env.path, cfg, out_dir)
     with tempfile.NamedTemporaryFile(
