@@ -72,7 +72,7 @@ def _get_job_output(job_id: str, jdir: str, lines: int = 20) -> tuple[list[str],
     err_lines = _get_log_tail(err_path, lines=15)
 
     if err_lines:
-        separator = ["", "[red]── stderr ──[/red]"]
+        separator = ["", "[dim]── stdout ──[/dim]"]
         combined = err_lines + (separator + out_lines if out_lines else [])
     else:
         combined = out_lines
