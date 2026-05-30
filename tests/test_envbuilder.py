@@ -29,7 +29,8 @@ def test_framework_packages_contains_bare():
 
 def test_build_env_returns_false_when_conda_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("NFS_ROOT", str(tmp_path))
-    with patch("shutil.which", return_value=None):
+    with patch("shutil.which", return_value=None), \
+         patch("iitgpu.envbuilder._find_conda", return_value=None):
         from iitgpu.envbuilder import build_env
         from iitgpu.config import load_config
         success, path = build_env("testenv", "pytorch-2.5", None, load_config())
@@ -39,31 +40,21 @@ def test_build_env_returns_false_when_conda_missing(tmp_path, monkeypatch):
 
 def test_build_env_success_calls_conda_create(tmp_path, monkeypatch):
     monkeypatch.setenv("NFS_ROOT", str(tmp_path))
-    env_dir = tmp_path / "envs" / "testenv"
-    env_dir.mkdir(parents=True)
-    (env_dir / "bin").mkdir()
-    (env_dir / "bin" / "pip").write_text("#!/bin/bash")
 
-    conda_calls = []
+    calls: list[list[str]] = []
 
-    def fake_run(cmd, **kwargs):
-        conda_calls.append(cmd)
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = ""
-        result.stderr = ""
-        return result
+    def fake_progress(cmd, phases, label, env=None):
+        calls.append(cmd)
+        return 0, []
 
     with patch("shutil.which", return_value="/usr/bin/conda"), \
-         patch("subprocess.run", side_effect=fake_run):
-        import importlib
-        import iitgpu.envbuilder as eb
-        importlib.reload(eb)
+         patch("iitgpu.envbuilder._run_with_progress", side_effect=fake_progress):
+        from iitgpu.envbuilder import build_env
         from iitgpu.config import load_config
-        success, path = eb.build_env("testenv", "bare", None, load_config())
+        success, path = build_env("testenv", "bare", None, load_config())
 
     assert success is True
-    assert any("conda" in str(c[0]) for c in conda_calls)
+    assert any("conda" in str(c[0]) for c in calls)
 
 
 def test_build_env_unknown_framework_returns_false(tmp_path, monkeypatch):
