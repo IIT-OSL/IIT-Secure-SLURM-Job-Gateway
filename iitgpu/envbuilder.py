@@ -225,7 +225,7 @@ def _run_pip_with_progress(
     # Speed tracking — exponential moving average
     _t_last: float = 0.0
     _b_last: float = 0.0
-    _speed:  float = 0.0          # bytes/s smoothed
+    _speed:  float = 0.0
 
     def _reset_speed() -> None:
         nonlocal _t_last, _b_last, _speed
@@ -263,14 +263,19 @@ def _run_pip_with_progress(
             raw_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,   # line-buffered: each \n-terminated Progress line arrives immediately
+            bufsize=0,          # binary, unbuffered — no Python read-ahead buffering
             env=pip_env,
         )
         assert proc.stdout is not None
 
-        for raw_line in proc.stdout:
-            seg = raw_line.strip()
+        # readline() on a bufsize=0 binary pipe blocks until exactly one \n
+        # arrives — guarantees each Progress line is processed the instant pip
+        # flushes it, unlike `for line in proc.stdout` which batches 8 KB.
+        while True:
+            raw = proc.stdout.readline()
+            if not raw:
+                break
+            seg = raw.decode("utf-8", errors="replace").strip()
             if not seg:
                 continue
             output_lines.append(seg)
@@ -332,10 +337,12 @@ def _run_pip_with_progress(
                         f"  [dim]{_fmt_size(current_total_b)}[/]"
                     )
                     current_pkg = None
+                # total=None → indeterminate pulsing bar so it looks active,
+                # not a frozen empty bar. Linking PyTorch wheels takes ~2–5 min.
                 prog.update(
                     file_task,
-                    completed=0, total=1,
-                    pkg="[bold]Installing…[/bold]",
+                    completed=0, total=None,
+                    pkg="[bold yellow]Linking packages (this takes a few minutes)…[/bold yellow]",
                     sizes="", speed="", eta="",
                 )
 
