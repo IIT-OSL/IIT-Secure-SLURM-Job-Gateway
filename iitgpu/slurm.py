@@ -151,6 +151,7 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
             except (ValueError, TypeError):
                 return default
 
+        # GPU total from Gres= (always present)
         gpu_total = 0
         for part in d.get("Gres", "").split(","):
             if part.startswith("gpu:"):
@@ -159,11 +160,27 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
                 except (ValueError, IndexError):
                     gpu_total += 1
 
+        # GPU and memory allocation from AllocTRES= (reliable; GresUsed absent when idle)
+        # Format: "cpu=16,mem=60G,billing=16,gres/gpu=1" when allocated, "" when idle
         gpu_alloc = 0
-        for part in d.get("GresUsed", "").split(","):
-            if part.startswith("gpu:"):
+        mem_alloc_mb = 0
+        for item in d.get("AllocTRES", "").split(","):
+            if item.startswith("gres/gpu="):
                 try:
-                    gpu_alloc += int(part.split(":")[1].split("(")[0])
+                    gpu_alloc = int(item.split("=", 1)[1])
+                except (ValueError, IndexError):
+                    pass
+            elif item.startswith("mem="):
+                mem_str = item[4:]
+                try:
+                    if mem_str.endswith("G"):
+                        mem_alloc_mb = int(float(mem_str[:-1]) * 1024)
+                    elif mem_str.endswith("M"):
+                        mem_alloc_mb = int(mem_str[:-1])
+                    elif mem_str.endswith("T"):
+                        mem_alloc_mb = int(float(mem_str[:-1]) * 1024 * 1024)
+                    else:
+                        mem_alloc_mb = int(mem_str)
                 except (ValueError, IndexError):
                     pass
 
@@ -173,7 +190,7 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
             cpu_total=_i("CPUTot"),
             cpu_alloc=_i("CPUAlloc"),
             mem_total_mb=_i("RealMemory"),
-            mem_alloc_mb=_i("AllocMem"),
+            mem_alloc_mb=mem_alloc_mb,
             gpu_total=gpu_total,
             gpu_alloc=gpu_alloc,
         )

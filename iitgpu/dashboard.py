@@ -25,7 +25,8 @@ try:
 except ImportError:
     _HAS_TERMIOS = False
 
-_REFRESH_SECS = 1.0
+_DATA_REFRESH_SECS = 2.0   # how often to re-query squeue / scontrol
+_DISPLAY_FPS       = 4     # Rich redraws per second (smooth animation, no extra I/O)
 _COMPLETED_HISTORY = 2
 
 
@@ -60,7 +61,12 @@ def _fmt_duration(secs: int) -> str:
 
 def _progress_bar(elapsed_secs: int, limit_secs: int | None, width: int = 10) -> str:
     if limit_secs is None or limit_secs == 0:
-        return "[dim]" + "─" * width + "  ──%[/]"
+        # No time limit — show a moving scanner to prove the bar is live
+        pos = elapsed_secs % (width * 2)
+        if pos >= width:
+            pos = width * 2 - pos
+        bar = "─" * pos + "█" + "─" * (width - pos - 1)
+        return f"[green]{bar}[/] [dim]running[/]"
     pct = min(elapsed_secs / limit_secs, 1.0)
     filled = int(pct * width)
     color = "green" if pct < 0.75 else "yellow" if pct < 0.92 else "red"
@@ -70,7 +76,7 @@ def _progress_bar(elapsed_secs: int, limit_secs: int | None, width: int = 10) ->
 
 def _fmt_eta(elapsed_secs: int, limit_secs: int | None) -> str:
     if limit_secs is None:
-        return "[dim]∞[/]"
+        return "[dim]no limit[/]"
     remaining = max(0, limit_secs - elapsed_secs)
     return f"[dim]ETA[/] {_fmt_duration(remaining)}"
 
@@ -196,13 +202,14 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
                 "",
                 f"[dim strike]{j.partition}[/]",
             )
-        elif j.state == "RUNNING":
+        elif j.state in ("RUNNING", "COMPLETING"):
+            s_label = "RUNNING" if j.state == "RUNNING" else "[dim]FINISHING[/]"
             table.add_row(
                 prefix,
                 j.job_id,
                 j.user[:7],
                 j.name[:17],
-                "[green]RUNNING[/]",
+                f"[green]{s_label}[/]",
                 _progress_bar(elapsed, limit),
                 f"[dim]{j.time_used}[/]",
                 _fmt_eta(elapsed, limit),
@@ -328,16 +335,29 @@ def run_dashboard(job_id: str | None = None) -> None:
                 selected_idx = i
                 break
 
-    # Cache node stats so we don't hammer scontrol on every keystroke
-    _stats_cache: list[NodeStats | None] = [None]
-    _stats_ts: list[float] = [0.0]
+    # ── Cached data (refreshed every _DATA_REFRESH_SECS, not every frame) ──────
+    _node_stats:    list[NodeStats | None] = [None]
+    _log_lines:     list[list[str]]        = [[]]
+    _log_path_ref:  list[str | None]       = [None]
+    _last_data_ts:  list[float]            = [0.0]
 
-    def _node_stats() -> NodeStats | None:
-        now = time.monotonic()
-        if now - _stats_ts[0] > 5.0:
-            _stats_cache[0] = get_node_stats()
-            _stats_ts[0] = now
-        return _stats_cache[0]
+    def _refresh_data() -> None:
+        nonlocal jobs, selected_idx
+        _node_stats[0] = get_node_stats()
+        jobs = _merged_jobs(jdir)
+        if jobs and selected_idx >= len(jobs):
+            selected_idx = len(jobs) - 1
+        sel = jobs[selected_idx] if jobs and selected_idx < len(jobs) else None
+        lookup_id = sel.job_id if sel else pinned_job_id
+        if lookup_id:
+            lines, path = _get_job_output(lookup_id, jdir)
+        else:
+            lines, path = [], None
+        _log_lines[0]    = lines
+        _log_path_ref[0] = path
+        _last_data_ts[0] = time.monotonic()
+
+    _refresh_data()  # initial load
 
     old_settings = None
     if _HAS_TERMIOS and sys.stdin.isatty():
@@ -348,45 +368,48 @@ def run_dashboard(job_id: str | None = None) -> None:
             old_settings = None
 
     try:
-        with Live(console=console, refresh_per_second=4, screen=False) as live:
+        # screen=True uses alternate screen buffer — zero flicker, no scroll noise
+        with Live(console=console, refresh_per_second=_DISPLAY_FPS,
+                  screen=True) as live:
             while True:
-                selected_job = jobs[selected_idx] if jobs and selected_idx < len(jobs) else None
-                if selected_job:
-                    log_lines, log_path = _get_job_output(selected_job.job_id, jdir)
-                elif pinned_job_id is not None:
-                    log_lines, log_path = _get_job_output(pinned_job_id, jdir)
-                else:
-                    log_lines, log_path = [], None
+                # Rebuild layout every frame (cheap — no I/O, just Rich rendering)
+                live.update(_build_layout(
+                    jobs, selected_idx,
+                    _log_lines[0], _log_path_ref[0],
+                    _node_stats[0],
+                ))
 
-                live.update(_build_layout(jobs, selected_idx, log_lines, log_path, _node_stats()))
-
-                key = _wait_key(_REFRESH_SECS)
+                # Wait for keypress up to 0.25s (1 / _DISPLAY_FPS)
+                key = _wait_key(1.0 / _DISPLAY_FPS)
 
                 if key == "q":
                     break
                 elif key == "s" and jobs:
                     selected_idx = (selected_idx + 1) % len(jobs)
-                elif key == "c" and selected_job:
-                    live.stop()
-                    import questionary
-                    from questionary import Style
-                    _s = Style([("question", "bold"), ("answer", "fg:magenta bold")])
-                    if questionary.confirm(
-                        f"Cancel job {selected_job.job_id} ({selected_job.name})?",
-                        default=False, style=_s,
-                    ).ask():
-                        success, msg = cancel(selected_job.job_id)
-                        (ok if success else err)(msg)
-                        if success:
-                            from iitgpu import auditclient as _audit
-                            _audit.log("job_cancel", detail="dashboard", job_id=selected_job.job_id)
-                    live.start()
+                    _refresh_data()
+                elif key == "c":
+                    sel = jobs[selected_idx] if jobs and selected_idx < len(jobs) else None
+                    if sel:
+                        live.stop()
+                        import questionary
+                        from questionary import Style
+                        _s = Style([("question", "bold"), ("answer", "fg:magenta bold")])
+                        if questionary.confirm(
+                            f"Cancel job {sel.job_id} ({sel.name})?",
+                            default=False, style=_s,
+                        ).ask():
+                            success, msg = cancel(sel.job_id)
+                            (ok if success else err)(msg)
+                            if success:
+                                from iitgpu import auditclient as _audit
+                                _audit.log("job_cancel", detail="dashboard", job_id=sel.job_id)
+                        live.start()
                 elif key == "r":
-                    pass
+                    _refresh_data()
 
-                jobs = _merged_jobs(jdir)
-                if jobs and selected_idx >= len(jobs):
-                    selected_idx = len(jobs) - 1
+                # Refresh data only every _DATA_REFRESH_SECS to avoid hammering SLURM
+                if time.monotonic() - _last_data_ts[0] >= _DATA_REFRESH_SECS:
+                    _refresh_data()
 
     finally:
         if old_settings is not None:
