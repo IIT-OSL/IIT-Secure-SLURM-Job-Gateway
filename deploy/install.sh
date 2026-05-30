@@ -10,51 +10,122 @@ SUDOERS_FILE="/etc/sudoers.d/iit-gpu-gateway"
 STATE_DIR="/var/lib/iit-gpu"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Configurable via env vars so the installer works for non-default layouts.
+NFS_ROOT="${NFS_ROOT:-/shared}"
+CONDA_PREFIX="${CONDA_PREFIX_SHARED:-${NFS_ROOT}/miniforge3}"
+CONDA_SH="${CONDA_PREFIX}/etc/profile.d/conda.sh"
+GATEWAY_USER="${GATEWAY_USER:-public}"
+
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: must be run as root." >&2; exit 1
 fi
 
+# ── System packages ───────────────────────────────────────────────────────────
+echo "==> Installing system packages..."
+apt-get update -qq
+apt-get install -y \
+    wget curl rsync git \
+    python3 python3-pip \
+    bc jq \
+    nfs-common \
+    --no-install-recommends
+
+# ── Groups and system users ───────────────────────────────────────────────────
 echo "==> Creating groups and system users..."
-getent group  gpuusers >/dev/null || groupadd --system gpuusers
+getent group  gpuusers  >/dev/null || groupadd --system gpuusers
+getent group  auditadmin >/dev/null || groupadd --system auditadmin
 id slurmsvc &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin slurmsvc
 id gpusync  &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin gpusync
 
+# ── Shared directory structure ────────────────────────────────────────────────
+echo "==> Creating shared directory structure under ${NFS_ROOT}..."
+mkdir -p \
+    "${NFS_ROOT}/scripts" \
+    "${NFS_ROOT}/jobs" \
+    "${NFS_ROOT}/data" \
+    "${NFS_ROOT}/envs" \
+    "${NFS_ROOT}/models" \
+    "${NFS_ROOT}/templates"
+# Make directories writable by the gateway user so the tool can create sub-dirs
+chown -R "${GATEWAY_USER}:gpuusers" \
+    "${NFS_ROOT}/scripts" "${NFS_ROOT}/jobs" "${NFS_ROOT}/data" \
+    "${NFS_ROOT}/envs"    "${NFS_ROOT}/models" "${NFS_ROOT}/templates" 2>/dev/null || true
+chmod -R g+w \
+    "${NFS_ROOT}/scripts" "${NFS_ROOT}/jobs" "${NFS_ROOT}/data" \
+    "${NFS_ROOT}/envs"    "${NFS_ROOT}/models" "${NFS_ROOT}/templates" 2>/dev/null || true
+
+# ── Miniforge (conda) ─────────────────────────────────────────────────────────
+echo "==> Installing Miniforge to ${CONDA_PREFIX}..."
+if [ ! -f "${CONDA_PREFIX}/bin/conda" ]; then
+    MINIFORGE_SH="/tmp/Miniforge3.sh"
+    wget -q \
+        "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh" \
+        -O "${MINIFORGE_SH}"
+    bash "${MINIFORGE_SH}" -b -p "${CONDA_PREFIX}"
+    rm -f "${MINIFORGE_SH}"
+else
+    echo "   conda already present at ${CONDA_PREFIX}/bin/conda — skipping download."
+fi
+
+# ── conda init for gateway user ───────────────────────────────────────────────
+echo "==> Initialising conda for ${GATEWAY_USER}..."
+sudo -u "${GATEWAY_USER}" "${CONDA_PREFIX}/bin/conda" init bash 2>/dev/null || true
+
+# ── conda.sh in /etc/bash.bashrc (covers non-interactive sbatch scripts) ──────
+echo "==> Adding conda.sh to /etc/bash.bashrc..."
+if ! grep -q "miniforge3\|CONDA_PREFIX_SHARED\|iit-gpu conda" /etc/bash.bashrc 2>/dev/null; then
+    cat >> /etc/bash.bashrc << BASHRC
+
+# conda — added by IIT-GPU-Manager installer
+[ -f "${CONDA_SH}" ] && source "${CONDA_SH}"
+BASHRC
+fi
+
+# ── Copy repo files ───────────────────────────────────────────────────────────
 echo "==> Copying files to ${INSTALL_DIR}..."
 install -d -o root -g root -m 0755 "${INSTALL_DIR}"
 cp -r "${SCRIPT_DIR}/.." "${INSTALL_DIR}/"
 find "${INSTALL_DIR}" -type f -exec chmod 644 {} \;
 find "${INSTALL_DIR}" -type d -exec chmod 755 {} \;
 
+# ── Python dependencies ───────────────────────────────────────────────────────
 echo "==> Installing Python dependencies..."
-pip3 install --quiet rich questionary
+pip3 install --quiet --break-system-packages rich questionary
 
-echo "==> Setting up audit log access (auditadmin group)..."
-getent group auditadmin >/dev/null || groupadd --system auditadmin
+# ── Audit log state dir ───────────────────────────────────────────────────────
+echo "==> Setting up audit log state directory..."
 usermod -aG auditadmin gpusync
 usermod -aG auditadmin slurmadmin
 install -d -o gpusync -g auditadmin -m 0750 "${STATE_DIR}"
 
+# ── Launcher ──────────────────────────────────────────────────────────────────
 echo "==> Installing launcher at ${BIN_PATH}..."
-cat > "${BIN_PATH}" << 'LAUNCHER'
+# The launcher uses env -i to sanitise the environment. Conda's bin dir must be
+# included explicitly so envbuilder's shutil.which("conda") succeeds at runtime.
+cat > "${BIN_PATH}" << LAUNCHER
 #!/bin/bash
-exec env -i \
-    HOME="$HOME" \
-    USER="$USER" \
-    LOGNAME="$LOGNAME" \
-    PATH="/usr/local/bin:/usr/bin:/bin" \
-    SSH_CLIENT="${SSH_CLIENT:-}" \
-    TERM="${TERM:-xterm}" \
-    PYTHONPATH="/opt/iit-gpu" \
+exec env -i \\
+    HOME="\$HOME" \\
+    USER="\$USER" \\
+    LOGNAME="\$LOGNAME" \\
+    PATH="${CONDA_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin" \\
+    SSH_CLIENT="\${SSH_CLIENT:-}" \\
+    TERM="\${TERM:-xterm}" \\
+    PYTHONPATH="/opt/iit-gpu" \\
+    CONDA_PREFIX_SHARED="${CONDA_PREFIX}" \\
+    NFS_ROOT="${NFS_ROOT}" \\
     python3 -m iitgpu --no-splash
 LAUNCHER
 chmod 0755 "${BIN_PATH}"
 
+# ── systemd service ───────────────────────────────────────────────────────────
 echo "==> Installing systemd service..."
 cp "${SCRIPT_DIR}/iit-gpu-audit.service" "${SERVICE_FILE}"
 systemctl daemon-reload
 systemctl enable iit-gpu-audit.service
 systemctl restart iit-gpu-audit.service
 
+# ── sshd drop-in ─────────────────────────────────────────────────────────────
 echo "==> Installing sshd drop-in..."
 install -d /etc/ssh/sshd_config.d
 cp "${SCRIPT_DIR}/sshd-gateway.conf" "${SSHD_DROP_IN}"
@@ -65,6 +136,7 @@ if ! sshd -t; then
 fi
 systemctl reload sshd
 
+# ── sudoers ───────────────────────────────────────────────────────────────────
 echo "==> Installing sudoers rules..."
 cp "${SCRIPT_DIR}/sudoers-gateway" "${SUDOERS_FILE}"
 chmod 0440 "${SUDOERS_FILE}"
@@ -73,10 +145,13 @@ if ! visudo -cf "${SUDOERS_FILE}"; then
     rm -f "${SUDOERS_FILE}"; exit 1
 fi
 
+# ── admin log viewer ──────────────────────────────────────────────────────────
 echo "==> Installing admin log viewer..."
 install -o root -g auditadmin -m 0750 "${SCRIPT_DIR}/iit-gpu-log" /usr/local/bin/iit-gpu-log
 
 echo ""
 echo "Installation complete."
-echo "  Add a user: usermod -aG gpuusers <username>"
+echo "  conda prefix : ${CONDA_PREFIX}"
+echo "  NFS root     : ${NFS_ROOT}"
+echo "  Add a user   : usermod -aG gpuusers <username>"
 echo "  Daemon status: systemctl status iit-gpu-audit"

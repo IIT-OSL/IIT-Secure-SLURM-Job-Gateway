@@ -28,10 +28,10 @@ def test_demo_mode_only_on_exact_1(monkeypatch):
 
 
 def test_jobs_dir_joins_root_and_subdir():
-    cfg = Config(nfs_root="/shared", jobs_subdir="jobs", demo_mode=False)
+    cfg = Config(nfs_root="/shared", jobs_subdir="jobs", demo_mode=False, conda_prefix="/shared/miniforge3")
     assert jobs_dir(cfg) == "/shared/jobs"
 
 
 def test_jobs_dir_custom():
-    cfg = Config(nfs_root="/data", jobs_subdir="slurm_jobs", demo_mode=False)
+    cfg = Config(nfs_root="/data", jobs_subdir="slurm_jobs", demo_mode=False, conda_prefix="/shared/miniforge3")
     assert jobs_dir(cfg) == "/data/slurm_jobs"

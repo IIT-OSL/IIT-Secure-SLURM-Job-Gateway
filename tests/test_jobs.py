@@ -139,8 +139,9 @@ def test_render_sbatch_path_conda_env_uses_source_activate(tmp_path):
     spec = _spec(conda_env="/shared/envs/pytorch-2.5", modules=[])
     folder = make_job_folder(str(tmp_path), spec)
     script = render_sbatch(spec, folder)
-    assert "source /shared/envs/pytorch-2.5/bin/activate" in script
-    assert "conda activate" not in script
+    # Path-based conda envs now source conda.sh then use conda activate (not source .../bin/activate)
+    assert "conda.sh" in script
+    assert "conda activate /shared/envs/pytorch-2.5" in script
 
 
 def test_render_sbatch_named_conda_env_uses_conda_activate(tmp_path):

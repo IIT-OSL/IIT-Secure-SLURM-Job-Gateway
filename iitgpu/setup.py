@@ -12,7 +12,7 @@ import questionary
 from questionary import Style
 
 from iitgpu import auditclient
-from iitgpu.config import Config, load_config
+from iitgpu.config import Config, conda_sh, load_config
 from iitgpu import slurm as _slurm
 from iitgpu.slurm import submit_job
 from iitgpu.ui import err, header, info, kv, ok, warn
@@ -87,12 +87,12 @@ def _run_env_setup(cfg: Config) -> None:
     auditclient.log("env_build_start", detail=f"{framework_key}:{env_name}")
     success, env_path = build_env(env_name, framework_key, req_path, cfg)
     if success:
-        # Save as kind="venv" so _load_venv_registry picks it up.
-        # Path-based conda envs activate identically via source {path}/bin/activate.
+        # Register as kind="conda" — envbuilder always uses `conda create -p`,
+        # so sbatch activation must go through conda (not plain venv source).
         from iitgpu.envs import EnvEntry, _save_venv_registry, _load_venv_registry
         existing = _load_venv_registry(cfg)
         existing = [e for e in existing if e.name != env_name]
-        existing.append(EnvEntry(name=env_name, kind="venv", path=env_path))
+        existing.append(EnvEntry(name=env_name, kind="conda", path=env_path))
         _save_venv_registry(cfg, existing)
         ok(f"Environment '{env_name}' registered.")
         auditclient.log("env_build_ok", detail=env_name)
@@ -134,25 +134,28 @@ def _run_data_upload(cfg: Config) -> None:
 def _build_smoke_test_script(env_path: str, cfg: Config) -> str:
     user = getpass.getuser()
     out_path = str(Path(cfg.nfs_root) / user / "smoke_test_%j.out")
-    return (
-        "#!/bin/bash\n"
-        "#SBATCH --job-name=smoke_test\n"
-        "#SBATCH --partition=gpu\n"
-        "#SBATCH --gres=gpu:1\n"
-        "#SBATCH --cpus-per-task=4\n"
-        "#SBATCH --mem=16G\n"
-        "#SBATCH --time=00:05:00\n"
-        f"#SBATCH --output={out_path}\n"
-        "\n"
-        f"source {env_path}/bin/activate\n"
-        "\n"
-        "python - <<'EOF'\n"
-        "import torch\n"
-        "print('CUDA available:', torch.cuda.is_available())\n"
-        "if torch.cuda.is_available():\n"
-        "    print('GPU:', torch.cuda.get_device_name(0))\n"
-        "EOF\n"
-    )
+    conda_sh_path = conda_sh(cfg)
+    lines = [
+        "#!/bin/bash",
+        "#SBATCH --job-name=smoke_test",
+        "#SBATCH --partition=gpu",
+        "#SBATCH --gres=gpu:1",
+        "#SBATCH --cpus-per-task=4",
+        "#SBATCH --mem=16G",
+        "#SBATCH --time=00:05:00",
+        f"#SBATCH --output={out_path}",
+        "",
+        f"[ -f '{conda_sh_path}' ] && source '{conda_sh_path}'",
+        f"conda activate {env_path}",
+        "",
+        "python3 - <<'PYEOF'",
+        "import torch",
+        "print('CUDA available:', torch.cuda.is_available())",
+        "if torch.cuda.is_available():",
+        "    print('GPU:', torch.cuda.get_device_name(0))",
+        "PYEOF",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _run_smoke_test(cfg: Config) -> None:

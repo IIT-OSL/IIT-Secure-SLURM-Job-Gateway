@@ -82,13 +82,16 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
         lines.append("")
 
     if spec.conda_env:
-        if spec.conda_env.startswith("/"):
-            # Path-based conda env (created with conda create -p /path)
-            lines.append(f"source {spec.conda_env}/bin/activate")
-        else:
-            lines.append("source $(conda info --base)/etc/profile.d/conda.sh")
-            lines.append(f"conda activate {spec.conda_env}")
-        lines.append("")
+        # Source conda.sh before activating — required in non-interactive bash
+        # (sbatch scripts). Without this, `conda activate` silently fails and the
+        # job runs in the base Python environment instead of the requested env.
+        # CONDA_PREFIX_SHARED is set by the launcher; fallback covers direct sbatch.
+        lines += [
+            '_conda_sh="${CONDA_PREFIX_SHARED:-/shared/miniforge3}/etc/profile.d/conda.sh"',
+            '[ -f "$_conda_sh" ] && source "$_conda_sh"',
+            f"conda activate {spec.conda_env}",
+            "",
+        ]
     elif spec.venv_path:
         lines.append(f"source {spec.venv_path}/bin/activate")
         lines.append("")

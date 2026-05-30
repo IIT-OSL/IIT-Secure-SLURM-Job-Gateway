@@ -8,6 +8,7 @@ class Config:
     nfs_root: str
     jobs_subdir: str
     demo_mode: bool
+    conda_prefix: str
 
 
 def load_config() -> Config:
@@ -15,6 +16,7 @@ def load_config() -> Config:
         nfs_root=os.environ.get("NFS_ROOT", "/shared"),
         jobs_subdir=os.environ.get("JOBS_SUBDIR", "jobs"),
         demo_mode=os.environ.get("DEMO_MODE", "0") == "1",
+        conda_prefix=os.environ.get("CONDA_PREFIX_SHARED", "/shared/miniforge3"),
     )
 
 
@@ -28,3 +30,8 @@ def models_dir(cfg: Config) -> str:
 
 def templates_dir(cfg: Config) -> str:
     return str(Path(cfg.nfs_root) / "templates").replace("\\", "/")
+
+
+def conda_sh(cfg: Config) -> str:
+    """Absolute path to conda.sh for sourcing in sbatch scripts and subprocesses."""
+    return str(Path(cfg.conda_prefix) / "etc" / "profile.d" / "conda.sh")
