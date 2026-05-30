@@ -127,6 +127,34 @@ def run_wizard() -> None:
     if script_path is None:
         return
 
+    # ── Step 3.5: Training configuration (train_cifar10.py) ──────────────────
+    training_flags = ""
+    if Path(script_path).name == "train_cifar10.py":
+        model_sel = questionary.select(
+            "Model:",
+            choices=[
+                "SmallResNet    — fast    (~2 min / 50 epochs, 0.6 GB VRAM, ~93-95% acc)",
+                "WideResNet-28-10 — accurate (~14 min / 50 epochs, 26 GB VRAM, ~95-96% acc)",
+            ],
+            style=_STYLE,
+        ).ask()
+        if model_sel is None:
+            return
+        if "WideResNet" in model_sel:
+            training_flags += " --model wideres"
+
+        epochs_str = questionary.text(
+            "Epochs:", default="50", style=_STYLE
+        ).ask()
+        if epochs_str is None:
+            return
+        try:
+            ep = max(1, int(epochs_str.strip()))
+            if ep != 50:
+                training_flags += f" --epochs {ep}"
+        except ValueError:
+            pass
+
     # ── Step 4: Arguments ─────────────────────────────────────────────────────
     raw_args = questionary.text(
         "Extra arguments (blank = none):", style=_STYLE
@@ -142,6 +170,8 @@ def run_wizard() -> None:
         run_cmd = f"python {script_path}"
     else:
         run_cmd = f"bash {script_path}"
+    if training_flags:
+        run_cmd += training_flags
     if args:
         run_cmd += f" {args}"
 
