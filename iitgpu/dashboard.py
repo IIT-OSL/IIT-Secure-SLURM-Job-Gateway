@@ -56,6 +56,30 @@ def _find_job_log(job_id: str, search_root: str) -> str | None:
     return None
 
 
+def _get_job_output(job_id: str, jdir: str, lines: int = 20) -> tuple[list[str], str | None]:
+    """Return (display_lines, log_path).
+
+    For failed jobs (non-empty .err) the error output is shown first so users
+    immediately see what went wrong without having to open Monitor separately.
+    """
+    log_path = _find_job_log(job_id, jdir)
+    if log_path is None:
+        return [], None
+
+    out_lines = _get_log_tail(log_path, lines=lines)
+
+    err_path = str(Path(log_path).with_suffix(".err"))
+    err_lines = _get_log_tail(err_path, lines=15)
+
+    if err_lines:
+        separator = ["", "[red]── stderr ──[/red]"]
+        combined = err_lines + (separator + out_lines if out_lines else [])
+    else:
+        combined = out_lines
+
+    return combined, log_path
+
+
 def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
     table = Table(
         show_header=True, header_style="bold cyan",
@@ -73,6 +97,7 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
             "green"  if j.state == "RUNNING"   else
             "yellow" if j.state == "PENDING"   else
             "cyan"   if j.state == "COMPLETED" else
+            "red"    if j.state == "FAILED"    else
             "dim"
         )
         prefix = "❯" if i == selected_idx else " "
@@ -110,8 +135,18 @@ def _build_layout(
             Panel("[dim]No jobs in queue.[/]", title="My Jobs", border_style="cyan")
         )
 
+    selected_job = jobs[selected_idx] if jobs and selected_idx < len(jobs) else None
     log_title = f"Output: {log_path}" if log_path else "Output"
-    log_body = "\n".join(log_lines) if log_lines else "[dim]Waiting for job to start...[/]"
+    if log_lines:
+        log_body = "\n".join(log_lines)
+    elif selected_job is None:
+        log_body = "[dim]No recent jobs found.[/]"
+    elif selected_job.state == "FAILED":
+        log_body = "[red]Job failed — output not yet visible (NFS sync). Press R to refresh.[/]"
+    elif selected_job.state == "COMPLETED":
+        log_body = "[dim]Job completed — output not yet visible (NFS sync). Press R to refresh.[/]"
+    else:
+        log_body = "[dim]Waiting for job to start...[/]"
     layout["log"].update(Panel(log_body, title=log_title, border_style="cyan"))
 
     layout["footer"].update(
@@ -162,13 +197,13 @@ def run_dashboard(job_id: str | None = None) -> None:
         with Live(console=console, refresh_per_second=1, screen=False) as live:
             while True:
                 selected_job = jobs[selected_idx] if jobs and selected_idx < len(jobs) else None
-                log_path: str | None = None
                 if selected_job:
-                    log_path = _find_job_log(selected_job.job_id, jdir)
+                    log_lines, log_path = _get_job_output(selected_job.job_id, jdir)
                 elif pinned_job_id is not None:
-                    log_path = _find_job_log(pinned_job_id, jdir)
+                    log_lines, log_path = _get_job_output(pinned_job_id, jdir)
+                else:
+                    log_lines, log_path = [], None
 
-                log_lines = _get_log_tail(log_path, lines=20) if log_path else []
                 live.update(_build_layout(jobs, selected_idx, log_lines, log_path))
 
                 key = _wait_key(_REFRESH_SECS)

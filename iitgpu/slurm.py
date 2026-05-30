@@ -118,7 +118,13 @@ def recent_jobs(search_root: str, limit: int = 2) -> list[QueueEntry]:
     for f in out_files:
         job_id = f.stem[len("slurm-"):]
         name = f.parent.name
-        result.append(QueueEntry(job_id, name, "COMPLETED", "gpu", "-", 1))
+        err_file = f.with_suffix(".err")
+        try:
+            failed = err_file.exists() and err_file.stat().st_size > 0
+        except OSError:
+            failed = False
+        state = "FAILED" if failed else "COMPLETED"
+        result.append(QueueEntry(job_id, name, state, "gpu", "-", 1))
     return result
 
 

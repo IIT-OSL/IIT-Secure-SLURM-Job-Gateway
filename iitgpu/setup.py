@@ -107,6 +107,7 @@ def _run_data_upload(cfg: Config) -> None:
     user = getpass.getuser()
     dest_dir = Path(cfg.nfs_root) / user / "data"
     dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir.chmod(0o777)
 
     info(f"Files will be copied to: {dest_dir}")
     while True:
