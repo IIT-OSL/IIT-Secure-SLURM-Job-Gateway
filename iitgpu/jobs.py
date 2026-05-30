@@ -74,6 +74,7 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
     lines += [
         f"#SBATCH --output={folder}/slurm-%j.out",
         f"#SBATCH --error={folder}/slurm-%j.err",
+        f"#SBATCH --chdir={folder}",
         "",
     ]
 

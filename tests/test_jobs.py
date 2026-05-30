@@ -71,6 +71,11 @@ def test_render_sbatch_partition(tmp_path):
     assert "#SBATCH --partition=gpu-long" in render_sbatch(_spec(partition="gpu-long"), folder)
 
 
+def test_render_sbatch_chdir_set_to_folder(tmp_path):
+    folder = make_job_folder(str(tmp_path), _spec())
+    assert f"#SBATCH --chdir={folder}" in render_sbatch(_spec(), folder)
+
+
 def test_render_sbatch_run_command(tmp_path):
     folder = make_job_folder(str(tmp_path), _spec(run_command="python train.py"))
     assert "python train.py" in render_sbatch(_spec(run_command="python train.py"), folder)
