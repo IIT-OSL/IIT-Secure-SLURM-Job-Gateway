@@ -48,7 +48,8 @@ def test_smoke_test_script_contains_cuda_check(tmp_path, monkeypatch):
     monkeypatch.setenv("NFS_ROOT", str(tmp_path))
     from iitgpu.setup import _build_smoke_test_script
     from iitgpu.config import load_config
-    script = _build_smoke_test_script("/shared/envs/pytorch-2.5", load_config())
+    out_dir = str(tmp_path / "jobs" / "testuser" / "smoke_test")
+    script = _build_smoke_test_script("/shared/envs/pytorch-2.5", load_config(), out_dir)
     assert "torch.cuda.is_available()" in script
     assert "#SBATCH --gres=gpu:1" in script
 
@@ -57,5 +58,7 @@ def test_smoke_test_script_output_under_shared(tmp_path, monkeypatch):
     monkeypatch.setenv("NFS_ROOT", str(tmp_path))
     from iitgpu.setup import _build_smoke_test_script
     from iitgpu.config import load_config
-    script = _build_smoke_test_script("/shared/envs/pytorch-2.5", load_config())
-    assert str(tmp_path) in script or "/shared" in script
+    out_dir = str(tmp_path / "jobs" / "testuser" / "smoke_test")
+    script = _build_smoke_test_script("/shared/envs/pytorch-2.5", load_config(), out_dir)
+    assert "slurm-%j.out" in script
+    assert out_dir in script
