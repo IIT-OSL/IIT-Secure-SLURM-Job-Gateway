@@ -182,6 +182,9 @@ def _run_smoke_test(cfg: Config) -> None:
     ) as tmp:
         tmp.write(script)
         tmp_path = tmp.name
+    # NamedTemporaryFile defaults to 0600 (owner-only). sbatch runs as slurmsvc
+    # (a different user) and can't open the script without world-read permission.
+    os.chmod(tmp_path, 0o644)
 
     user_dir = Path(cfg.nfs_root) / getpass.getuser()
     user_dir.mkdir(parents=True, exist_ok=True)
