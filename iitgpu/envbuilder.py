@@ -82,20 +82,21 @@ _PROG_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Lowercase keys so lookups are case-insensitive (pip may write kB or KB)
 _SIZE_MUL: dict[str, float] = {
-    "B": 1.0, "kB": 1_024.0, "MB": 1_048_576.0, "GB": 1_073_741_824.0,
+    "b": 1.0, "kb": 1_024.0, "mb": 1_048_576.0, "gb": 1_073_741_824.0,
 }
 _SPEED_MUL: dict[str, float] = {
-    "B/s": 1.0, "kB/s": 1_024.0, "MB/s": 1_048_576.0, "GB/s": 1_073_741_824.0,
+    "b/s": 1.0, "kb/s": 1_024.0, "mb/s": 1_048_576.0, "gb/s": 1_073_741_824.0,
 }
 
 
 def _to_bytes(val: float, unit: str) -> float:
-    return val * _SIZE_MUL.get(unit.upper() if unit.upper() in _SIZE_MUL else unit, 1.0)
+    return val * _SIZE_MUL.get(unit.lower(), 1.0)
 
 
 def _to_bps(val: float, unit: str) -> float:
-    return val * _SPEED_MUL.get(unit, 1.0)
+    return val * _SPEED_MUL.get(unit.lower(), 1.0)
 
 
 def _fmt_size(b: float) -> str:
@@ -185,28 +186,40 @@ def _run_pip_with_progress(
     label: str,
     env: dict | None = None,
 ) -> tuple[int, list[str]]:
-    """Run a pip command with per-file download stats: name, size, speed, %.
+    """Run a pip command showing a single live line: name, size, speed, %.
 
-    pip writes intermediate progress as \\r-delimited segments within each
-    \\n-terminated line. Splitting on \\r exposes every tick so the Rich bar
-    updates in real time rather than only at 100%.
+    Design:
+    - ONE progress task that resets for each new file (no row accumulation).
+    - Completed files are printed above the bar as static ✔ lines.
+    - Uses os.read() + select() for non-blocking reads so \r-delimited
+      intermediate ticks arrive in real time (not only at download end).
+    - PYTHONUNBUFFERED=1 forces pip (itself a Python process) to flush stdout
+      after every write rather than line-buffering into the pipe.
+    - Small kB packages: header is shown immediately; when the completion
+      line arrives (often the very next read) it is printed as done.
     """
+    import os
+    import select as _select
+
+    # Force pip to flush stdout immediately on every write
+    pip_env = {**(env or {}), "PYTHONUNBUFFERED": "1"}
+
     output_lines: list[str] = []
-    task_map: dict[str, TaskID] = {}   # wheel filename → task id
-    current_pkg: str | None = None
+    current_pkg:     str | None = None
+    current_total_b: float = 0.0
 
     with Progress(
         SpinnerColumn(),
-        TextColumn("[bold cyan]{task.fields[pkg]:<44}"),
+        TextColumn("[bold cyan]{task.fields[pkg]:<42}"),
         BarColumn(bar_width=28, complete_style="green", finished_style="bold green"),
-        TextColumn("[yellow]{task.fields[sizes]:<24}"),
-        TextColumn("[green]{task.fields[speed]:<12}"),
+        TextColumn("[yellow]{task.fields[sizes]:<22}"),
+        TextColumn("[green]{task.fields[speed]:<11}"),
         TextColumn("[dim]{task.fields[eta]}"),
         console=console,
         transient=False,
     ) as prog:
-        header_id = prog.add_task(
-            label, total=None,
+        file_task = prog.add_task(
+            label, total=100,
             pkg=f"[bold]{label}[/bold]", sizes="", speed="", eta="",
         )
 
@@ -214,16 +227,38 @@ def _run_pip_with_progress(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
+            bufsize=0,          # no Python-level read buffering
+            env=pip_env,
         )
         assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        raw_buf = b""
 
-        for raw_line in proc.stdout:
-            # Split on \r to get every intermediate pip progress tick,
-            # not just the final 100% value that ends the \n-terminated line.
-            for seg in raw_line.split("\r"):
+        while True:
+            try:
+                ready, _, _ = _select.select([fd], [], [], 0.05)
+            except (ValueError, OSError):
+                break
+
+            if ready:
+                try:
+                    chunk = os.read(fd, 8192)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                raw_buf += chunk
+            elif proc.poll() is not None:
+                break
+            else:
+                continue
+
+            # Decode and split on both \r and \n to get every pip tick
+            text   = raw_buf.decode("utf-8", errors="replace")
+            parts  = re.split(r"[\r\n]", text)
+            raw_buf = parts[-1].encode("utf-8")   # keep incomplete segment
+
+            for seg in parts[:-1]:
                 seg = seg.strip()
                 if not seg:
                     continue
@@ -232,46 +267,60 @@ def _run_pip_with_progress(
                 # ── New file download starting ─────────────────────────
                 m = _DL_HEADER_RE.search(seg)
                 if m:
-                    filename  = m.group(1)
-                    size_val  = float(m.group(2))
-                    size_unit = m.group(3)
-                    total_b   = _to_bytes(size_val, size_unit)
-                    name      = _pkg_display_name(filename)
-                    current_pkg = filename
+                    # Print the previous file as done before starting next
+                    if current_pkg:
+                        prog.print(
+                            f"  [bold green]✔[/]  {current_pkg:<42}"
+                            f"  [dim]{_fmt_size(current_total_b)}[/]"
+                        )
+                    filename        = m.group(1)
+                    current_total_b = _to_bytes(float(m.group(2)), m.group(3))
+                    current_pkg     = _pkg_display_name(filename)
 
-                    tid = prog.add_task(
-                        name,
-                        total=total_b,
-                        pkg=name,
-                        sizes=f"0.0 / {_fmt_size(total_b)}",
+                    prog.update(
+                        file_task,
+                        completed=0,
+                        total=max(current_total_b, 1),
+                        pkg=current_pkg,
+                        sizes=f"0 / {_fmt_size(current_total_b)}",
                         speed="—",
                         eta="...",
                     )
-                    task_map[filename] = tid
-                    prog.update(header_id, pkg=f"[bold]Downloading  {name}[/bold]")
                     continue
 
-                # ── Live progress tick ─────────────────────────────────
+                # ── Live progress tick (updates the single bar in place) ─
                 m = _PROG_RE.search(seg)
-                if m and current_pkg and current_pkg in task_map:
+                if m:
                     done_b  = _to_bytes(float(m.group(1)), m.group(3))
                     total_b = _to_bytes(float(m.group(2)), m.group(3))
                     bps     = _to_bps(float(m.group(4)), m.group(5))
                     eta_s   = m.group(6) or ""
+                    current_total_b = total_b
 
                     prog.update(
-                        task_map[current_pkg],
+                        file_task,
                         completed=done_b,
                         total=total_b,
                         sizes=f"{_fmt_size(done_b)} / {_fmt_size(total_b)}",
                         speed=_fmt_speed(bps),
-                        eta=f"eta {eta_s}" if eta_s else "[bold green]done[/]",
+                        eta=f"eta {eta_s}" if eta_s else "done",
                     )
                     continue
 
-                # ── Install phase ──────────────────────────────────────
+                # ── Install phase (all downloads done) ────────────────
                 if "installing collected" in seg.lower():
-                    prog.update(header_id, pkg="[bold]Installing packages…[/bold]")
+                    if current_pkg:
+                        prog.print(
+                            f"  [bold green]✔[/]  {current_pkg:<42}"
+                            f"  [dim]{_fmt_size(current_total_b)}[/]"
+                        )
+                        current_pkg = None
+                    prog.update(
+                        file_task,
+                        completed=0, total=1,
+                        pkg="[bold]Installing…[/bold]",
+                        sizes="", speed="", eta="",
+                    )
 
                 if "successfully installed" in seg.lower():
                     prog.update(
