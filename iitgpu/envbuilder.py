@@ -440,6 +440,68 @@ def _envs_root(cfg: Config) -> Path:
 
 # ── Main build function ────────────────────────────────────────────────────────
 
+# ── Post-install GPU smoke check ───────────────────────────────────────────────
+
+# Inline Python verified inside the newly built env.  No extra deployed files.
+_SMOKE_CHECK_PY = """\
+import sys, torch
+print(f'  torch {torch.__version__}', flush=True)
+avail = torch.cuda.is_available()
+print(f'  cuda available: {avail}', flush=True)
+if not avail:
+    print('  [SKIP] no GPU on this node -- GPU smoke check skipped', flush=True)
+    sys.exit(0)
+cap = torch.cuda.get_device_capability()
+name = torch.cuda.get_device_name(0)
+print(f'  device: {name}  capability: sm_{cap[0]}{cap[1]}', flush=True)
+if cap < (12, 0):
+    print(
+        f'  FATAL: device capability sm_{cap[0]}{cap[1]} < sm_120. '
+        f'The installed wheel was built for an older CUDA arch. '
+        f'Re-run with PyTorch 2.7 + cu128 index.',
+        file=sys.stderr, flush=True,
+    )
+    sys.exit(2)
+print('  RTX 5090 / sm_120 confirmed -- running torch.compile matmul...', flush=True)
+a = torch.randn(64, 64, device='cuda')
+fn = torch.compile(lambda x: x @ x)
+fn(a)
+print('  torch.compile matmul OK', flush=True)
+"""
+
+
+def _smoke_check_pytorch(python_bin: str, pip_env: dict) -> bool:
+    """Run a small torch CUDA sanity check inside the new env.
+
+    Returns True on pass or skip (no GPU on this node), False on failure.
+    Login node has no GPU so a missing-CUDA result is a skip, not a failure.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            [python_bin, "-c", _SMOKE_CHECK_PY],
+            capture_output=True, text=True, timeout=120, env=pip_env,
+        )
+        for line in result.stdout.splitlines():
+            if "[SKIP]" in line:
+                warn(line.strip())
+            else:
+                info(line.strip())
+        if result.returncode == 0:
+            return True
+        err("GPU smoke check FAILED:")
+        for line in result.stderr.splitlines():
+            err(f"  {line}")
+        return False
+    except subprocess.TimeoutExpired:
+        warn("GPU smoke check timed out (>120 s) — skipping")
+        return True  # Non-fatal; don't block env creation
+    except OSError as exc:
+        warn(f"GPU smoke check could not run: {exc}")
+        return True
+
+
+
 def build_env(
     name: str,
     framework_key: str,
@@ -514,7 +576,17 @@ def build_env(
             info("If the index has no matching wheel, try a different CUDA build or use 'bare' and install manually.")
             return False, ""
 
-    # ── Step 3: requirements.txt ───────────────────────────────────────────────
+    # ── Step 2b: GPU smoke check (CUDA capability + torch.compile) ───────────
+    _pytorch_keys = {k for k in FRAMEWORK_PACKAGES if k.startswith("pytorch")}
+    if framework_key in _pytorch_keys and packages:
+        python_bin = str(Path(env_path) / "bin" / "python3")
+        info("Running GPU smoke check (CUDA capability + torch.compile) ...")
+        if not _smoke_check_pytorch(python_bin, pip_env):
+            err("Smoke check failed — env built but may not work on the RTX 5090.")
+            err("Likely cause: wrong CUDA build wheel. Ensure pytorch-2.7 (cu128) is selected.")
+            return False, env_path  # Return path so user can inspect/fix manually
+
+        # ── Step 3: requirements.txt ───────────────────────────────────────────────
     if requirements_path:
         info(f"Installing requirements from {requirements_path} ...")
         rc, lines = _run_pip_with_progress(
