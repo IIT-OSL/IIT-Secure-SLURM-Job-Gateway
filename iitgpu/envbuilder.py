@@ -220,7 +220,10 @@ def _run_pip_with_progress(
     for arg in cmd:
         raw_cmd.append(arg)
         if arg == "install" and not inserted:
-            raw_cmd += ["--progress-bar", "raw"]
+            # --progress-bar raw: machine-readable Progress X of Y\n lines
+            # -v: verbose install output so the log window shows per-package
+            #     activity during the NFS linking phase (otherwise silent)
+            raw_cmd += ["--progress-bar", "raw", "-v"]
             inserted = True
 
     pip_env = {**(env or {}), "PYTHONUNBUFFERED": "1"}
@@ -255,11 +258,12 @@ def _run_pip_with_progress(
     # Build Progress separately so we can embed it inside Live + Group
     progress = Progress(
         SpinnerColumn(),
-        TextColumn("[bold cyan]{task.fields[pkg]:<42}"),
-        BarColumn(bar_width=28, complete_style="green", finished_style="bold green"),
+        TextColumn("[bold cyan]{task.fields[pkg]:<38}"),
+        BarColumn(bar_width=26, complete_style="green", finished_style="bold green"),
         TextColumn("[yellow]{task.fields[sizes]:<22}"),
         TextColumn("[green]{task.fields[speed]:<11}"),
-        TextColumn("[dim]{task.fields[eta]}"),
+        TextColumn("[dim]{task.fields[eta]:<12}"),
+        TimeElapsedColumn(),
         console=console,
     )
     file_task = progress.add_task(
