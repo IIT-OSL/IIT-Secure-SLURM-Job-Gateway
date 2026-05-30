@@ -24,14 +24,15 @@ from iitgpu.ui import console, err, info, ok, warn
 
 # pip install args per framework key.
 #
-# RTX 5090 (sm_120 / Blackwell) requires PyTorch 2.6+.
-# PyTorch 2.5 and earlier have no compiled kernels for sm_120 — CUDA will
-# appear available but crash on the first kernel call.  Driver backward
-# compatibility only covers CUDA runtime ABI, not GPU architecture support.
+# RTX 5090 (sm_120 / Blackwell) requires PyTorch 2.6 built against CUDA 12.8
+# (cu128).  The cu126 build tops out at sm_90 — CUDA appears available but
+# crashes on the first kernel call.  cu128 is the first build that ships
+# sm_120 kernels.  The system driver (595.x / CUDA 13.x) is backward
+# compatible with cu128 at the CUDA runtime API level.
 FRAMEWORK_PACKAGES: dict[str, list[str]] = {
     "pytorch-2.6": [
         "torch==2.6.* torchvision torchaudio "
-        "--index-url https://download.pytorch.org/whl/cu126"
+        "--index-url https://download.pytorch.org/whl/cu128"
     ],
     "pytorch-2.5": [
         "torch==2.5.* torchvision torchaudio "
@@ -48,7 +49,7 @@ FRAMEWORK_PACKAGES: dict[str, list[str]] = {
 
 # Human-readable labels shown in the picker
 FRAMEWORK_LABELS: dict[str, str] = {
-    "pytorch-2.6":     "PyTorch 2.6  (CUDA 12.6 — RTX 5090 / sm_120 native) [recommended]",
+    "pytorch-2.6":     "PyTorch 2.6  (CUDA 12.8 — RTX 5090 / sm_120 native) [recommended]",
     "pytorch-2.5":     "PyTorch 2.5  (CUDA 12.4 — no RTX 5090 sm_120 support)",
     "pytorch-2.4":     "PyTorch 2.4  (CUDA 12.1)",
     "tensorflow-2.18": "TensorFlow 2.18  (CUDA 12)",

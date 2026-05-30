@@ -16,7 +16,7 @@ def test_framework_packages_contains_pytorch_26():
     assert "pytorch-2.6" in FRAMEWORK_PACKAGES
     assert "pytorch-2.6" in FRAMEWORK_LABELS
     pkg = " ".join(FRAMEWORK_PACKAGES["pytorch-2.6"])
-    assert "cu126" in pkg
+    assert "cu128" in pkg
     assert "2.6" in pkg
 
 
