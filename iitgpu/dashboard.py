@@ -1,7 +1,6 @@
 # iitgpu/dashboard.py
 from __future__ import annotations
 
-import getpass
 import select
 import sys
 import time
@@ -11,12 +10,11 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich import box
 
 from iitgpu.config import load_config, jobs_dir
 from iitgpu.slurm import NodeStats, QueueEntry, cancel, get_node_stats, queue, recent_jobs
-from iitgpu.ui import console, err, info, ok
+from iitgpu.ui import console, err, ok
 
 try:
     import termios
@@ -25,15 +23,15 @@ try:
 except ImportError:
     _HAS_TERMIOS = False
 
-_DATA_REFRESH_SECS = 2.0   # how often to re-query squeue / scontrol
-_DISPLAY_FPS       = 4     # Rich redraws per second (smooth animation, no extra I/O)
+_DATA_REFRESH_SECS = 2.0
+_DISPLAY_FPS       = 4
 _COMPLETED_HISTORY = 2
+_SPINNERS          = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
 
 def _slurm_time_to_secs(t: str) -> int | None:
-    """Parse SLURM time string (e.g. '1:23:45', '2-03:00:00') to seconds."""
     if not t or t in ("N/A", "UNLIMITED", "NOT_SET", "Partition_Limit", "-"):
         return None
     try:
@@ -59,32 +57,18 @@ def _fmt_duration(secs: int) -> str:
     return f"{m}:{s:02d}"
 
 
-def _progress_bar(elapsed_secs: int, limit_secs: int | None, width: int = 10) -> str:
-    if limit_secs is None or limit_secs == 0:
-        # No time limit — show a moving scanner to prove the bar is live
-        pos = elapsed_secs % (width * 2)
-        if pos >= width:
-            pos = width * 2 - pos
-        bar = "─" * pos + "█" + "─" * (width - pos - 1)
-        return f"[green]{bar}[/] [dim]running[/]"
-    pct = min(elapsed_secs / limit_secs, 1.0)
-    filled = int(pct * width)
-    color = "green" if pct < 0.75 else "yellow" if pct < 0.92 else "red"
-    bar = "█" * filled + "░" * (width - filled)
-    return f"[{color}]{bar} {pct*100:3.0f}%[/]"
+# ── Bar helper (shared by cluster panel and hardware stats) ───────────────────
 
-
-def _fmt_eta(elapsed_secs: int, limit_secs: int | None) -> str:
-    if limit_secs is None:
-        return "[dim]no limit[/]"
-    remaining = max(0, limit_secs - elapsed_secs)
-    return f"[dim]ETA[/] {_fmt_duration(remaining)}"
+def _hw_bar(pct: float, width: int = 22) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = round(pct / 100 * width)
+    color = "red" if pct >= 90 else "yellow" if pct >= 70 else "green"
+    return f"[{color}]{'█' * filled}[/][dim]{'░' * (width - filled)}[/]"
 
 
 # ── Log helpers ───────────────────────────────────────────────────────────────
 
 def _get_log_tail(log_path: str, lines: int = 20) -> list[str]:
-    """Return the last `lines` lines of a log file. Returns [] if file missing."""
     p = Path(log_path)
     if not p.exists():
         return []
@@ -96,7 +80,6 @@ def _get_log_tail(log_path: str, lines: int = 20) -> list[str]:
 
 
 def _find_job_log(job_id: str, search_root: str) -> str | None:
-    """Search for slurm-{job_id}.out under search_root."""
     target = f"slurm-{job_id}.out"
     for p in Path(search_root).rglob(target):
         return str(p)
@@ -104,65 +87,47 @@ def _find_job_log(job_id: str, search_root: str) -> str | None:
 
 
 def _get_job_output(job_id: str, jdir: str, lines: int = 20) -> tuple[list[str], str | None]:
-    """Return (display_lines, log_path). Prepends stderr for failed jobs."""
     log_path = _find_job_log(job_id, jdir)
     if log_path is None:
         return [], None
-
     out_lines = _get_log_tail(log_path, lines=lines)
-
     err_path = str(Path(log_path).with_suffix(".err"))
     err_lines = _get_log_tail(err_path, lines=15)
-
     if err_lines:
-        separator = ["", "[dim]── stdout ──[/dim]"]
-        combined = err_lines + (separator + out_lines if out_lines else [])
+        combined = err_lines + (["", "[dim]── stdout ──[/dim]"] + out_lines if out_lines else [])
     else:
         combined = out_lines
-
     return combined, log_path
 
 
-# ── Cluster panel ─────────────────────────────────────────────────────────────
+# ── Cluster panel (compact summary bar) ──────────────────────────────────────
 
 def _build_cluster_panel(stats: NodeStats | None) -> Panel:
     if stats is None:
         body = "[dim]Cluster stats unavailable[/]"
     else:
         state = stats.state.split("+")[0]
-        state_color = "green" if "IDLE" in state else "yellow" if "ALLOC" in state else "red"
+        sc = "green" if "IDLE" in state else "yellow" if "ALLOC" in state else "red"
 
         if stats.live_stats:
-            # Real nvidia-smi / /proc data — show actual utilization
-            gpu_color = "yellow" if stats.gpu_util > 30 else "red" if stats.gpu_util > 80 else "green"
-            gpu_mem_gb = stats.gpu_mem_used_mb / 1024
-            gpu_total_gb = stats.gpu_mem_total_mb / 1024
+            gpu_color = "red" if stats.gpu_util >= 90 else "yellow" if stats.gpu_util >= 70 else "green"
             gpu_str = (
                 f"GPU [bold {gpu_color}]{stats.gpu_util}%[/] "
-                f"[dim]{gpu_mem_gb:.1f}/{gpu_total_gb:.0f}GB[/] "
-                f"[dim]{stats.gpu_temp}°C {stats.gpu_power_w:.0f}W[/]"
+                f"[dim]{stats.gpu_mem_used_mb/1024:.1f}/{stats.gpu_mem_total_mb/1024:.0f}GB "
+                f"{stats.gpu_temp}°C {stats.gpu_power_w:.0f}W[/]"
             )
-            cpu_color = "yellow" if stats.cpu_util > 70 else "red" if stats.cpu_util > 90 else "green"
-            cpu_str = f"CPU [bold {cpu_color}]{stats.cpu_util}%[/] [dim]load {stats.cpu_load:.1f}[/]"
-            mem_used = stats.mem_used_mb / 1024
-            mem_total = stats.mem_total_mb / 1024
-            mem_pct = (stats.mem_used_mb / stats.mem_total_mb * 100) if stats.mem_total_mb else 0
-            mem_color = "yellow" if mem_pct > 70 else "red" if mem_pct > 90 else "green"
-            mem_str = f"RAM [bold {mem_color}]{mem_used:.0f}/{mem_total:.0f} GB[/]"
+            cpu_color = "red" if stats.cpu_util >= 90 else "yellow" if stats.cpu_util >= 70 else "green"
+            cpu_str = f"CPU [bold {cpu_color}]{stats.cpu_util}%[/] [dim]load {stats.cpu_load:.2f}[/]"
+            mem_pct = stats.mem_used_mb / stats.mem_total_mb * 100 if stats.mem_total_mb else 0
+            mem_color = "red" if mem_pct >= 90 else "yellow" if mem_pct >= 70 else "green"
+            mem_str = f"RAM [bold {mem_color}]{stats.mem_used_mb/1024:.0f}/{stats.mem_total_mb/1024:.0f} GB[/]"
         else:
-            # Fallback: SLURM allocation data only
             gpu_color = "yellow" if stats.gpu_alloc > 0 else "green"
             gpu_str = f"GPU [bold {gpu_color}]{stats.gpu_alloc}/{stats.gpu_total} alloc[/]"
-            cpu_pct = (stats.cpu_alloc / stats.cpu_total * 100) if stats.cpu_total else 0
-            cpu_str = f"CPU [bold]{stats.cpu_alloc}/{stats.cpu_total}[/] [dim]({cpu_pct:.0f}%)[/] load {stats.cpu_load:.1f}"
-            mem_alloc = stats.mem_alloc_mb / 1024
-            mem_total = stats.mem_total_mb / 1024
-            mem_str = f"RAM [bold]{mem_alloc:.0f}/{mem_total:.0f} GB[/] [dim]alloc[/]"
+            cpu_str = f"CPU [bold]{stats.cpu_alloc}/{stats.cpu_total}[/] [dim]load {stats.cpu_load:.2f}[/]"
+            mem_str = f"RAM [bold]{stats.mem_alloc_mb//1024}/{stats.mem_total_mb//1024} GB[/] [dim]alloc[/]"
 
-        body = (
-            f"  iit-MS-7E06  [{state_color}]{state}[/]"
-            f"  │  {gpu_str}  │  {cpu_str}  │  {mem_str}"
-        )
+        body = f"  iit-MS-7E06  [{sc}]{state}[/]  │  {gpu_str}  │  {cpu_str}  │  {mem_str}"
 
     return Panel(body, title="[bold]Cluster: iit[/bold]", border_style="blue", height=3)
 
@@ -174,16 +139,15 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
         show_header=True, header_style="bold cyan",
         box=box.SIMPLE, expand=True, show_edge=False,
     )
-    table.add_column("", width=2)
-    table.add_column("ID", style="magenta", width=7, no_wrap=True)
-    table.add_column("User", width=8, no_wrap=True)
-    table.add_column("Name", width=18, no_wrap=True)
-    table.add_column("State", width=11, no_wrap=True)
-    table.add_column("Progress", width=20, no_wrap=True)
-    table.add_column("Time", width=8, no_wrap=True)
-    table.add_column("ETA", width=10, no_wrap=True)
-    table.add_column("Part", width=5, no_wrap=True)
+    table.add_column("",        width=2)
+    table.add_column("ID",      style="magenta", width=7,  no_wrap=True)
+    table.add_column("User",    width=8,  no_wrap=True)
+    table.add_column("Name",    width=22, no_wrap=True)
+    table.add_column("State",   width=14, no_wrap=True)
+    table.add_column("Elapsed", width=9,  no_wrap=True)
+    table.add_column("Part",    width=5,  no_wrap=True)
 
+    spin = _SPINNERS[int(time.monotonic() * _DISPLAY_FPS) % len(_SPINNERS)]
     added_done_sep = False
 
     for i, j in enumerate(jobs):
@@ -193,46 +157,35 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
         if is_done and not added_done_sep:
             added_done_sep = True
             table.add_row(
-                "", "[dim]──[/]", "[dim]──────[/]", "[dim]─── recent ──────[/]",
-                "[dim]─────────[/]", "[dim]────────────────────[/]",
-                "[dim]──────[/]", "[dim]────────[/]", "[dim]───[/]",
+                "", "[dim]──[/]", "[dim]──────[/]",
+                "[dim]─── recent ──────────────[/]",
+                "[dim]────────────[/]", "[dim]───────[/]", "[dim]───[/]",
             )
 
         prefix = "[bold cyan]❯[/]" if is_selected else " "
-        elapsed = _slurm_time_to_secs(j.time_used) or 0
-        limit   = _slurm_time_to_secs(j.time_limit)
 
         if is_done:
             s_color = "cyan" if j.state == "COMPLETED" else "red"
-            if elapsed > 0 and limit:
-                done_bar = _progress_bar(elapsed, limit)
-            elif elapsed > 0:
-                done_bar = f"[dim]{'█' * 10} done[/]"
-            else:
-                done_bar = f"[dim]{'─' * 14}[/]"
-            elapsed_str = _fmt_duration(elapsed) if elapsed > 0 else j.time_used
+            elapsed_secs = _slurm_time_to_secs(j.time_used) or 0
+            elapsed_str = _fmt_duration(elapsed_secs) if elapsed_secs > 0 else j.time_used
             table.add_row(
                 prefix,
                 f"[dim strike]{j.job_id}[/]",
                 f"[dim strike]{j.user[:7]}[/]",
-                f"[dim strike]{j.name[:17]}[/]",
+                f"[dim strike]{j.name[:21]}[/]",
                 f"[{s_color} strike]{j.state}[/]",
-                f"[dim]{done_bar}[/]",
                 f"[dim strike]{elapsed_str}[/]",
-                "",
                 f"[dim strike]{j.partition}[/]",
             )
         elif j.state in ("RUNNING", "COMPLETING"):
-            s_label = "RUNNING" if j.state == "RUNNING" else "[dim]FINISHING[/]"
+            label = "RUNNING" if j.state == "RUNNING" else "FINISHING"
             table.add_row(
                 prefix,
                 j.job_id,
                 j.user[:7],
-                j.name[:17],
-                f"[green]{s_label}[/]",
-                _progress_bar(elapsed, limit),
+                j.name[:21],
+                f"[green]{spin} {label}[/]",
                 f"[dim]{j.time_used}[/]",
-                _fmt_eta(elapsed, limit),
                 f"[dim]{j.partition}[/]",
             )
         elif j.state == "PENDING":
@@ -240,10 +193,9 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
                 prefix,
                 j.job_id,
                 j.user[:7],
-                j.name[:17],
-                "[yellow]PENDING[/]",
-                "[dim]░░░░░░░░░░ queued[/]",
-                "[dim]─[/]", "[dim]─[/]",
+                j.name[:21],
+                "[yellow]⋯ PENDING[/]",
+                "[dim]─[/]",
                 f"[dim]{j.partition}[/]",
             )
         else:
@@ -251,17 +203,16 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
                 prefix,
                 j.job_id,
                 j.user[:7],
-                j.name[:17],
+                j.name[:21],
                 f"[dim]{j.state}[/]",
-                "[dim]──────────────────[/]",
-                f"[dim]{j.time_used}[/]", "",
+                f"[dim]{j.time_used}[/]",
                 f"[dim]{j.partition}[/]",
             )
 
     return table
 
 
-# ── Layout ────────────────────────────────────────────────────────────────────
+# ── Dashboard layout ──────────────────────────────────────────────────────────
 
 def _build_layout(
     jobs: list[QueueEntry],
@@ -275,9 +226,9 @@ def _build_layout(
 
     layout.split_column(
         Layout(name="cluster", size=3),
-        Layout(name="jobs", size=jobs_height),
+        Layout(name="jobs",    size=jobs_height),
         Layout(name="log"),
-        Layout(name="footer", size=1),
+        Layout(name="footer",  size=1),
     )
 
     layout["cluster"].update(_build_cluster_panel(node_stats))
@@ -313,6 +264,124 @@ def _build_layout(
     return layout
 
 
+# ── Hardware stats view ───────────────────────────────────────────────────────
+
+def _build_hw_panel(stats: NodeStats | None) -> Panel:
+    lines = [""]
+
+    if stats is None:
+        lines.append("  [dim]SLURM node unavailable[/]")
+    elif stats.live_stats:
+        # ── GPU ───────────────────────────────────────────────────────────
+        gpu_pct   = float(stats.gpu_util)
+        vram_pct  = stats.gpu_mem_used_mb / stats.gpu_mem_total_mb * 100 if stats.gpu_mem_total_mb else 0
+        lines.append("  [bold]GPU[/bold]")
+        lines.append(
+            f"  Utilization   {_hw_bar(gpu_pct)}"
+            f"  [bold]{gpu_pct:3.0f}%[/bold]"
+            f"   [dim]{stats.gpu_temp}°C  {stats.gpu_power_w:.0f} W[/dim]"
+        )
+        lines.append(
+            f"  VRAM          {_hw_bar(vram_pct)}"
+            f"  [bold]{stats.gpu_mem_used_mb/1024:.1f} / {stats.gpu_mem_total_mb/1024:.0f} GB[/bold]"
+        )
+        lines.append("")
+
+        # ── CPU ───────────────────────────────────────────────────────────
+        cpu_pct = float(stats.cpu_util)
+        lines.append(f"  [bold]CPU[/bold]  [dim]({stats.cpu_total} cores)[/dim]")
+        lines.append(
+            f"  Utilization   {_hw_bar(cpu_pct)}"
+            f"  [bold]{cpu_pct:3.0f}%[/bold]"
+        )
+        lines.append(
+            f"  Load avg      [dim]{stats.cpu_load:.2f}  ·  {stats.cpu_load5:.2f}[/dim]"
+            f"   [dim](1 / 5 min)[/dim]"
+        )
+        lines.append("")
+
+        # ── RAM ───────────────────────────────────────────────────────────
+        mem_pct = stats.mem_used_mb / stats.mem_total_mb * 100 if stats.mem_total_mb else 0
+        lines.append("  [bold]RAM[/bold]")
+        lines.append(
+            f"  Used          {_hw_bar(mem_pct)}"
+            f"  [bold]{stats.mem_used_mb/1024:.1f} / {stats.mem_total_mb/1024:.0f} GB[/bold]"
+            f"  [dim]({mem_pct:.0f}%)[/dim]"
+        )
+    else:
+        lines.append("  [yellow]Live stats unavailable[/yellow]  "
+                     "[dim]— iit-gpu-stats-writer not running on iit-MS-7E06[/dim]")
+        lines.append("")
+        lines.append("  [dim]Start it with:  python3 /usr/local/bin/iit-gpu-stats-writer &[/dim]")
+
+    lines.append("")
+
+    # ── SLURM allocation ──────────────────────────────────────────────────────
+    if stats:
+        node_state = stats.state.split("+")[0]
+        sc = "green" if "IDLE" in node_state else "yellow" if "ALLOC" in node_state else "red"
+        alloc_parts = [
+            f"GPU {stats.gpu_alloc}/{stats.gpu_total}",
+            f"CPU {stats.cpu_alloc}/{stats.cpu_total}",
+            f"RAM {stats.mem_alloc_mb//1024}/{stats.mem_total_mb//1024} GB",
+        ]
+        lines.append(
+            f"  [bold]SLURM[/bold]   [{sc}]{node_state}[/]  ·  "
+            + "  ·  ".join(alloc_parts)
+        )
+
+    lines.append("")
+    return Panel("\n".join(lines), title="[bold]Hardware Stats: iit-MS-7E06[/bold]", border_style="blue")
+
+
+def run_hardware_stats() -> None:
+    """Live hardware utilization view: GPU, CPU, RAM, SLURM. Q to quit."""
+    _stats:   list[NodeStats | None] = [None]
+    _last_ts: list[float]            = [0.0]
+
+    def _refresh() -> None:
+        _stats[0]   = get_node_stats()
+        _last_ts[0] = time.monotonic()
+
+    _refresh()
+
+    old_settings = None
+    if _HAS_TERMIOS and sys.stdin.isatty():
+        try:
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        except termios.error:
+            old_settings = None
+
+    try:
+        with Live(console=console, refresh_per_second=_DISPLAY_FPS, screen=True) as live:
+            while True:
+                live.update(_build_hw_panel(_stats[0]))
+
+                key = None
+                if _HAS_TERMIOS:
+                    try:
+                        r, _, _ = select.select([sys.stdin], [], [], 1.0 / _DISPLAY_FPS)
+                        if r:
+                            key = sys.stdin.read(1).lower()
+                    except (OSError, ValueError):
+                        pass
+                else:
+                    time.sleep(1.0 / _DISPLAY_FPS)
+
+                if key == "q":
+                    break
+
+                if time.monotonic() - _last_ts[0] >= _DATA_REFRESH_SECS:
+                    _refresh()
+    finally:
+        if old_settings is not None:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            except termios.error:
+                pass
+
+
 # ── Keyboard ──────────────────────────────────────────────────────────────────
 
 def _wait_key(timeout: float) -> str | None:
@@ -331,7 +400,6 @@ def _wait_key(timeout: float) -> str | None:
 # ── Merged job list ───────────────────────────────────────────────────────────
 
 def _merged_jobs(jdir: str) -> list[QueueEntry]:
-    """Live queue + last N completed jobs, live jobs first."""
     live = queue()
     live_ids = {j.job_id for j in live}
     done = [j for j in recent_jobs(jdir, limit=_COMPLETED_HISTORY) if j.job_id not in live_ids]
@@ -355,11 +423,10 @@ def run_dashboard(job_id: str | None = None) -> None:
                 selected_idx = i
                 break
 
-    # ── Cached data (refreshed every _DATA_REFRESH_SECS, not every frame) ──────
-    _node_stats:    list[NodeStats | None] = [None]
-    _log_lines:     list[list[str]]        = [[]]
-    _log_path_ref:  list[str | None]       = [None]
-    _last_data_ts:  list[float]            = [0.0]
+    _node_stats:   list[NodeStats | None] = [None]
+    _log_lines:    list[list[str]]        = [[]]
+    _log_path_ref: list[str | None]       = [None]
+    _last_data_ts: list[float]            = [0.0]
 
     def _refresh_data() -> None:
         nonlocal jobs, selected_idx
@@ -377,7 +444,7 @@ def run_dashboard(job_id: str | None = None) -> None:
         _log_path_ref[0] = path
         _last_data_ts[0] = time.monotonic()
 
-    _refresh_data()  # initial load
+    _refresh_data()
 
     old_settings = None
     if _HAS_TERMIOS and sys.stdin.isatty():
@@ -388,18 +455,14 @@ def run_dashboard(job_id: str | None = None) -> None:
             old_settings = None
 
     try:
-        # screen=True uses alternate screen buffer — zero flicker, no scroll noise
-        with Live(console=console, refresh_per_second=_DISPLAY_FPS,
-                  screen=True) as live:
+        with Live(console=console, refresh_per_second=_DISPLAY_FPS, screen=True) as live:
             while True:
-                # Rebuild layout every frame (cheap — no I/O, just Rich rendering)
                 live.update(_build_layout(
                     jobs, selected_idx,
                     _log_lines[0], _log_path_ref[0],
                     _node_stats[0],
                 ))
 
-                # Wait for keypress up to 0.25s (1 / _DISPLAY_FPS)
                 key = _wait_key(1.0 / _DISPLAY_FPS)
 
                 if key == "q":
@@ -427,7 +490,6 @@ def run_dashboard(job_id: str | None = None) -> None:
                 elif key == "r":
                     _refresh_data()
 
-                # Refresh data only every _DATA_REFRESH_SECS to avoid hammering SLURM
                 if time.monotonic() - _last_data_ts[0] >= _DATA_REFRESH_SECS:
                     _refresh_data()
 

@@ -1,10 +1,9 @@
 from __future__ import annotations
 import json
 import os
-import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 _GPU_STATS_FILE = "/shared/.gpu_stats.json"
@@ -37,6 +36,7 @@ class NodeStats:
     gpu_temp: int = 0
     gpu_power_w: float = 0.0
     cpu_util: int = 0
+    cpu_load5: float = 0.0
     mem_used_mb: int = 0
     live_stats: bool = False   # True when fields above are from the stats file
 
@@ -229,6 +229,7 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
             stats.gpu_temp        = int(live.get("gpu_temp", 0))
             stats.gpu_power_w     = float(live.get("gpu_power_w", 0.0))
             stats.cpu_util        = int(live.get("cpu_util", 0))
+            stats.cpu_load5       = float(live.get("cpu_load5", 0.0))
             stats.mem_used_mb     = int(live.get("mem_used_mb", 0))
             stats.live_stats      = True
 

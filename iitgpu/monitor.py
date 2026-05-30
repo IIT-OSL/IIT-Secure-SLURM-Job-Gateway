@@ -124,7 +124,13 @@ def monitor_menu() -> None:
         header("Monitor")
         choice = questionary.select(
             "Monitor options:",
-            choices=["View my queue", "Cancel a job", "View job log", "Back to main menu"],
+            choices=[
+                "View my queue",
+                "Cancel a job",
+                "View job log",
+                "View hardware stats",
+                "Back to main menu",
+            ],
             style=_STYLE,
         ).ask()
         if choice is None or choice == "Back to main menu":
@@ -135,3 +141,6 @@ def monitor_menu() -> None:
             cancel_job()
         elif choice == "View job log":
             browse_and_tail_log()
+        elif choice == "View hardware stats":
+            from iitgpu.dashboard import run_hardware_stats
+            run_hardware_stats()
