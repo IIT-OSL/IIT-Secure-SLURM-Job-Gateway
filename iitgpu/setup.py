@@ -12,7 +12,7 @@ import questionary
 from questionary import Style
 
 from iitgpu import auditclient
-from iitgpu.config import Config, conda_sh, load_config
+from iitgpu.config import Config, conda_sh, jobs_dir, load_config
 from iitgpu import slurm as _slurm
 from iitgpu.slurm import submit_job
 from iitgpu.ui import err, header, info, kv, ok, warn
@@ -131,11 +131,8 @@ def _run_data_upload(cfg: Config) -> None:
 
 # ── Smoke test ────────────────────────────────────────────────────────────────
 
-def _build_smoke_test_script(env_path: str, cfg: Config) -> str:
-    # Output goes to /shared/smoke_test_<jobid>.out — world-writable so the
-    # job (running as daham on the GPU host) can write it regardless of who
-    # submitted. /home/<user> paths only exist on the login VM, not the GPU host.
-    out_path = str(Path(cfg.nfs_root) / "smoke_test_%j.out")
+def _build_smoke_test_script(env_path: str, cfg: Config, out_dir: str) -> str:
+    out_path = str(Path(out_dir) / "slurm-%j.out")
     conda_sh_path = conda_sh(cfg)
     lines = [
         "#!/bin/bash",
@@ -179,7 +176,11 @@ def _run_smoke_test(cfg: Config) -> None:
     chosen_name = choice.split("  (")[0]
     env = next(e for e in envs if e.name == chosen_name)
 
-    script = _build_smoke_test_script(env.path, cfg)
+    user = getpass.getuser()
+    out_dir = str(Path(jobs_dir(cfg)) / user / "smoke_test")
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    script = _build_smoke_test_script(env.path, cfg, out_dir)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".sh", dir=cfg.nfs_root, delete=False, prefix="iitgpu_smoke_"
     ) as tmp:
