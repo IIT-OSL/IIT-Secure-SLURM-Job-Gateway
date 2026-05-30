@@ -39,3 +39,32 @@ def test_find_job_log_finds_matching_file(tmp_path):
     from iitgpu.dashboard import _find_job_log
     result = _find_job_log("42", str(tmp_path))
     assert result == str(log)
+
+
+def test_slurm_time_to_secs_basic():
+    from iitgpu.dashboard import _slurm_time_to_secs
+    assert _slurm_time_to_secs("0:05") == 5
+    assert _slurm_time_to_secs("1:30") == 90
+    assert _slurm_time_to_secs("1:00:00") == 3600
+    assert _slurm_time_to_secs("1-02:00:00") == 93600
+
+
+def test_slurm_time_to_secs_unlimited():
+    from iitgpu.dashboard import _slurm_time_to_secs
+    assert _slurm_time_to_secs("UNLIMITED") is None
+    assert _slurm_time_to_secs("N/A") is None
+    assert _slurm_time_to_secs("") is None
+
+
+def test_node_stats_returns_none_on_failure(monkeypatch):
+    from unittest.mock import patch
+    from iitgpu.slurm import get_node_stats
+    with patch("subprocess.run", side_effect=OSError("no scontrol")):
+        assert get_node_stats() is None
+
+
+def test_queue_entry_has_user_and_time_limit_defaults():
+    from iitgpu.slurm import QueueEntry
+    e = QueueEntry("1", "job", "RUNNING", "gpu", "0:05", 1)
+    assert e.user == "?"
+    assert e.time_limit == "N/A"

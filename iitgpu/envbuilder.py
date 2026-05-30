@@ -375,19 +375,23 @@ def _run_pip_with_progress(
                     "this can take [bold]15–30 min[/bold] for large CUDA installs. "
                     "Do not interrupt."
                 )
+                # Use a large estimated total so the bar advances visibly
+                # as files are linked (avoids the "frozen full bar" look of
+                # total=None).  PyTorch CUDA installs typically link ~5 000 files.
                 progress.update(
                     file_task,
-                    completed=0, total=None,
+                    completed=0, total=8000,
                     pkg="[bold yellow]Linking to NFS…[/bold yellow]",
                     sizes="", speed="", eta="",
                 )
 
-            # Count files being linked so the display shows active progress
+            # Advance the bar one step per linked file so it visibly moves
             if "changing mode of" in seg or "copying" in seg.lower():
                 _link_count = getattr(_run_pip_with_progress, "_link_count", 0) + 1
                 _run_pip_with_progress._link_count = _link_count  # type: ignore[attr-defined]
                 progress.update(
                     file_task,
+                    completed=_link_count,
                     pkg=f"[bold yellow]Linking to NFS…  ({_link_count} files)[/bold yellow]",
                 )
 

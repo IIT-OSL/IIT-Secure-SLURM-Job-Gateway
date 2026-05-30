@@ -11,10 +11,11 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich import box
 
 from iitgpu.config import load_config, jobs_dir
-from iitgpu.slurm import QueueEntry, cancel, queue, recent_jobs
+from iitgpu.slurm import NodeStats, QueueEntry, cancel, get_node_stats, queue, recent_jobs
 from iitgpu.ui import console, err, info, ok
 
 try:
@@ -24,17 +25,57 @@ try:
 except ImportError:
     _HAS_TERMIOS = False
 
-_REFRESH_SECS = 3.0
+_REFRESH_SECS = 1.0
 _COMPLETED_HISTORY = 2
 
 
-def _merged_jobs(jdir: str) -> list[QueueEntry]:
-    """Live SLURM queue + last N completed jobs (deduped, live first)."""
-    live = queue()
-    live_ids = {j.job_id for j in live}
-    done = [j for j in recent_jobs(jdir, limit=_COMPLETED_HISTORY) if j.job_id not in live_ids]
-    return live + done
+# ── Time helpers ──────────────────────────────────────────────────────────────
 
+def _slurm_time_to_secs(t: str) -> int | None:
+    """Parse SLURM time string (e.g. '1:23:45', '2-03:00:00') to seconds."""
+    if not t or t in ("N/A", "UNLIMITED", "NOT_SET", "Partition_Limit", "-"):
+        return None
+    try:
+        days = 0
+        if "-" in t:
+            d, t = t.split("-", 1)
+            days = int(d)
+        parts = t.split(":")
+        if len(parts) == 3:
+            return days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        if len(parts) == 2:
+            return days * 86400 + int(parts[0]) * 60 + int(parts[1])
+        return None
+    except (ValueError, IndexError):
+        return None
+
+
+def _fmt_duration(secs: int) -> str:
+    m, s = divmod(abs(secs), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _progress_bar(elapsed_secs: int, limit_secs: int | None, width: int = 10) -> str:
+    if limit_secs is None or limit_secs == 0:
+        return "[dim]" + "─" * width + "  ──%[/]"
+    pct = min(elapsed_secs / limit_secs, 1.0)
+    filled = int(pct * width)
+    color = "green" if pct < 0.75 else "yellow" if pct < 0.92 else "red"
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{color}]{bar} {pct*100:3.0f}%[/]"
+
+
+def _fmt_eta(elapsed_secs: int, limit_secs: int | None) -> str:
+    if limit_secs is None:
+        return "[dim]∞[/]"
+    remaining = max(0, limit_secs - elapsed_secs)
+    return f"[dim]ETA[/] {_fmt_duration(remaining)}"
+
+
+# ── Log helpers ───────────────────────────────────────────────────────────────
 
 def _get_log_tail(log_path: str, lines: int = 20) -> list[str]:
     """Return the last `lines` lines of a log file. Returns [] if file missing."""
@@ -57,11 +98,7 @@ def _find_job_log(job_id: str, search_root: str) -> str | None:
 
 
 def _get_job_output(job_id: str, jdir: str, lines: int = 20) -> tuple[list[str], str | None]:
-    """Return (display_lines, log_path).
-
-    For failed jobs (non-empty .err) the error output is shown first so users
-    immediately see what went wrong without having to open Monitor separately.
-    """
+    """Return (display_lines, log_path). Prepends stderr for failed jobs."""
     log_path = _find_job_log(job_id, jdir)
     if log_path is None:
         return [], None
@@ -80,59 +117,153 @@ def _get_job_output(job_id: str, jdir: str, lines: int = 20) -> tuple[list[str],
     return combined, log_path
 
 
+# ── Cluster panel ─────────────────────────────────────────────────────────────
+
+def _build_cluster_panel(stats: NodeStats | None) -> Panel:
+    if stats is None:
+        body = "[dim]Cluster stats unavailable[/]"
+    else:
+        state = stats.state.split("+")[0]
+        state_color = "green" if "IDLE" in state else "yellow" if "ALLOC" in state else "red"
+
+        gpu_color = "yellow" if stats.gpu_alloc > 0 else "green"
+        gpu_str = f"GPU [bold {gpu_color}]{stats.gpu_alloc}/{stats.gpu_total}[/]"
+
+        cpu_pct = (stats.cpu_alloc / stats.cpu_total * 100) if stats.cpu_total else 0
+        cpu_str = f"CPU [bold]{stats.cpu_alloc}/{stats.cpu_total}[/] [dim]({cpu_pct:.0f}%)[/]"
+
+        mem_alloc = stats.mem_alloc_mb / 1024
+        mem_total = stats.mem_total_mb / 1024
+        mem_pct = (mem_alloc / mem_total * 100) if mem_total else 0
+        mem_color = "yellow" if mem_pct > 70 else "green"
+        mem_str = f"RAM [bold {mem_color}]{mem_alloc:.0f}/{mem_total:.0f} GB[/]"
+
+        load_str = f"Load [dim]{stats.cpu_load:.1f}[/]"
+
+        body = (
+            f"  iit-MS-7E06  [{state_color}]{state}[/]"
+            f"  │  {gpu_str}  │  {cpu_str}  │  {mem_str}  │  {load_str}"
+        )
+
+    return Panel(body, title="[bold]Cluster: iit[/bold]", border_style="blue", height=3)
+
+
+# ── Jobs table ────────────────────────────────────────────────────────────────
+
 def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
     table = Table(
         show_header=True, header_style="bold cyan",
-        box=box.SIMPLE, expand=True,
+        box=box.SIMPLE, expand=True, show_edge=False,
     )
     table.add_column("", width=2)
-    table.add_column("Job ID", style="magenta", width=8)
-    table.add_column("Name", width=22)
-    table.add_column("State", width=12)
-    table.add_column("Time", width=10)
-    table.add_column("Partition", width=10)
+    table.add_column("ID", style="magenta", width=7, no_wrap=True)
+    table.add_column("User", width=8, no_wrap=True)
+    table.add_column("Name", width=18, no_wrap=True)
+    table.add_column("State", width=11, no_wrap=True)
+    table.add_column("Progress", width=20, no_wrap=True)
+    table.add_column("Time", width=8, no_wrap=True)
+    table.add_column("ETA", width=10, no_wrap=True)
+    table.add_column("Part", width=5, no_wrap=True)
+
+    added_done_sep = False
 
     for i, j in enumerate(jobs):
-        color = (
-            "green"  if j.state == "RUNNING"   else
-            "yellow" if j.state == "PENDING"   else
-            "cyan"   if j.state == "COMPLETED" else
-            "red"    if j.state == "FAILED"    else
-            "dim"
-        )
-        prefix = "❯" if i == selected_idx else " "
-        table.add_row(
-            prefix,
-            j.job_id,
-            j.name,
-            f"[{color}]{j.state}[/]",
-            j.time_used,
-            j.partition,
-        )
+        is_done = j.state in ("COMPLETED", "FAILED", "CANCELLED")
+        is_selected = i == selected_idx
+
+        if is_done and not added_done_sep:
+            added_done_sep = True
+            table.add_row(
+                "", "[dim]──[/]", "[dim]──────[/]", "[dim]─── recent ──────[/]",
+                "[dim]─────────[/]", "[dim]────────────────────[/]",
+                "[dim]──────[/]", "[dim]────────[/]", "[dim]───[/]",
+            )
+
+        prefix = "[bold cyan]❯[/]" if is_selected else " "
+        elapsed = _slurm_time_to_secs(j.time_used) or 0
+        limit   = _slurm_time_to_secs(j.time_limit)
+
+        if is_done:
+            s_color = "cyan" if j.state == "COMPLETED" else "red"
+            table.add_row(
+                prefix,
+                f"[dim strike]{j.job_id}[/]",
+                f"[dim strike]{j.user[:7]}[/]",
+                f"[dim strike]{j.name[:17]}[/]",
+                f"[{s_color} strike]{j.state}[/]",
+                f"[dim]{'─' * 14}[/]",
+                f"[dim strike]{j.time_used}[/]",
+                "",
+                f"[dim strike]{j.partition}[/]",
+            )
+        elif j.state == "RUNNING":
+            table.add_row(
+                prefix,
+                j.job_id,
+                j.user[:7],
+                j.name[:17],
+                "[green]RUNNING[/]",
+                _progress_bar(elapsed, limit),
+                f"[dim]{j.time_used}[/]",
+                _fmt_eta(elapsed, limit),
+                f"[dim]{j.partition}[/]",
+            )
+        elif j.state == "PENDING":
+            table.add_row(
+                prefix,
+                j.job_id,
+                j.user[:7],
+                j.name[:17],
+                "[yellow]PENDING[/]",
+                "[dim]░░░░░░░░░░ queued[/]",
+                "[dim]─[/]", "[dim]─[/]",
+                f"[dim]{j.partition}[/]",
+            )
+        else:
+            table.add_row(
+                prefix,
+                j.job_id,
+                j.user[:7],
+                j.name[:17],
+                f"[dim]{j.state}[/]",
+                "[dim]──────────────────[/]",
+                f"[dim]{j.time_used}[/]", "",
+                f"[dim]{j.partition}[/]",
+            )
+
     return table
 
+
+# ── Layout ────────────────────────────────────────────────────────────────────
 
 def _build_layout(
     jobs: list[QueueEntry],
     selected_idx: int,
     log_lines: list[str],
     log_path: str | None,
+    node_stats: NodeStats | None,
 ) -> Layout:
     layout = Layout()
-    jobs_height = min(len(jobs) + 4, 12)
+    jobs_height = min(len(jobs) + 6, 16)
+
     layout.split_column(
+        Layout(name="cluster", size=3),
         Layout(name="jobs", size=jobs_height),
         Layout(name="log"),
         Layout(name="footer", size=1),
     )
 
+    layout["cluster"].update(_build_cluster_panel(node_stats))
+
     if jobs:
         layout["jobs"].update(
-            Panel(_build_jobs_table(jobs, selected_idx), title="My Jobs", border_style="cyan")
+            Panel(_build_jobs_table(jobs, selected_idx),
+                  title="[bold]Job Queue[/bold]", border_style="cyan")
         )
     else:
         layout["jobs"].update(
-            Panel("[dim]No jobs in queue.[/]", title="My Jobs", border_style="cyan")
+            Panel("[dim]No jobs in queue or history.[/]",
+                  title="[bold]Job Queue[/bold]", border_style="cyan")
         )
 
     selected_job = jobs[selected_idx] if jobs and selected_idx < len(jobs) else None
@@ -140,23 +271,24 @@ def _build_layout(
     if log_lines:
         log_body = "\n".join(log_lines)
     elif selected_job is None:
-        log_body = "[dim]No recent jobs found.[/]"
+        log_body = "[dim]No job selected.[/]"
     elif selected_job.state == "FAILED":
-        log_body = "[red]Job failed — output not yet visible (NFS sync). Press R to refresh.[/]"
+        log_body = "[red]Job failed — output not yet visible. Press R to refresh.[/]"
     elif selected_job.state == "COMPLETED":
-        log_body = "[dim]Job completed — output not yet visible (NFS sync). Press R to refresh.[/]"
+        log_body = "[dim]Job completed — output not yet visible. Press R to refresh.[/]"
     else:
         log_body = "[dim]Waiting for job to start...[/]"
-    layout["log"].update(Panel(log_body, title=log_title, border_style="cyan"))
 
+    layout["log"].update(Panel(log_body, title=log_title, border_style="cyan"))
     layout["footer"].update(
         "[dim]  Q=quit   S=switch job   C=cancel selected   R=refresh now[/]"
     )
     return layout
 
 
+# ── Keyboard ──────────────────────────────────────────────────────────────────
+
 def _wait_key(timeout: float) -> str | None:
-    """Wait up to `timeout` seconds for a keypress. Returns char (lower) or None."""
     if not _HAS_TERMIOS:
         time.sleep(timeout)
         return None
@@ -169,10 +301,21 @@ def _wait_key(timeout: float) -> str | None:
     return None
 
 
+# ── Merged job list ───────────────────────────────────────────────────────────
+
+def _merged_jobs(jdir: str) -> list[QueueEntry]:
+    """Live queue + last N completed jobs, live jobs first."""
+    live = queue()
+    live_ids = {j.job_id for j in live}
+    done = [j for j in recent_jobs(jdir, limit=_COMPLETED_HISTORY) if j.job_id not in live_ids]
+    return live + done
+
+
+# ── Main dashboard ────────────────────────────────────────────────────────────
+
 def run_dashboard(job_id: str | None = None) -> None:
     """Show the live job dashboard. If job_id given, start with that job selected."""
     cfg = load_config()
-    user = getpass.getuser()
     jdir = jobs_dir(cfg)
 
     jobs: list[QueueEntry] = _merged_jobs(jdir)
@@ -185,6 +328,17 @@ def run_dashboard(job_id: str | None = None) -> None:
                 selected_idx = i
                 break
 
+    # Cache node stats so we don't hammer scontrol on every keystroke
+    _stats_cache: list[NodeStats | None] = [None]
+    _stats_ts: list[float] = [0.0]
+
+    def _node_stats() -> NodeStats | None:
+        now = time.monotonic()
+        if now - _stats_ts[0] > 5.0:
+            _stats_cache[0] = get_node_stats()
+            _stats_ts[0] = now
+        return _stats_cache[0]
+
     old_settings = None
     if _HAS_TERMIOS and sys.stdin.isatty():
         try:
@@ -194,7 +348,7 @@ def run_dashboard(job_id: str | None = None) -> None:
             old_settings = None
 
     try:
-        with Live(console=console, refresh_per_second=1, screen=False) as live:
+        with Live(console=console, refresh_per_second=4, screen=False) as live:
             while True:
                 selected_job = jobs[selected_idx] if jobs and selected_idx < len(jobs) else None
                 if selected_job:
@@ -204,7 +358,7 @@ def run_dashboard(job_id: str | None = None) -> None:
                 else:
                     log_lines, log_path = [], None
 
-                live.update(_build_layout(jobs, selected_idx, log_lines, log_path))
+                live.update(_build_layout(jobs, selected_idx, log_lines, log_path, _node_stats()))
 
                 key = _wait_key(_REFRESH_SECS)
 
@@ -228,9 +382,8 @@ def run_dashboard(job_id: str | None = None) -> None:
                             _audit.log("job_cancel", detail="dashboard", job_id=selected_job.job_id)
                     live.start()
                 elif key == "r":
-                    pass  # fall through — refresh happens below unconditionally
+                    pass
 
-                # Refresh job list
                 jobs = _merged_jobs(jdir)
                 if jobs and selected_idx >= len(jobs):
                     selected_idx = len(jobs) - 1

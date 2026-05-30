@@ -15,6 +15,18 @@ class Partition:
 
 
 @dataclass
+class NodeStats:
+    state: str
+    cpu_load: float
+    cpu_total: int
+    cpu_alloc: int
+    mem_total_mb: int
+    mem_alloc_mb: int
+    gpu_total: int
+    gpu_alloc: int
+
+
+@dataclass
 class QueueEntry:
     job_id: str
     name: str
@@ -22,6 +34,8 @@ class QueueEntry:
     partition: str
     time_used: str
     nodes: int
+    user: str = "?"
+    time_limit: str = "N/A"
 
 
 _DEMO_PARTITIONS = [
@@ -88,20 +102,83 @@ def submit_job(script_path: str) -> tuple[bool, str]:
 def queue(user: str | None = None) -> list[QueueEntry]:
     if _demo_mode():
         return list(_DEMO_QUEUE)
-    # Jobs are always submitted via `sudo -u daham sbatch`, so SLURM owns them
-    # as daham.  Query as daham so the queue reflects what we actually submitted.
-    cmd = ["sudo", "-u", "daham", "squeue", "--noheader", "--format=%i %j %T %P %M %D", "-u", "daham"]
+    # All jobs are submitted via `sudo -u daham sbatch`; query as daham to see
+    # them all.  Include user (%u) and time-limit (%l) for the dashboard.
+    cmd = ["sudo", "-u", "daham", "squeue", "--noheader",
+           "--format=%i %j %u %T %P %M %l %D", "-u", "daham"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         entries = []
         for line in result.stdout.splitlines():
             parts = line.split()
-            if len(parts) < 6:
+            if len(parts) < 8:
                 continue
-            entries.append(QueueEntry(parts[0], parts[1], parts[2], parts[3], parts[4], int(parts[5])))
+            entries.append(QueueEntry(
+                job_id=parts[0], name=parts[1], user=parts[2],
+                state=parts[3], partition=parts[4],
+                time_used=parts[5], time_limit=parts[6],
+                nodes=int(parts[7]) if parts[7].isdigit() else 1,
+            ))
         return entries
     except (OSError, subprocess.TimeoutExpired):
         return []
+
+
+def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
+    """Return live CPU/memory/GPU stats for a cluster node via scontrol."""
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "node", node_name, "--oneliner"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        d: dict[str, str] = {}
+        for token in result.stdout.split():
+            if "=" in token:
+                k, _, v = token.partition("=")
+                d[k] = v
+
+        def _i(key: str, default: int = 0) -> int:
+            try:
+                return int(d.get(key, default))
+            except (ValueError, TypeError):
+                return default
+
+        def _f(key: str, default: float = 0.0) -> float:
+            try:
+                return float(d.get(key, default))
+            except (ValueError, TypeError):
+                return default
+
+        gpu_total = 0
+        for part in d.get("Gres", "").split(","):
+            if part.startswith("gpu:"):
+                try:
+                    gpu_total += int(part.rstrip(")").split(":")[-1].split("(")[0])
+                except (ValueError, IndexError):
+                    gpu_total += 1
+
+        gpu_alloc = 0
+        for part in d.get("GresUsed", "").split(","):
+            if part.startswith("gpu:"):
+                try:
+                    gpu_alloc += int(part.split(":")[1].split("(")[0])
+                except (ValueError, IndexError):
+                    pass
+
+        return NodeStats(
+            state=d.get("State", "?").split("+")[0],
+            cpu_load=_f("CPULoad"),
+            cpu_total=_i("CPUTot"),
+            cpu_alloc=_i("CPUAlloc"),
+            mem_total_mb=_i("RealMemory"),
+            mem_alloc_mb=_i("AllocMem"),
+            gpu_total=gpu_total,
+            gpu_alloc=gpu_alloc,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def recent_jobs(search_root: str, limit: int = 2) -> list[QueueEntry]:
