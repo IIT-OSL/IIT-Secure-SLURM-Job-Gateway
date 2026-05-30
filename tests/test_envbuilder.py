@@ -13,16 +13,16 @@ def test_framework_packages_contains_pytorch():
 
 def test_framework_packages_contains_pytorch_26():
     from iitgpu.envbuilder import FRAMEWORK_PACKAGES, FRAMEWORK_LABELS
-    assert "pytorch-2.6" in FRAMEWORK_PACKAGES
-    assert "pytorch-2.6" in FRAMEWORK_LABELS
-    pkg = " ".join(FRAMEWORK_PACKAGES["pytorch-2.6"])
+    assert "pytorch-2.7" in FRAMEWORK_PACKAGES
+    assert "pytorch-2.7" in FRAMEWORK_LABELS
+    pkg = " ".join(FRAMEWORK_PACKAGES["pytorch-2.7"])
     assert "cu128" in pkg
-    assert "2.6" in pkg
+    assert "2.7" in pkg
 
 
 def test_pytorch_26_is_first_in_labels():
     from iitgpu.envbuilder import FRAMEWORK_LABELS
-    assert list(FRAMEWORK_LABELS.keys())[0] == "pytorch-2.6"
+    assert list(FRAMEWORK_LABELS.keys())[0] == "pytorch-2.7"
 
 
 def test_framework_packages_contains_tensorflow():
