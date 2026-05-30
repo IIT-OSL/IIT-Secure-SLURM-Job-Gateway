@@ -68,7 +68,7 @@ def run_menu() -> None:
 
 
 def _monitor_menu() -> None:
-    from iitgpu.dashboard import run_dashboard
+    from iitgpu.dashboard import run_dashboard, run_hardware_stats
     from iitgpu.monitor import show_queue, cancel_job, browse_and_tail_log
 
     while True:
@@ -81,6 +81,7 @@ def _monitor_menu() -> None:
                 "Cancel a job",
                 "View job log",
                 "Cluster status",
+                "View hardware stats",
                 "Back to main menu",
             ],
             style=_STYLE,
@@ -98,6 +99,8 @@ def _monitor_menu() -> None:
             browse_and_tail_log()
         elif choice == "Cluster status":
             _show_cluster_status()
+        elif choice == "View hardware stats":
+            run_hardware_stats()
 
 
 def _show_cluster_status() -> None:
