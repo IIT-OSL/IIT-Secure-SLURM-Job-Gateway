@@ -7,14 +7,17 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from rich.console import Group
+from rich.live import Live
+from rich.markup import escape as _markup_escape
 from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
-    TaskID,
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.text import Text
 
 from iitgpu.config import Config
 from iitgpu.ui import console, err, info, ok, warn
@@ -181,29 +184,33 @@ def _run_with_progress(
 
 # ── pip per-file download progress ────────────────────────────────────────────
 
+def _pip_log_text(log_lines: list[str]) -> Text:
+    """Render the last 3 pip log lines as dim text below the progress bar."""
+    shown = log_lines[-3:] if log_lines else []
+    # Pad to 3 lines so the display height stays constant and doesn't jump
+    while len(shown) < 3:
+        shown.insert(0, "")
+    lines = [f"  {_markup_escape(l):<100}" for l in shown]
+    return Text("\n".join(lines), style="dim", no_wrap=True)
+
+
 def _run_pip_with_progress(
     cmd: list[str],
     label: str,
     env: dict | None = None,
 ) -> tuple[int, list[str]]:
-    """Run a pip install showing one live line per file: name │ bar │ size │ speed │ eta.
+    """Run a pip install with a live progress bar + rolling 3-line log window.
 
-    How it works
-    ────────────
-    pip's \r-based progress bar is never flushed into a non-TTY pipe — the
-    intermediate ticks only arrive as one final burst when the download
-    finishes.  ``--progress-bar raw`` changes the output to plain text lines::
+    Layout (updates in place, no scrolling)::
 
-        Progress 1048576 of 950253312
-        Progress 2097152 of 950253312
-        ...
+        ⠋  torch           ━━━━━━━━━━━━╸  452.1 / 906.4 MB  47.6 MB/s  eta 9s
+          Collecting nvidia-nccl-cu12==2.21.5 (from torch==2.5.*)
+          Downloading nvidia_nccl_cu12-2.21.5-py3-none-manylinux2014_x86_64.whl
+          Progress 14680064 of 188743680
 
-    Each line ends with \\n and pip calls flush() after every write, so they
-    arrive through bufsize=1 line-buffered reading in real time.
-
-    Speed is computed from the time between consecutive Progress lines.
-    Small kB packages that download in a single chunk show one 100% tick and
-    are immediately printed as done when the next download starts.
+    The three log lines replace themselves each tick — no accumulation.
+    During the "Linking" phase (no measurable progress) the log shows each
+    package name being linked so it's clear work is happening.
     """
     import time as _time
 
@@ -219,6 +226,7 @@ def _run_pip_with_progress(
     pip_env = {**(env or {}), "PYTHONUNBUFFERED": "1"}
 
     output_lines:    list[str] = []
+    log_lines:       list[str] = []   # rolling display buffer (last 3 shown)
     current_pkg:     str | None = None
     current_total_b: float = 0.0
 
@@ -244,7 +252,8 @@ def _run_pip_with_progress(
             _b_last = done_b
         return _speed
 
-    with Progress(
+    # Build Progress separately so we can embed it inside Live + Group
+    progress = Progress(
         SpinnerColumn(),
         TextColumn("[bold cyan]{task.fields[pkg]:<42}"),
         BarColumn(bar_width=28, complete_style="green", finished_style="bold green"),
@@ -252,25 +261,27 @@ def _run_pip_with_progress(
         TextColumn("[green]{task.fields[speed]:<11}"),
         TextColumn("[dim]{task.fields[eta]}"),
         console=console,
-        transient=False,
-    ) as prog:
-        file_task = prog.add_task(
-            label, total=100,
-            pkg=f"[bold]{label}[/bold]", sizes="", speed="", eta="",
-        )
+    )
+    file_task = progress.add_task(
+        label, total=100,
+        pkg=f"[bold]{label}[/bold]", sizes="", speed="", eta="",
+    )
+
+    def _render() -> Group:
+        return Group(progress, _pip_log_text(log_lines))
+
+    with Live(_render(), console=console, refresh_per_second=12,
+              transient=False, vertical_overflow="crop") as live:
 
         proc = subprocess.Popen(
             raw_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=0,          # binary, unbuffered — no Python read-ahead buffering
+            bufsize=0,
             env=pip_env,
         )
         assert proc.stdout is not None
 
-        # readline() on a bufsize=0 binary pipe blocks until exactly one \n
-        # arrives — guarantees each Progress line is processed the instant pip
-        # flushes it, unlike `for line in proc.stdout` which batches 8 KB.
         while True:
             raw = proc.stdout.readline()
             if not raw:
@@ -280,9 +291,9 @@ def _run_pip_with_progress(
                 continue
             output_lines.append(seg)
 
-            # ── Progress X of Y  (bytes, one line per chunk, flushed by pip) ──
+            # ── Progress X of Y ────────────────────────────────────────────
             if seg.startswith("Progress "):
-                parts = seg.split()            # ["Progress", "X", "of", "Y"]
+                parts = seg.split()
                 if len(parts) == 4:
                     try:
                         done_b  = float(parts[1])
@@ -294,7 +305,7 @@ def _run_pip_with_progress(
                             if spd > 1 and remaining > 0 else ""
                         )
                         current_total_b = total_b
-                        prog.update(
+                        progress.update(
                             file_task,
                             completed=done_b,
                             total=total_b,
@@ -304,13 +315,18 @@ def _run_pip_with_progress(
                         )
                     except (ValueError, ZeroDivisionError):
                         pass
+                # Don't add raw "Progress X of Y" to the visible log
+                live.update(_render())
                 continue
 
-            # ── New file starting: "Downloading wheel.whl (906.4 MB)" ────────
+            # ── Everything else goes into the rolling log window ────────────
+            log_lines.append(seg)
+
+            # ── New file download starting ──────────────────────────────────
             m = _DL_HEADER_RE.search(seg)
             if m:
                 if current_pkg:
-                    prog.print(
+                    console.print(
                         f"  [bold green]✔[/]  {current_pkg:<42}"
                         f"  [dim]{_fmt_size(current_total_b)}[/]"
                     )
@@ -318,7 +334,7 @@ def _run_pip_with_progress(
                 current_total_b = _to_bytes(float(m.group(2)), m.group(3))
                 current_pkg     = _pkg_display_name(filename)
                 _reset_speed()
-                prog.update(
+                progress.update(
                     file_task,
                     completed=0,
                     total=max(current_total_b, 1),
@@ -327,32 +343,33 @@ def _run_pip_with_progress(
                     speed="—",
                     eta="...",
                 )
+                live.update(_render())
                 continue
 
-            # ── All downloads done, pip now links packages ─────────────────
+            # ── Linking phase ───────────────────────────────────────────────
             if "installing collected" in seg.lower():
                 if current_pkg:
-                    prog.print(
+                    console.print(
                         f"  [bold green]✔[/]  {current_pkg:<42}"
                         f"  [dim]{_fmt_size(current_total_b)}[/]"
                     )
                     current_pkg = None
-                # total=None → indeterminate pulsing bar so it looks active,
-                # not a frozen empty bar. Linking PyTorch wheels takes ~2–5 min.
-                prog.update(
+                progress.update(
                     file_task,
                     completed=0, total=None,
-                    pkg="[bold yellow]Linking packages (this takes a few minutes)…[/bold yellow]",
+                    pkg="[bold yellow]Linking packages…[/bold yellow]",
                     sizes="", speed="", eta="",
                 )
 
             if "successfully installed" in seg.lower():
-                prog.update(
+                progress.update(
                     file_task,
                     completed=1, total=1,
                     pkg="[bold green]✔  All packages installed[/bold green]",
                     sizes="", speed="", eta="",
                 )
+
+            live.update(_render())
 
         proc.wait()
 
