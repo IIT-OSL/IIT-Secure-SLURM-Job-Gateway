@@ -157,7 +157,7 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
     """Return live stats: SLURM allocation from scontrol + actual utilization from stats file."""
     try:
         result = subprocess.run(
-            ["sudo", "-u", "daham", "scontrol", "show", "node", node_name, "--oneliner"],
+            ["scontrol", "show", "node", node_name, "--oneliner"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
