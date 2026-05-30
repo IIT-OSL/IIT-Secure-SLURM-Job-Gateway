@@ -114,7 +114,7 @@ exec env -i \\
     PYTHONPATH="/opt/iit-gpu" \\
     CONDA_PREFIX_SHARED="${CONDA_PREFIX}" \\
     NFS_ROOT="${NFS_ROOT}" \\
-    python3 -m iitgpu --no-splash
+    /usr/bin/python3 -m iitgpu --no-splash
 LAUNCHER
 chmod 0755 "${BIN_PATH}"
 
