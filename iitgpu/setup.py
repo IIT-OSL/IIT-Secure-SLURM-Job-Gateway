@@ -110,7 +110,7 @@ def _run_data_upload(cfg: Config) -> None:
 
     info(f"Files will be copied to: {dest_dir}")
     while True:
-        src = _browse_file(str(Path.home()))
+        src = _browse_file(cfg.nfs_root)
         if src is None:
             break
         src_path = Path(src)

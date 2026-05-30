@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -87,9 +88,9 @@ def submit_job(script_path: str) -> tuple[bool, str]:
 def queue(user: str | None = None) -> list[QueueEntry]:
     if _demo_mode():
         return list(_DEMO_QUEUE)
-    cmd = ["squeue", "--noheader", "--format=%i %j %T %P %M %D"]
-    if user:
-        cmd += ["-u", user]
+    # Jobs are always submitted via `sudo -u daham sbatch`, so SLURM owns them
+    # as daham.  Query as daham so the queue reflects what we actually submitted.
+    cmd = ["sudo", "-u", "daham", "squeue", "--noheader", "--format=%i %j %T %P %M %D", "-u", "daham"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         entries = []
@@ -101,6 +102,24 @@ def queue(user: str | None = None) -> list[QueueEntry]:
         return entries
     except (OSError, subprocess.TimeoutExpired):
         return []
+
+
+def recent_jobs(search_root: str, limit: int = 2) -> list[QueueEntry]:
+    """Return up to `limit` recently completed jobs by scanning output files."""
+    try:
+        out_files = sorted(
+            Path(search_root).rglob("slurm-*.out"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+    except OSError:
+        return []
+    result = []
+    for f in out_files:
+        job_id = f.stem[len("slurm-"):]
+        name = f.parent.name
+        result.append(QueueEntry(job_id, name, "COMPLETED", "gpu", "-", 1))
+    return result
 
 
 def cancel(job_id: str) -> tuple[bool, str]:

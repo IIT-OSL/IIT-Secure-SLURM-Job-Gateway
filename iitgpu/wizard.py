@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import getpass
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 import questionary
@@ -137,8 +136,7 @@ def run_wizard() -> None:
     args = clean_run_command(raw_args) if raw_args.strip() else ""
 
     # ── Build job spec ────────────────────────────────────────────────────────
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    job_name = f"{task_type}_{timestamp}"
+    job_name = task_type
 
     if script_path.endswith(".py"):
         run_cmd = f"python {script_path}"

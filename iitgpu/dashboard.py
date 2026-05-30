@@ -14,7 +14,7 @@ from rich.table import Table
 from rich import box
 
 from iitgpu.config import load_config, jobs_dir
-from iitgpu.slurm import QueueEntry, cancel, queue
+from iitgpu.slurm import QueueEntry, cancel, queue, recent_jobs
 from iitgpu.ui import console, err, info, ok
 
 try:
@@ -25,6 +25,15 @@ except ImportError:
     _HAS_TERMIOS = False
 
 _REFRESH_SECS = 3.0
+_COMPLETED_HISTORY = 2
+
+
+def _merged_jobs(jdir: str) -> list[QueueEntry]:
+    """Live SLURM queue + last N completed jobs (deduped, live first)."""
+    live = queue()
+    live_ids = {j.job_id for j in live}
+    done = [j for j in recent_jobs(jdir, limit=_COMPLETED_HISTORY) if j.job_id not in live_ids]
+    return live + done
 
 
 def _get_log_tail(log_path: str, lines: int = 20) -> list[str]:
@@ -63,6 +72,7 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
         color = (
             "green"  if j.state == "RUNNING"   else
             "yellow" if j.state == "PENDING"   else
+            "cyan"   if j.state == "COMPLETED" else
             "dim"
         )
         prefix = "❯" if i == selected_idx else " "
@@ -130,8 +140,9 @@ def run_dashboard(job_id: str | None = None) -> None:
     user = getpass.getuser()
     jdir = jobs_dir(cfg)
 
-    jobs: list[QueueEntry] = queue(user=user)
+    jobs: list[QueueEntry] = _merged_jobs(jdir)
     selected_idx = 0
+    pinned_job_id: str | None = job_id
 
     if job_id is not None:
         for i, j in enumerate(jobs):
@@ -154,6 +165,8 @@ def run_dashboard(job_id: str | None = None) -> None:
                 log_path: str | None = None
                 if selected_job:
                     log_path = _find_job_log(selected_job.job_id, jdir)
+                elif pinned_job_id is not None:
+                    log_path = _find_job_log(pinned_job_id, jdir)
 
                 log_lines = _get_log_tail(log_path, lines=20) if log_path else []
                 live.update(_build_layout(jobs, selected_idx, log_lines, log_path))
@@ -183,7 +196,7 @@ def run_dashboard(job_id: str | None = None) -> None:
                     pass  # fall through — refresh happens below unconditionally
 
                 # Refresh job list
-                jobs = queue(user=user)
+                jobs = _merged_jobs(jdir)
                 if jobs and selected_idx >= len(jobs):
                     selected_idx = len(jobs) - 1
 
