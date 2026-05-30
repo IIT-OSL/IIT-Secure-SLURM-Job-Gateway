@@ -200,6 +200,15 @@ def build_env(
     env_path = str(envs_root / name)
     pip_path = str(Path(env_path) / "bin" / "pip")
 
+    # pip downloads PyTorch CUDA wheels (~2-3 GB). The default cache at
+    # ~/.cache/pip and /tmp are small on the login VM; route everything to
+    # /shared which has the space. This prevents EDQUOT (errno 122) errors.
+    pip_cache = Path(cfg.nfs_root) / ".pip-cache"
+    pip_tmp   = Path(cfg.nfs_root) / ".pip-tmp"
+    pip_cache.mkdir(parents=True, exist_ok=True)
+    pip_tmp.mkdir(parents=True, exist_ok=True)
+    pip_env = {**env, "PIP_CACHE_DIR": str(pip_cache), "TMPDIR": str(pip_tmp)}
+
     # ── Step 1: conda create ─────────────────────────────────────────────────
     info(f"Creating conda env at {env_path} ...")
     rc, lines = _run_with_progress(
@@ -225,6 +234,7 @@ def build_env(
             [pip_path, "install"] + pkg_args,
             _PIP_PHASES,
             "Installing framework packages",
+            env=pip_env,
         )
         if rc != 0:
             err("pip install failed for framework packages.")
@@ -240,6 +250,7 @@ def build_env(
             [pip_path, "install", "-r", requirements_path],
             _PIP_PHASES,
             "Installing requirements",
+            env=pip_env,
         )
         if rc != 0:
             warn("requirements.txt install had errors — env created but may be incomplete.")
