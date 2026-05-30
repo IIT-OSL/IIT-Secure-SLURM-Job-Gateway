@@ -132,23 +132,36 @@ def _build_cluster_panel(stats: NodeStats | None) -> Panel:
         state = stats.state.split("+")[0]
         state_color = "green" if "IDLE" in state else "yellow" if "ALLOC" in state else "red"
 
-        gpu_color = "yellow" if stats.gpu_alloc > 0 else "green"
-        gpu_str = f"GPU [bold {gpu_color}]{stats.gpu_alloc}/{stats.gpu_total}[/]"
-
-        cpu_pct = (stats.cpu_alloc / stats.cpu_total * 100) if stats.cpu_total else 0
-        cpu_str = f"CPU [bold]{stats.cpu_alloc}/{stats.cpu_total}[/] [dim]({cpu_pct:.0f}%)[/]"
-
-        mem_alloc = stats.mem_alloc_mb / 1024
-        mem_total = stats.mem_total_mb / 1024
-        mem_pct = (mem_alloc / mem_total * 100) if mem_total else 0
-        mem_color = "yellow" if mem_pct > 70 else "green"
-        mem_str = f"RAM [bold {mem_color}]{mem_alloc:.0f}/{mem_total:.0f} GB[/]"
-
-        load_str = f"Load [dim]{stats.cpu_load:.1f}[/]"
+        if stats.live_stats:
+            # Real nvidia-smi / /proc data — show actual utilization
+            gpu_color = "yellow" if stats.gpu_util > 30 else "red" if stats.gpu_util > 80 else "green"
+            gpu_mem_gb = stats.gpu_mem_used_mb / 1024
+            gpu_total_gb = stats.gpu_mem_total_mb / 1024
+            gpu_str = (
+                f"GPU [bold {gpu_color}]{stats.gpu_util}%[/] "
+                f"[dim]{gpu_mem_gb:.1f}/{gpu_total_gb:.0f}GB[/] "
+                f"[dim]{stats.gpu_temp}°C {stats.gpu_power_w:.0f}W[/]"
+            )
+            cpu_color = "yellow" if stats.cpu_util > 70 else "red" if stats.cpu_util > 90 else "green"
+            cpu_str = f"CPU [bold {cpu_color}]{stats.cpu_util}%[/] [dim]load {stats.cpu_load:.1f}[/]"
+            mem_used = stats.mem_used_mb / 1024
+            mem_total = stats.mem_total_mb / 1024
+            mem_pct = (stats.mem_used_mb / stats.mem_total_mb * 100) if stats.mem_total_mb else 0
+            mem_color = "yellow" if mem_pct > 70 else "red" if mem_pct > 90 else "green"
+            mem_str = f"RAM [bold {mem_color}]{mem_used:.0f}/{mem_total:.0f} GB[/]"
+        else:
+            # Fallback: SLURM allocation data only
+            gpu_color = "yellow" if stats.gpu_alloc > 0 else "green"
+            gpu_str = f"GPU [bold {gpu_color}]{stats.gpu_alloc}/{stats.gpu_total} alloc[/]"
+            cpu_pct = (stats.cpu_alloc / stats.cpu_total * 100) if stats.cpu_total else 0
+            cpu_str = f"CPU [bold]{stats.cpu_alloc}/{stats.cpu_total}[/] [dim]({cpu_pct:.0f}%)[/] load {stats.cpu_load:.1f}"
+            mem_alloc = stats.mem_alloc_mb / 1024
+            mem_total = stats.mem_total_mb / 1024
+            mem_str = f"RAM [bold]{mem_alloc:.0f}/{mem_total:.0f} GB[/] [dim]alloc[/]"
 
         body = (
             f"  iit-MS-7E06  [{state_color}]{state}[/]"
-            f"  │  {gpu_str}  │  {cpu_str}  │  {mem_str}  │  {load_str}"
+            f"  │  {gpu_str}  │  {cpu_str}  │  {mem_str}"
         )
 
     return Panel(body, title="[bold]Cluster: iit[/bold]", border_style="blue", height=3)
@@ -191,14 +204,21 @@ def _build_jobs_table(jobs: list[QueueEntry], selected_idx: int) -> Table:
 
         if is_done:
             s_color = "cyan" if j.state == "COMPLETED" else "red"
+            if elapsed > 0 and limit:
+                done_bar = _progress_bar(elapsed, limit)
+            elif elapsed > 0:
+                done_bar = f"[dim]{'█' * 10} done[/]"
+            else:
+                done_bar = f"[dim]{'─' * 14}[/]"
+            elapsed_str = _fmt_duration(elapsed) if elapsed > 0 else j.time_used
             table.add_row(
                 prefix,
                 f"[dim strike]{j.job_id}[/]",
                 f"[dim strike]{j.user[:7]}[/]",
                 f"[dim strike]{j.name[:17]}[/]",
                 f"[{s_color} strike]{j.state}[/]",
-                f"[dim]{'─' * 14}[/]",
-                f"[dim strike]{j.time_used}[/]",
+                f"[dim]{done_bar}[/]",
+                f"[dim strike]{elapsed_str}[/]",
                 "",
                 f"[dim strike]{j.partition}[/]",
             )

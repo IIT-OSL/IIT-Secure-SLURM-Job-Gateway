@@ -1,9 +1,14 @@
 from __future__ import annotations
+import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+
+_GPU_STATS_FILE = "/shared/.gpu_stats.json"
+_GPU_STATS_MAX_AGE = 10   # seconds — stale if older than this
 
 
 @dataclass
@@ -16,6 +21,7 @@ class Partition:
 
 @dataclass
 class NodeStats:
+    # SLURM allocation data (from scontrol)
     state: str
     cpu_load: float
     cpu_total: int
@@ -24,6 +30,15 @@ class NodeStats:
     mem_alloc_mb: int
     gpu_total: int
     gpu_alloc: int
+    # Actual utilization data (from nvidia-smi via stats writer)
+    gpu_util: int = 0
+    gpu_mem_used_mb: int = 0
+    gpu_mem_total_mb: int = 0
+    gpu_temp: int = 0
+    gpu_power_w: float = 0.0
+    cpu_util: int = 0
+    mem_used_mb: int = 0
+    live_stats: bool = False   # True when fields above are from the stats file
 
 
 @dataclass
@@ -124,11 +139,25 @@ def queue(user: str | None = None) -> list[QueueEntry]:
         return []
 
 
+def _read_gpu_stats_file() -> dict | None:
+    """Read /shared/.gpu_stats.json written by the iit-gpu-stats-writer daemon."""
+    try:
+        p = Path(_GPU_STATS_FILE)
+        if not p.exists():
+            return None
+        age = time.time() - p.stat().st_mtime
+        if age > _GPU_STATS_MAX_AGE:
+            return None   # stale — daemon probably died
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
-    """Return live CPU/memory/GPU stats for a cluster node via scontrol."""
+    """Return live stats: SLURM allocation from scontrol + actual utilization from stats file."""
     try:
         result = subprocess.run(
-            ["scontrol", "show", "node", node_name, "--oneliner"],
+            ["sudo", "-u", "daham", "scontrol", "show", "node", node_name, "--oneliner"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -151,7 +180,6 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
             except (ValueError, TypeError):
                 return default
 
-        # GPU total from Gres= (always present)
         gpu_total = 0
         for part in d.get("Gres", "").split(","):
             if part.startswith("gpu:"):
@@ -160,8 +188,6 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
                 except (ValueError, IndexError):
                     gpu_total += 1
 
-        # GPU and memory allocation from AllocTRES= (reliable; GresUsed absent when idle)
-        # Format: "cpu=16,mem=60G,billing=16,gres/gpu=1" when allocated, "" when idle
         gpu_alloc = 0
         mem_alloc_mb = 0
         for item in d.get("AllocTRES", "").split(","):
@@ -184,7 +210,7 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
                 except (ValueError, IndexError):
                     pass
 
-        return NodeStats(
+        stats = NodeStats(
             state=d.get("State", "?").split("+")[0],
             cpu_load=_f("CPULoad"),
             cpu_total=_i("CPUTot"),
@@ -194,6 +220,19 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
             gpu_total=gpu_total,
             gpu_alloc=gpu_alloc,
         )
+
+        live = _read_gpu_stats_file()
+        if live:
+            stats.gpu_util        = int(live.get("gpu_util", 0))
+            stats.gpu_mem_used_mb = int(live.get("gpu_mem_used_mb", 0))
+            stats.gpu_mem_total_mb = int(live.get("gpu_mem_total_mb", 0))
+            stats.gpu_temp        = int(live.get("gpu_temp", 0))
+            stats.gpu_power_w     = float(live.get("gpu_power_w", 0.0))
+            stats.cpu_util        = int(live.get("cpu_util", 0))
+            stats.mem_used_mb     = int(live.get("mem_used_mb", 0))
+            stats.live_stats      = True
+
+        return stats
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -212,14 +251,67 @@ def recent_jobs(search_root: str, limit: int = 2) -> list[QueueEntry]:
     for f in out_files:
         job_id = f.stem[len("slurm-"):]
         name = f.parent.name
+
+        # User: inferred from path /…/jobs/{user}/{job_name}/slurm-*.out
+        parts = f.parts
+        try:
+            jobs_idx = next(i for i, p in enumerate(parts) if p == "jobs")
+            user = parts[jobs_idx + 1]
+        except (StopIteration, IndexError):
+            user = "?"
+
+        # Elapsed: birth time via `stat --format=%W` (ext4/btrfs birthtime)
+        time_used = _stat_elapsed(f)
+
         err_file = f.with_suffix(".err")
         try:
             failed = err_file.exists() and err_file.stat().st_size > 0
         except OSError:
             failed = False
         state = "FAILED" if failed else "COMPLETED"
-        result.append(QueueEntry(job_id, name, state, "gpu", "-", 1))
+
+        # Time limit: parse from job.sbatch in same directory
+        time_limit = _parse_sbatch_time_limit(f.parent / "job.sbatch")
+
+        result.append(QueueEntry(
+            job_id=job_id, name=name, user=user,
+            state=state, partition="gpu",
+            time_used=time_used, time_limit=time_limit,
+            nodes=1,
+        ))
     return result
+
+
+def _stat_elapsed(log_file: Path) -> str:
+    """Return elapsed time string by computing mtime - birthtime via stat(1)."""
+    try:
+        r = subprocess.run(
+            ["stat", "--format=%W %Y", str(log_file)],
+            capture_output=True, text=True, timeout=3,
+        )
+        if r.returncode != 0:
+            return "-"
+        birth_s, mtime_s = r.stdout.split()
+        birth, mtime = int(birth_s), int(mtime_s)
+        if birth <= 0:
+            return "-"   # birthtime not available on this fs
+        elapsed = max(0, mtime - birth)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return "-"
+
+
+def _parse_sbatch_time_limit(sbatch: Path) -> str:
+    """Extract --time= value from a job.sbatch file. Returns 'N/A' if absent."""
+    try:
+        for line in sbatch.read_text(errors="replace").splitlines():
+            if line.startswith("#SBATCH") and "--time=" in line:
+                return line.split("--time=", 1)[1].strip().split()[0]
+    except OSError:
+        pass
+    return "N/A"
 
 
 def cancel(job_id: str) -> tuple[bool, str]:
