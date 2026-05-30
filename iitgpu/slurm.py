@@ -118,18 +118,32 @@ def queue(user: str | None = None) -> list[QueueEntry]:
     if _demo_mode():
         return list(_DEMO_QUEUE)
     # All jobs are submitted via `sudo -u daham sbatch`; query as daham to see
-    # them all.  Include user (%u) and time-limit (%l) for the dashboard.
+    # them all.  %u only returns the SLURM owner ("daham"), and %j only returns
+    # the short --job-name ("train").  The output path (%o) encodes both the
+    # real gateway user and the full job-folder name, so we parse it instead.
+    # Use | separator so paths with spaces (rare but possible) don't break parsing.
     cmd = ["sudo", "-u", "daham", "squeue", "--noheader",
-           "--format=%i %j %u %T %P %M %l %D", "-u", "daham"]
+           "--format=%i|%j|%u|%T|%P|%M|%l|%D|%o", "-u", "daham"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         entries = []
         for line in result.stdout.splitlines():
-            parts = line.split()
+            parts = line.split("|")
             if len(parts) < 8:
                 continue
+            name = parts[1]
+            user_val = parts[2]
+            out_path = parts[8].strip() if len(parts) > 8 else ""
+            if out_path:
+                path_parts = Path(out_path).parts
+                try:
+                    jobs_idx = next(i for i, s in enumerate(path_parts) if s == "jobs")
+                    user_val = path_parts[jobs_idx + 1]
+                    name = path_parts[jobs_idx + 2]
+                except (StopIteration, IndexError):
+                    pass
             entries.append(QueueEntry(
-                job_id=parts[0], name=parts[1], user=parts[2],
+                job_id=parts[0], name=name, user=user_val,
                 state=parts[3], partition=parts[4],
                 time_used=parts[5], time_limit=parts[6],
                 nodes=int(parts[7]) if parts[7].isdigit() else 1,
