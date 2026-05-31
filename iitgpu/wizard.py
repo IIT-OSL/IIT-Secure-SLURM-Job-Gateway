@@ -30,6 +30,7 @@ _TASK_LABELS: dict[str, str] = {
     "inference": "Run inference / generate output",
     "test":      "Quick test  (30 min, reduced resources)",
     "notebook":  "Notebook (JupyterLab)  — interactive GPU session",
+    "interactive": "Interactive shell on the GPU node  (srun --pty)",
 }
 
 
@@ -98,6 +99,33 @@ def run_wizard() -> None:
         return
     task_type = next(k for k, v in _TASK_LABELS.items() if v == task_choice)
     defaults = resource_defaults(task_type)
+
+    # ── Interactive GPU session (srun --pty) — runs a shell inside an allocation ──
+    if task_type == "interactive":
+        from iitgpu.jobs import build_interactive_cmd
+        spec = JobSpec(
+            job_name="interactive", partition=cfg.partition,
+            gpus=defaults.gpus, cpus=defaults.cpus, mem_gb=defaults.mem_gb,
+            time_limit=defaults.time_limit or "02:00:00", run_command="",
+            task_type="interactive",
+        )
+        cmd = build_interactive_cmd(spec, partition=cfg.partition)
+        info("Requesting an interactive GPU allocation — you will land in a shell")
+        info("ON the compute node. It ends when you type 'exit' or the time limit hits.")
+        panel("Interactive command", " ".join(cmd))
+        if not questionary.confirm("Start interactive session now?", default=True, style=_STYLE).ask():
+            return
+        if not auditclient.log_or_block("interactive_start", detail="srun_pty"):
+            err("Audit logging failed. Refusing to start (safety policy).")
+            return
+        import subprocess
+        try:
+            subprocess.run(cmd)   # interactive — inherits the TTY
+        except (OSError, KeyboardInterrupt):
+            pass
+        auditclient.log("interactive_end")
+        info("Interactive session ended.")
+        return
 
     # ── Step 2: Environment (conda env OR container image) ──────────────────
     from iitgpu.envs import list_all_envs
@@ -279,6 +307,36 @@ def run_wizard() -> None:
         return
     args = clean_run_command(raw_args) if raw_args.strip() else ""
 
+    # ── Step 5: Job array (optional) ──────────────────────────────────────────
+    from iitgpu.validate import clean_array_spec, clean_dependency
+    array_spec = ""
+    if questionary.confirm("Run as a job array (parameter sweep)?", default=False, style=_STYLE).ask():
+        raw = questionary.text("Array spec (e.g. 0-9 or 1-100%4):", style=_STYLE).ask()
+        cleaned = clean_array_spec(raw or "")
+        if cleaned:
+            array_spec = cleaned
+            info(f"Array tasks expose $SLURM_ARRAY_TASK_ID; use it to index your sweep.")
+        elif raw:
+            warn("Invalid array spec — ignoring.")
+
+    # ── Step 6: Dependency (optional) ─────────────────────────────────────────
+    dependency = ""
+    if questionary.confirm("Wait for another job to finish first?", default=False, style=_STYLE).ask():
+        from iitgpu.slurm import queue as _q
+        myjobs = _q()
+        if myjobs:
+            choices = [f"{e.job_id}  {e.name}  [{e.state}]" for e in myjobs] + ["[enter ID manually]"]
+            sel = questionary.select("Run after which job (on success)?", choices=choices, style=_STYLE).ask()
+            parent = (sel.split()[0] if sel and sel != "[enter ID manually]" else
+                      (questionary.text("Parent job ID:", style=_STYLE).ask() or ""))
+        else:
+            parent = questionary.text("Parent job ID:", style=_STYLE).ask() or ""
+        dep = clean_dependency(f"afterok:{parent.strip()}") if parent.strip().isdigit() else None
+        if dep:
+            dependency = dep
+        elif parent:
+            warn("Invalid parent job ID — ignoring dependency.")
+
     # ── Build job spec ────────────────────────────────────────────────────────
 
     if script_path.endswith(".py"):
@@ -302,6 +360,8 @@ def run_wizard() -> None:
         conda_env=chosen_env.path if chosen_env and chosen_env.kind == "conda" else "",
         venv_path=chosen_env.path if chosen_env and chosen_env.kind == "venv" else "",
         container_image=chosen_container,
+        array=array_spec,
+        dependency=dependency,
     )
 
     folder = make_job_folder(jdir, spec)

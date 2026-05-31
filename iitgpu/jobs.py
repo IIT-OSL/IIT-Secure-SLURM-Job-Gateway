@@ -48,6 +48,8 @@ class JobSpec:
     venv_path: str = ""
     task_type: str = "custom"
     container_image: str = ""  # path to .sif — when set, skips conda/venv
+    array: str = ""            # SLURM --array spec, e.g. "0-9" or "1-100%4"
+    dependency: str = ""       # SLURM --dependency, e.g. "afterok:12345"
 
 
 def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
@@ -84,9 +86,15 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
     ]
     if spec.time_limit:
         lines.append(f"#SBATCH --time={spec.time_limit}")
+    if spec.array:
+        lines.append(f"#SBATCH --array={spec.array}")
+    if spec.dependency:
+        lines.append(f"#SBATCH --dependency={spec.dependency}")
     lines += [
-        f"#SBATCH --output={folder}/slurm-%j.out",
-        f"#SBATCH --error={folder}/slurm-%j.err",
+        (f"#SBATCH --output={folder}/slurm-%A_%a.out"
+         if spec.array else f"#SBATCH --output={folder}/slurm-%j.out"),
+        (f"#SBATCH --error={folder}/slurm-%A_%a.err"
+         if spec.array else f"#SBATCH --error={folder}/slurm-%j.err"),
         f"#SBATCH --chdir={folder}",
         "",
     ]
@@ -136,6 +144,26 @@ def write_sbatch(spec: JobSpec, folder: str) -> str:
     path.chmod(0o644)
     return str(path)
 
+
+
+def build_interactive_cmd(spec: "JobSpec", partition: str = "gpu") -> list[str]:
+    """Build an `srun --pty` interactive GPU session command.
+
+    Runs a real shell ON the compute node inside a SLURM allocation. It is bound
+    to the allocation (exits when the job ends / time limit hits) and is NOT a
+    host login shell — the user only reaches the node through SLURM.
+    """
+    cmd = [
+        "srun",
+        f"--partition={spec.partition or partition}",
+        f"--gres=gpu:{spec.gpus}",
+        f"--cpus-per-task={spec.cpus}",
+        f"--mem={spec.mem_gb}G",
+    ]
+    if spec.time_limit:
+        cmd.append(f"--time={spec.time_limit}")
+    cmd += ["--pty", "bash", "-l"]
+    return cmd
 
 def render_notebook_sbatch(
     spec: "JobSpec",
