@@ -21,7 +21,7 @@ filesystem, Linux users/groups, and the TUI tool architecture & data flow.
 8. [Services Inventory](#8-services-inventory)
 9. [Security Model](#9-security-model)
 10. [Prebuilt Environments & Containers](#10-prebuilt-environments--containers)
-11. [Validation Results](#11-validation-results)
+11. [Test Campaign & Results](#11-test-campaign--results)
 12. [Quick Operational Reference](#12-quick-operational-reference)
 
 ---
@@ -472,24 +472,63 @@ present → `torch.compile`/Triton available.
 
 ---
 
-## 11. Validation Results
+## 11. Test Campaign & Results
 
-Confirmed live at time of writing:
+A full-stack validation was run across four layers — Linux/OS, SLURM, the Python
+tool, and live end-to-end job execution. **49 live system checks + 215 unit
+tests = 264 checks, all green.** One real defect was found and fixed during the
+campaign (see *Issues found & fixed*).
+
+### 11.1 Coverage matrix
+
+| Layer | Test cases | Result |
+|-------|-----------|--------|
+| **Linux / OS** | services active; user existence; `daham`/`public` UID 1002/1003; `gpuusers` GID 1500 on **both** nodes; group membership; NFS mounted + writable; `/shared/jobs` = `0770 gpuusers`; cross-node MUNGE auth | 18/18 PASS |
+| **SLURM** | `slurm.conf` byte-identical both nodes; partition UP + 24 h cap; node IDLE; `gres/gpu` TRES tracked; QOS `normal` enforces `gres/gpu=1`; QOS `long`; `sacct`-as-daham via sudoers; slurmd/slurmctld/slurmdbd/mariadb active | 14/14 PASS |
+| **Security** | path jail accepts in-tree, rejects `/etc/shadow`, `..` escape; sudoers command-scoped (no blanket `ALL`); `sacct`+`sbatch` present; sudoers syntax valid; forced-TUI `ForceCommand` for gpuusers | 9/9 PASS |
+| **Tool (unit)** | full pytest suite | 215/215 PASS |
+| **Tool (live)** | `--selftest` as `public`; `config.sacct_enabled` auto-detect; `get_partitions`/`get_node_stats`/`queue`/`sacct_history` no-throw; `render_sbatch` conda/container/notebook branches | 8/8 PASS |
+| **GPU / toolchain** | RTX 5090 sm_120; gcc 15; Apptainer 1.5.0; stats JSON fresh; **stats service auto-restart after `systemctl kill`** | (incl. above) PASS |
+| **End-to-end job** | submit via `sudo -u daham sbatch` → conda env `pytorch-2.7-test1` → torch 2.7.1+cu128, `capability (12,0)`, GPU matmul → COMPLETED → output written to `0770` dir → appears in `sacct_history()` | PASS |
+
+### 11.2 End-to-end job evidence
+
+```
+job 95 submitted → COMPLETED
+  torch 2.7.1+cu128
+  cuda available: True
+  device: NVIDIA GeForce RTX 5090
+  capability: (12, 0)
+  matmul on GPU ok
+sacct_history() ids: ['95', '94']   ← job visible in dashboard history
+```
+This single run proves the full chain: gateway sudo → SLURM/MUNGE → slurmstepd
+drop to `daham` → cgroup GPU job → conda activate on NFS → CUDA sm_120 compute →
+write into a `gpuusers:0770` directory → slurmdbd accounting → tool reads it back.
+
+### 11.3 Issues found & fixed
+
+| ID | Severity | Found by | Issue | Fix |
+|----|----------|----------|-------|-----|
+| **T-1** | 🟡 Med | live `sacct_history()` returned 0 rows | `sacct_history()` passed `--state=COMPLETED,FAILED,…` **without** an explicit `-S` start window. On this SLURM build that filter silently drops already-completed jobs, so the dashboard history was always empty. | Drop the `--state` CLI filter; add `-S now-30days` window + `-X`; filter terminal states in Python (`_SACCT_TERMINAL_STATES`). Added 3 regression tests asserting `-S` present and `--state=` absent. Verified live: history now returns jobs 95, 94. |
+
+No other defects surfaced. All Phase 1–7 features (cu128 envs, slurmdbd
+accounting, systemd stats, Apptainer, notebooks, prebuilt specs, 0770 hardening)
+behave as designed.
+
+### 11.4 Health snapshot (post-campaign)
 
 | Check | Result |
 |-------|--------|
-| SLURM services (ctld/dbd/d/munge/mariadb) | all **active** |
-| `iit-gpu-audit`, `iit-gpu-stats` | **active, enabled** |
-| Partition `gpu` | **UP**, MaxTime 24 h |
-| `gpuusers` GID — login vs GPU host | **1500 == 1500** (matched) |
-| `/shared/jobs` ownership / mode | `gpuusers:0770` (group access for `daham` ✓) |
-| `gres/gpu` TRES tracked | **yes** (`gres/gpu`, `gpumem`, `gpuutil`) |
-| QOS `normal` per-user GPU cap | **`gres/gpu=1` enforced** |
-| `sudo -u daham sacct` (tool path) | **OK** (history works for `public`) |
-| GPU | RTX 5090, sm_120, 37 °C, idle |
-| `/shared` capacity | 1.8 TB, 1% used |
-| Test suite | **208 passing** |
-| Tool deployment | `/opt/iit-gpu` on `main` |
+| Services (ctld/dbd/d/munge/mariadb/audit/stats) | all **active** |
+| `gpuusers` GID — login vs GPU host | **1500 == 1500** |
+| `/shared/jobs` | `gpuusers:0770` (group write for `daham` ✓) |
+| `gres/gpu` TRES + QOS cap | tracked, `gres/gpu=1` enforced |
+| `slurm.conf` both nodes | byte-identical |
+| GPU | RTX 5090, sm_120, idle ~37 °C |
+| Stats service crash recovery | auto-restart verified |
+| Unit tests | **215 passing** |
+| Live system checks | **49 passing** |
 
 ---
 

@@ -180,3 +180,65 @@ def test_config_sacct_auto_returns_false_when_sacct_missing(monkeypatch):
         importlib.reload(cfg_mod)
         cfg = cfg_mod.load_config()
     assert cfg.sacct_enabled is False
+
+
+# ── Regression: sacct CLI must use -S window and NOT --state (drops completed) ──
+
+def test_sacct_history_uses_start_window_not_state_filter():
+    """sacct_history must pass -S (start window) and must NOT pass --state=,
+    because sacct's --state filter silently drops already-completed jobs."""
+    from iitgpu.slurm import sacct_history
+    captured = {}
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        class R:
+            returncode = 0
+            stdout = ""
+        return R()
+
+    with patch("subprocess.run", side_effect=fake_run):
+        sacct_history()
+
+    cmd = captured["cmd"]
+    assert "-S" in cmd, "sacct_history must pass an explicit -S start window"
+    joined = " ".join(cmd)
+    assert "--state=" not in joined, (
+        "sacct_history must NOT use --state= (it drops completed jobs); "
+        "filter terminal states in Python instead"
+    )
+
+
+def test_sacct_history_filters_running_and_pending_in_python():
+    """Rows in RUNNING/PENDING must be excluded (they belong to queue())."""
+    from iitgpu.slurm import sacct_history
+    mock = MagicMock()
+    mock.returncode = 0
+    mock.stdout = (
+        "10|done|daham|COMPLETED|00:05:00|s|e|gres/gpu=1\n"
+        "11|run|daham|RUNNING|00:01:00|s|e|gres/gpu=1\n"
+        "12|wait|daham|PENDING|00:00:00|s|e|\n"
+        "13|oom|daham|OUT_OF_MEMORY|00:02:00|s|e|gres/gpu=1\n"
+    )
+    with patch("subprocess.run", return_value=mock):
+        rows = sacct_history()
+    states = {r.state for r in rows}
+    ids = {r.job_id for r in rows}
+    assert "RUNNING" not in states and "PENDING" not in states
+    assert ids == {"10", "13"}, f"expected terminal jobs only, got {ids}"
+
+
+def test_sacct_history_accepts_days_param():
+    from iitgpu.slurm import sacct_history
+    captured = {}
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        class R:
+            returncode = 0
+            stdout = ""
+        return R()
+
+    with patch("subprocess.run", side_effect=fake_run):
+        sacct_history(days=7)
+    assert "now-7days" in " ".join(captured["cmd"])

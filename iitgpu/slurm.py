@@ -322,8 +322,23 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
 
 # == SACCT-based history (requires slurmdbd) ================================
 
-def sacct_history(limit: int = 20, user: str = "daham") -> list[QueueEntry]:
-    """Return completed-job history via sacct. Newest-first."""
+# Job states that count as "history" (terminal). Running/pending jobs are shown
+# by queue(), not here. We filter in Python instead of via sacct --state because
+# sacct's --state filter without matching end-time semantics silently drops
+# already-completed jobs (returns nothing), making the dashboard history empty.
+_SACCT_TERMINAL_STATES = {
+    "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT",
+    "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE",
+}
+
+
+def sacct_history(limit: int = 20, user: str = "daham", days: int = 30) -> list[QueueEntry]:
+    """Return completed-job history via sacct (newest-first).
+
+    Uses an explicit start window (-S now-<days>days). The sacct --state CLI
+    filter is intentionally NOT used (it drops completed jobs when no -S end
+    semantics match); terminal states are filtered in Python instead.
+    """
     try:
         result = subprocess.run(
             [
@@ -331,9 +346,10 @@ def sacct_history(limit: int = 20, user: str = "daham") -> list[QueueEntry]:
                 "sacct",
                 "--noheader",
                 "--parsable2",
+                "-X",
                 "--format=JobID,JobName,User,State,Elapsed,Start,End,AllocTRES",
                 "--user", user,
-                "--state=COMPLETED,FAILED,CANCELLED,TIMEOUT",
+                "-S", f"now-{days}days",
             ],
             capture_output=True, text=True, timeout=15,
         )
@@ -348,6 +364,8 @@ def sacct_history(limit: int = 20, user: str = "daham") -> list[QueueEntry]:
             if "." in job_id:
                 continue
             state = parts[3].split()[0] if parts[3].split() else parts[3]
+            if state not in _SACCT_TERMINAL_STATES:
+                continue   # skip RUNNING/PENDING/SUSPENDED — those live in queue()
             entries.append(QueueEntry(
                 job_id=job_id,
                 name=parts[1] or job_id,
