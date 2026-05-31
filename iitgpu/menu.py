@@ -37,10 +37,15 @@ def _show_settings() -> None:
 
 
 def run_menu() -> None:
+    from iitgpu.config import load_config as _lc, is_admin as _ia
+    _admin = _ia(_lc())
     while True:
         header("Main Menu")
+        _choices = list(_ITEMS)
+        if _admin:
+            _choices.insert(len(_choices) - 1, "7. Admin         (cluster ops, users, audit)")
         choice = questionary.select(
-            "Select an option:", choices=_ITEMS, style=_STYLE
+            "Select an option:", choices=_choices, style=_STYLE
         ).ask()
 
         if choice is None or choice.startswith("6."):
@@ -76,6 +81,10 @@ def run_menu() -> None:
         elif choice.startswith("5."):
             from iitgpu.shell import run_shell
             run_shell()
+
+        elif choice.startswith("7."):
+            from iitgpu.admin import admin_menu
+            admin_menu()
 
 
 def _monitor_menu() -> None:
