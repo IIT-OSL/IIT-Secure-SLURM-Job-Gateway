@@ -50,6 +50,7 @@ class JobSpec:
     container_image: str = ""  # path to .sif — when set, skips conda/venv
     array: str = ""            # SLURM --array spec, e.g. "0-9" or "1-100%4"
     dependency: str = ""       # SLURM --dependency, e.g. "afterok:12345"
+    mail_user: str = ""        # email for --mail-type=END,FAIL (if MTA present)
 
 
 def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
@@ -90,6 +91,9 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
         lines.append(f"#SBATCH --array={spec.array}")
     if spec.dependency:
         lines.append(f"#SBATCH --dependency={spec.dependency}")
+    if spec.mail_user:
+        lines.append(f"#SBATCH --mail-user={spec.mail_user}")
+        lines.append("#SBATCH --mail-type=END,FAIL")
     lines += [
         (f"#SBATCH --output={folder}/slurm-%A_%a.out"
          if spec.array else f"#SBATCH --output={folder}/slurm-%j.out"),

@@ -407,6 +407,16 @@ def run_wizard() -> None:
     if success:
         ok(f"Job submitted! ID: {result}")
         auditclient.log("job_submitted_ok", detail=job_name, job_id=result)
+        if questionary.confirm("Notify me when it finishes?", default=False, style=_STYLE).ask():
+            from iitgpu.notify import poll_until_done, mta_present
+            if mta_present():
+                info("An MTA is present — add an email next time for SLURM mail. Polling now…")
+            info("Waiting for the job to finish (Ctrl-C to stop waiting)…")
+            try:
+                final = poll_until_done(result, interval=10)
+                ok(f"Job {result} finished: {final}")
+            except KeyboardInterrupt:
+                info("Stopped waiting (job keeps running).")
         if questionary.confirm(
             "Watch live output now?", default=True, style=_STYLE
         ).ask():
