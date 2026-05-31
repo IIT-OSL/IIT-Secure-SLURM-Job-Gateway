@@ -1,6 +1,8 @@
 # iitgpu/jobs.py
 from __future__ import annotations
 import getpass
+import grp
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -52,8 +54,15 @@ def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder = Path(jobs_dir) / spec.user / f"{spec.job_name}_{timestamp}"
     folder.mkdir(parents=True, exist_ok=True)
-    # 0o770: owner + gpuusers group can read; other users cannot access job dirs
+    # 0o770: owner + gpuusers group can read/write; other users cannot
+    # Set group to gpuusers so daham (the sudo-sbatch user) can open the script.
+    # Non-root can chown group to any group they belong to; public is in gpuusers.
     folder.chmod(0o770)
+    try:
+        gid = grp.getgrnam("gpuusers").gr_gid
+        os.chown(str(folder), -1, gid)
+    except (KeyError, PermissionError, OSError):
+        pass   # best-effort; sbatch will fail with a clear error if still blocked
     return str(folder)
 
 

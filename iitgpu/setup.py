@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import getpass
+import grp
+import os as _os
 import os
 import shutil
 import subprocess
@@ -108,6 +110,11 @@ def _run_data_upload(cfg: Config) -> None:
     dest_dir = Path(cfg.nfs_root) / user / "data"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_dir.chmod(0o770)
+    try:
+        import grp as _grp, os as _uos
+        _uos.chown(str(dest_dir), -1, _grp.getgrnam("gpuusers").gr_gid)
+    except (KeyError, PermissionError, OSError):
+        pass
 
     info(f"Files will be copied to: {dest_dir}")
     while True:
@@ -181,6 +188,11 @@ def _run_smoke_test(cfg: Config) -> None:
     out_dir = str(Path(jobs_dir(cfg)) / user / "smoke_test")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     os.chmod(out_dir, 0o770)
+    try:
+        _gid = grp.getgrnam("gpuusers").gr_gid
+        _os.chown(out_dir, -1, _gid)
+    except (KeyError, PermissionError, OSError):
+        pass
 
     script = _build_smoke_test_script(env.path, cfg, out_dir)
     with tempfile.NamedTemporaryFile(
