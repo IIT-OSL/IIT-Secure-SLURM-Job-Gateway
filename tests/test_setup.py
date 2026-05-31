@@ -87,8 +87,9 @@ def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run_with_progress(argv, phases, label):
+    def fake_run_with_progress(argv, phases, label, env=None):
         captured["argv"] = argv
+        captured["env"] = env
         return 0, []
 
     sel = MagicMock()
@@ -107,3 +108,11 @@ def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
     assert argv[1:3] == ["env", "create"], f"unexpected conda argv: {argv}"
     assert "--force" not in argv, "must not use removed `conda env create --force` flag"
     assert "--yes" in argv or "-y" in argv, f"expected --yes to auto-confirm: {argv}"
+
+    # TMPDIR must point at roomy shared storage (under nfs_root), not the
+    # default /tmp tmpfs, so multi-GB CUDA wheels don't overflow during unpack.
+    env = captured.get("env")
+    assert env is not None, "installer must pass an env with TMPDIR set"
+    assert env.get("TMPDIR", "").startswith(str(tmp_path)), (
+        f"TMPDIR should be under nfs_root ({tmp_path}), got {env.get('TMPDIR')!r}"
+    )

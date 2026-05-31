@@ -328,10 +328,23 @@ def _run_install_prebuilt(cfg: Config) -> None:
     info("This may take 15–40 minutes (large CUDA wheels).")
     auditclient.log("prebuilt_env_install_start", detail=name)
 
+    # conda's pip step unpacks multi-GB CUDA wheels; the default TMPDIR (/tmp)
+    # is frequently a small tmpfs that overflows mid-unpack ("No space left on
+    # device"). Point TMPDIR and the pip cache at roomy shared storage.
+    proc_env = dict(os.environ)
+    build_tmp = Path(cfg.nfs_root) / "tmp"
+    try:
+        build_tmp.mkdir(parents=True, exist_ok=True)
+        proc_env["TMPDIR"] = str(build_tmp)
+        proc_env["PIP_CACHE_DIR"] = str(build_tmp / "pipcache")
+    except OSError:
+        proc_env = None  # fall back to inherited environment
+
     rc, lines = _run_with_progress(
         [conda_bin, "env", "create", "-p", env_path, "-f", spec_file, "--yes"],
         _CONDA_PHASES,
         f"Installing {name}",
+        env=proc_env,
     )
     if rc != 0:
         err(f"conda env create failed for '{name}'")

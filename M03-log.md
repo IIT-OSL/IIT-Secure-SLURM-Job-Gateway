@@ -224,9 +224,12 @@ pulls `nvidia-cuda-*-cu12 12.8.*` / `nvidia-cudnn-cu12 9.7.1` / `torch ...+cu128
 - **`core.fileMode false`** set on `/opt/iit-gpu` -- the deploy tree had only
   exec-bit (mode) diffs that aborted `git pull --ff-only`; this keeps pulls clean.
 - **`/tmp` is a 2 GB tmpfs.** The cu128 wheels (cudnn 727 MB, cublas 610 MB, ...)
-  can overflow it during pip unpack; build prebuilt envs with
-  `TMPDIR=/shared/tmp` (NFS, 1.7 TB free). `/shared` (1.7 TB) and `/` (34 GB) are
-  otherwise ample.
+  overflow it during pip unpack (the first build attempt died there). The
+  prebuilt installer (`setup.py`) now sets `TMPDIR`/`PIP_CACHE_DIR` to
+  `<nfs_root>/tmp` (1.7 TB) for the conda build, so the TUI install works
+  without manual env vars. Verified end-to-end: `torch 2.7.1+cu128`,
+  `torchvision 0.22.1+cu128`, `transformers 5.9.0`, peft/trl/bitsandbytes all
+  import. `/shared` (1.7 TB) and `/` (34 GB) are otherwise ample.
 - **Two ways to get the stack, by design:** the prebuilt **conda env**
   (`/shared/envs/<name>`, built from `envs/specs/*.yml`, 15-40 min of CUDA
   wheels) and the **Apptainer container** (`/shared/images/<name>.sif`,
