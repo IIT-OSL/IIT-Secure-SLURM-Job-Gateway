@@ -37,11 +37,11 @@ run() { if [ "$DRY" = 1 ]; then echo "  [dry-run] $*"; else eval "$@"; fi; }
 step "Removing SLURM association ..."
 run "sacctmgr -i delete user $USERNAME 2>/dev/null || true"; ok "assoc removed"
 
-step "Handling /shared data ..."
+step "Handling /shared data (on the NFS server; root_squash-safe) ..."
 if [ "$PURGE" = 1 ]; then
-    run "rm -rf $NFS_ROOT/$USERNAME"; ok "data purged"
+    run "ssh $GPU_HOST_SSH \"sudo rm -rf $NFS_ROOT/$USERNAME\""; ok "data purged"
 else
-    run "mv $NFS_ROOT/$USERNAME $NFS_ROOT/$USERNAME.offboarded 2>/dev/null || true"
+    run "ssh $GPU_HOST_SSH \"sudo mv $NFS_ROOT/$USERNAME $NFS_ROOT/$USERNAME.offboarded 2>/dev/null || true\""
     ok "data kept as $NFS_ROOT/$USERNAME.offboarded"
 fi
 

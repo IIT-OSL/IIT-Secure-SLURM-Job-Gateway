@@ -82,6 +82,29 @@ Keep `no_root_squash` only if a documented workflow needs root writes over NFS.
 
 ## Phase 1 — Per-user identity (see also deploy/iit-gpu-adduser.sh)
 
+### 1.0a [LOGIN+GPU-HOST] Provisioning plumbing (one-time, required for addUser.sh)
+
+The onboarding scripts run on the login node and SSH to the GPU host to create
+the matching account. So login-node root needs key access to the GPU host, and
+the GPU-side provisioning commands must run without an interactive password:
+
+```bash
+# [LOGIN] give root an SSH key
+sudo ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519 -C iit-gpu-provisioning
+sudo cat /root/.ssh/id_ed25519.pub        # copy this
+
+# [GPU-HOST] authorize it for the GPU_HOST_SSH user (e.g. root-daham)
+#   append the pubkey to ~root-daham/.ssh/authorized_keys (0600)
+# [GPU-HOST] scoped passwordless sudo so adduser/deluser work non-interactively:
+sudo tee /etc/sudoers.d/iit-gpu-provisioning >/dev/null <<'SUDO'
+root-daham ALL=(root) NOPASSWD: /usr/sbin/useradd, /usr/sbin/userdel, \
+    /usr/sbin/groupadd, /usr/sbin/groupdel, /usr/sbin/usermod, \
+    /bin/mkdir, /bin/chown, /bin/chmod
+SUDO
+sudo chmod 0440 /etc/sudoers.d/iit-gpu-provisioning && sudo visudo -c -f /etc/sudoers.d/iit-gpu-provisioning
+```
+Verify: `sudo ssh root-daham@<gpu-host> 'sudo -n groupadd -g 59999 _t && sudo -n groupdel _t && echo ok'`.
+
 ### 1.0 Provision users
 ```bash
 # [LOGIN] (GPU host must allow the SSH target passwordless sudo, or run the
