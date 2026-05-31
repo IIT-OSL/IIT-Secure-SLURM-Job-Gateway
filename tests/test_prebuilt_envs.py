@@ -105,3 +105,57 @@ def test_apptainer_def_has_torch27(name):
     assert "torch==2.7" in content or "torch>=2.7" in content, (
         f"{name}.def does not pin PyTorch >=2.7"
     )
+
+
+# ── pip requirement well-formedness ───────────────────────────────────────────
+
+def _pip_entries(name):
+    """Return the list of pip requirement strings from a conda spec's pip block."""
+    import yaml
+    spec = SPECS_DIR / f"{name}.yml"
+    data = yaml.safe_load(spec.read_text())
+    for dep in data.get("dependencies", []):
+        if isinstance(dep, dict) and "pip" in dep:
+            return dep["pip"]
+    return []
+
+
+@pytest.mark.parametrize("name", EXPECTED_ENVS)
+def test_conda_spec_pip_entries_are_single_requirements(name):
+    """Each pip list item must be ONE requirement or a pip flag line.
+
+    Regression: conda writes every pip list entry as a single line in a
+    requirements file. Packing several packages plus --index-url onto one
+    line (e.g. 'torch==2.7.* torchvision torchaudio --index-url ...') made
+    pip fail with 'Invalid requirement'. Index URLs must live on their own
+    --extra-index-url line, and each package on its own line.
+    """
+    from packaging.requirements import Requirement, InvalidRequirement
+
+    for entry in _pip_entries(name):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry.startswith("-"):
+            # pip option line (e.g. --extra-index-url URL); not a requirement
+            continue
+        try:
+            Requirement(entry)
+        except InvalidRequirement as exc:
+            pytest.fail(
+                f"{name}.yml has an invalid pip requirement line {entry!r}: {exc}. "
+                f"Split packages onto separate lines; put index URLs on a "
+                f"--extra-index-url line."
+            )
+
+
+@pytest.mark.parametrize("name", EXPECTED_ENVS)
+def test_conda_spec_index_url_on_own_line(name):
+    """--index-url / --extra-index-url must not share a line with a package."""
+    for entry in _pip_entries(name):
+        entry = entry.strip()
+        if "index-url" in entry:
+            # the only token before the URL may be the flag itself
+            assert entry.startswith("--"), (
+                f"{name}.yml packs an index-url onto a package line: {entry!r}"
+            )

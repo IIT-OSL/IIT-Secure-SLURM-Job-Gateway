@@ -10,7 +10,8 @@ dependencies:
   - python=3.11
   - pip
   - pip:
-    - torch==2.7.* --index-url https://download.pytorch.org/whl/cu128
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+    - torch==2.7.*
     - scikit-learn>=1.4
     - xgboost>=2.0
     - lightgbm
