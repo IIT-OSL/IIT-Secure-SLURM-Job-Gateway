@@ -5,4 +5,4 @@
 rich>=13.0
 questionary>=2.0
 prompt_toolkit>=3.0.36,<3.0.47
-huggingface_hub>=0.20
+huggingface_hub>=0.20,<1.0  # snapshot_download only; 1.x pulls typer/click which clashes with Debian click
