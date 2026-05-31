@@ -85,6 +85,7 @@ def _monitor_menu() -> None:
                 "Job history  (filters)",
                 "Cluster status",
                 "View hardware stats",
+                "Usage & accounting",
                 "Back to main menu",
             ],
             style=_STYLE,
@@ -108,6 +109,9 @@ def _monitor_menu() -> None:
             _show_cluster_status()
         elif choice == "View hardware stats":
             run_hardware_stats()
+        elif choice == "Usage & accounting":
+            from iitgpu.accounting import usage_menu
+            usage_menu()
 
 
 def _show_cluster_status() -> None:
