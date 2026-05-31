@@ -3,4 +3,4 @@
 # UIDs, so slurmstepd can resolve the user and set up the job environment.
 Defaults:gpuusers !lecture, timestamp_timeout=0
 
-%gpuusers ALL=(daham) NOPASSWD: /usr/bin/sbatch, /usr/bin/squeue, /usr/bin/scancel, /usr/bin/sinfo
+%gpuusers ALL=(daham) NOPASSWD: /usr/bin/sbatch, /usr/bin/squeue, /usr/bin/scancel, /usr/bin/sinfo, /usr/bin/sacct
