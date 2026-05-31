@@ -249,3 +249,48 @@ def write_notebook_sbatch(
     path.write_text(render_notebook_sbatch(spec, folder, port=port))
     path.chmod(0o644)
     return str(path)
+
+
+def render_tensorboard_sbatch(spec, folder, logdir, port=6006,
+                              gateway_host="localhost", gateway_port=22):
+    """sbatch that launches TensorBoard bound to 127.0.0.1 and prints the
+    SSH tunnel command. Reuses conda/container activation like notebooks."""
+    lines = [
+        "#!/bin/bash",
+        f"#SBATCH --job-name=tensorboard",
+        f"#SBATCH --partition={spec.partition}",
+        f"#SBATCH --cpus-per-task={spec.cpus}",
+        f"#SBATCH --mem={spec.mem_gb}G",
+    ]
+    if spec.time_limit:
+        lines.append(f"#SBATCH --time={spec.time_limit}")
+    lines += [
+        f"#SBATCH --output={folder}/slurm-%j.out",
+        f"#SBATCH --error={folder}/slurm-%j.err",
+        f"#SBATCH --chdir={folder}",
+        "",
+    ]
+    if spec.container_image:
+        launcher = (
+            f"apptainer exec --bind /shared {spec.container_image} "
+            f"tensorboard --logdir {logdir} --port {port} --host 127.0.0.1"
+        )
+    else:
+        if spec.conda_env:
+            lines += [
+                '_conda_sh="${CONDA_PREFIX_SHARED:-/shared/miniforge3}/etc/profile.d/conda.sh"',
+                '[ -f "$_conda_sh" ] && source "$_conda_sh"',
+                f"conda activate {spec.conda_env}",
+                "",
+            ]
+        launcher = f"tensorboard --logdir {logdir} --port {port} --host 127.0.0.1"
+    lines += [
+        "echo \'=================================================\'",
+        "echo \'TensorBoard starting. SSH tunnel from your laptop:\'",
+        f"echo \'  ssh -p {gateway_port} -L {port}:localhost:{port} $(whoami)@{gateway_host}\'",
+        f"echo \'Then open: http://localhost:{port}\'",
+        "echo \'=================================================\'",
+        "",
+        launcher,
+    ]
+    return "\n".join(lines) + "\n"
