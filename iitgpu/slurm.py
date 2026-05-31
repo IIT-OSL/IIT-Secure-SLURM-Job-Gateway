@@ -320,6 +320,60 @@ def get_node_stats(node_name: str = "iit-MS-7E06") -> NodeStats | None:
         return None
 
 
+# == SACCT-based history (requires slurmdbd) ================================
+
+def sacct_history(limit: int = 20, user: str = "daham") -> list[QueueEntry]:
+    """Return completed-job history via sacct. Newest-first."""
+    try:
+        result = subprocess.run(
+            [
+                "sudo", "-u", "daham",
+                "sacct",
+                "--noheader",
+                "--parsable2",
+                "--format=JobID,JobName,User,State,Elapsed,Start,End,AllocTRES",
+                "--user", user,
+                "--state=COMPLETED,FAILED,CANCELLED,TIMEOUT",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return []
+        entries: list[QueueEntry] = []
+        for line in result.stdout.splitlines():
+            parts = line.split("|")
+            if len(parts) < 8:
+                continue
+            job_id = parts[0]
+            if "." in job_id:
+                continue
+            state = parts[3].split()[0] if parts[3].split() else parts[3]
+            entries.append(QueueEntry(
+                job_id=job_id,
+                name=parts[1] or job_id,
+                user=parts[2] or user,
+                state=state,
+                partition="gpu",
+                time_used=parts[4] or "-",
+                time_limit="N/A",
+                nodes=1,
+            ))
+        return list(reversed(entries))[:limit]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def job_history(search_root: str, limit: int = 20) -> list[QueueEntry]:
+    """Return job history: sacct when slurmdbd is up, file-scan otherwise."""
+    from iitgpu.config import load_config
+    cfg = load_config()
+    if cfg.sacct_enabled:
+        rows = sacct_history(limit=limit)
+        if rows:
+            return rows
+    return recent_jobs(search_root, limit=min(limit, 20))
+
+
 def recent_jobs(search_root: str, limit: int = 2) -> list[QueueEntry]:
     """Return up to `limit` recently completed jobs by scanning output files."""
     try:
