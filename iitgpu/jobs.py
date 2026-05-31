@@ -52,7 +52,8 @@ def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder = Path(jobs_dir) / spec.user / f"{spec.job_name}_{timestamp}"
     folder.mkdir(parents=True, exist_ok=True)
-    folder.chmod(0o777)
+    # 0o770: owner + gpuusers group can read; other users cannot access job dirs
+    folder.chmod(0o770)
     return str(folder)
 
 
