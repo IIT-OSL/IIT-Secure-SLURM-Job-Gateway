@@ -67,6 +67,26 @@ def _demo_mode() -> bool:
     return os.environ.get("DEMO_MODE", "0") == "1"
 
 
+
+# ── Gateway identity helpers ───────────────────────────────────────────────────
+# When GATEWAY_SHARED_USER is on (legacy), SLURM CLI runs as the shared account
+# (e.g. "daham") via sudo. When off (default / per-user identity), commands run
+# directly as the logged-in user and attribute correctly in sacct/fairshare.
+
+def _gateway_prefix() -> list[str]:
+    from iitgpu.config import load_config
+    cfg = load_config()
+    if cfg.gateway_shared_user:
+        return ["sudo", "-u", cfg.shared_user]
+    return []
+
+
+def _effective_user() -> str:
+    import getpass
+    from iitgpu.config import load_config
+    cfg = load_config()
+    return cfg.shared_user if cfg.gateway_shared_user else getpass.getuser()
+
 def get_partitions() -> list[Partition]:
     if _demo_mode():
         return list(_DEMO_PARTITIONS)
@@ -103,7 +123,7 @@ def submit_job(script_path: str) -> tuple[bool, str]:
         return True, job_id
     try:
         result = subprocess.run(
-            ["sudo", "-u", "daham", "sbatch", script_path],
+            _gateway_prefix() + ["sbatch", script_path],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
@@ -122,8 +142,9 @@ def queue(user: str | None = None) -> list[QueueEntry]:
     # the short --job-name ("train").  The output path (%o) encodes both the
     # real gateway user and the full job-folder name, so we parse it instead.
     # Use | separator so paths with spaces (rare but possible) don't break parsing.
-    cmd = ["sudo", "-u", "daham", "squeue", "--noheader",
-           "--format=%i|%j|%u|%T|%P|%M|%l|%D|%o", "-u", "daham"]
+    _eu = _effective_user()
+    cmd = _gateway_prefix() + ["squeue", "--noheader",
+           "--format=%i|%j|%u|%T|%P|%M|%l|%D|%o", "-u", _eu]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         entries = []
@@ -229,7 +250,7 @@ def _count_running_gpu_jobs() -> int:
     Used because AllocTRES omits GPU on this SLURM build."""
     try:
         r = subprocess.run(
-            ["sudo", "-u", "daham", "squeue", "--noheader",
+            _gateway_prefix() + ["squeue", "--noheader",
              "--states=RUNNING", "--format=%b"],   # %b = requested GRES
             capture_output=True, text=True, timeout=5,
         )
@@ -332,17 +353,18 @@ _SACCT_TERMINAL_STATES = {
 }
 
 
-def sacct_history(limit: int = 20, user: str = "daham", days: int = 30) -> list[QueueEntry]:
+def sacct_history(limit: int = 20, user: str | None = None, days: int = 30) -> list[QueueEntry]:
     """Return completed-job history via sacct (newest-first).
 
     Uses an explicit start window (-S now-<days>days). The sacct --state CLI
     filter is intentionally NOT used (it drops completed jobs when no -S end
     semantics match); terminal states are filtered in Python instead.
     """
+    if user is None:
+        user = _effective_user()
     try:
         result = subprocess.run(
-            [
-                "sudo", "-u", "daham",
+            _gateway_prefix() + [
                 "sacct",
                 "--noheader",
                 "--parsable2",
@@ -478,7 +500,7 @@ def cancel(job_id: str) -> tuple[bool, str]:
         return False, f"Job {job_id} not found"
     try:
         result = subprocess.run(
-            ["sudo", "-u", "daham", "scancel", job_id],
+            _gateway_prefix() + ["scancel", job_id],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:

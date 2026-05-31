@@ -63,3 +63,11 @@ docs/superpowers/
 # SLURM job output (generated at runtime)
 slurm-*.out
 slurm-*.err
+
+# Site-specific config (Phase 0) — never commit; use site.env.example as template
+deploy/site.env
+
+# Apptainer / build scratch
+*.sif
+.apptainer_tmp/
+.apptainer_cache/

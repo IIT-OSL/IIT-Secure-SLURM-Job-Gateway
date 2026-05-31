@@ -199,7 +199,10 @@ def run_wizard() -> None:
         )
         folder = make_job_folder(jdir, spec)
         from iitgpu.jobs import render_notebook_sbatch, write_notebook_sbatch
-        script_text = render_notebook_sbatch(spec, folder, port=nb_port)
+        script_text = render_notebook_sbatch(
+            spec, folder, port=nb_port,
+            gateway_host=cfg.gateway_host, gateway_port=int(cfg.gateway_port),
+        )
         panel("Generated notebook sbatch script", script_text)
 
         action = questionary.select(
@@ -224,7 +227,8 @@ def run_wizard() -> None:
         success, result = submit_job(sbatch_path)
         if success:
             ok(f"Notebook job submitted! ID: {result}")
-            ok(f"SSH tunnel: ssh -p 2225 -L {nb_port}:localhost:{nb_port} public@10.35.4.100")
+            ok(f"SSH tunnel: ssh -p {cfg.gateway_port} "
+               f"-L {nb_port}:localhost:{nb_port} {getpass.getuser()}@{cfg.gateway_host}")
             auditclient.log("notebook_submitted_ok", detail=job_name, job_id=result)
         else:
             err(f"Submission failed: {result}")

@@ -59,7 +59,8 @@ def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
     # Non-root can chown group to any group they belong to; public is in gpuusers.
     folder.chmod(0o770)
     try:
-        gid = grp.getgrnam("gpuusers").gr_gid
+        from iitgpu.config import load_config
+        gid = grp.getgrnam(load_config().gpuusers_group).gr_gid
         os.chown(str(folder), -1, gid)
     except (KeyError, PermissionError, OSError):
         pass   # best-effort; sbatch will fail with a clear error if still blocked
@@ -140,8 +141,8 @@ def render_notebook_sbatch(
     spec: "JobSpec",
     folder: str,
     port: int = 8888,
-    gateway_host: str = "10.35.4.100",
-    gateway_port: int = 2225,
+    gateway_host: str = "localhost",
+    gateway_port: int = 22,
 ) -> str:
     """Generate an sbatch script that launches JupyterLab on the GPU node.
 

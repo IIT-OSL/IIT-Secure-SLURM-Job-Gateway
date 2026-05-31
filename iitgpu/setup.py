@@ -112,7 +112,7 @@ def _run_data_upload(cfg: Config) -> None:
     dest_dir.chmod(0o770)
     try:
         import grp as _grp, os as _uos
-        _uos.chown(str(dest_dir), -1, _grp.getgrnam("gpuusers").gr_gid)
+        _uos.chown(str(dest_dir), -1, _grp.getgrnam(load_config().gpuusers_group).gr_gid)
     except (KeyError, PermissionError, OSError):
         pass
 
@@ -189,7 +189,7 @@ def _run_smoke_test(cfg: Config) -> None:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     os.chmod(out_dir, 0o770)
     try:
-        _gid = grp.getgrnam("gpuusers").gr_gid
+        _gid = grp.getgrnam(load_config().gpuusers_group).gr_gid
         _os.chown(out_dir, -1, _gid)
     except (KeyError, PermissionError, OSError):
         pass
