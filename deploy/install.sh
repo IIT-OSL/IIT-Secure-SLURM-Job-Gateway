@@ -26,7 +26,7 @@ apt-get update -qq
 apt-get install -y \
     wget curl rsync git \
     python3 python3-pip \
-    bc jq \
+    bc jq acl \
     nfs-common \
     --no-install-recommends
 
@@ -46,13 +46,25 @@ mkdir -p \
     "${NFS_ROOT}/envs" \
     "${NFS_ROOT}/models" \
     "${NFS_ROOT}/templates"
-# Make directories writable by the gateway user so the tool can create sub-dirs
-chown -R "${GATEWAY_USER}:gpuusers" \
-    "${NFS_ROOT}/scripts" "${NFS_ROOT}/jobs" "${NFS_ROOT}/data" \
-    "${NFS_ROOT}/envs"    "${NFS_ROOT}/models" "${NFS_ROOT}/templates" 2>/dev/null || true
-chmod -R g+w \
-    "${NFS_ROOT}/scripts" "${NFS_ROOT}/jobs" "${NFS_ROOT}/data" \
-    "${NFS_ROOT}/envs"    "${NFS_ROOT}/models" "${NFS_ROOT}/templates" 2>/dev/null || true
+# Multi-user shared state: any gpuusers member (not just the first creator) must
+# be able to read/write the model & env registries, templates, job dirs, and
+# uploads. Own by group gpuusers, make group-writable, set the setgid bit on
+# directories so new files/sub-dirs inherit the gpuusers group, and (if the acl
+# tools are present) add a default ACL so new files are gpuusers-writable
+# regardless of the creating process's umask. Paired with `umask 002` in the
+# launcher this yields group-writable 0664 files owned by group gpuusers.
+echo "==> Setting shared permissions for multi-user (gpuusers) access..."
+for _d in scripts jobs data envs models templates; do
+    _p="${NFS_ROOT}/${_d}"
+    [ -d "${_p}" ] || continue
+    chown -R "${GATEWAY_USER}:gpuusers" "${_p}" 2>/dev/null || true
+    chmod -R g+rwX "${_p}" 2>/dev/null || true
+    find "${_p}" -type d -exec chmod g+s {} + 2>/dev/null || true
+    if command -v setfacl >/dev/null 2>&1; then
+        setfacl -R    -m g:gpuusers:rwX "${_p}" 2>/dev/null || true
+        setfacl -R -d -m g:gpuusers:rwX "${_p}" 2>/dev/null || true
+    fi
+done
 
 # ── Miniforge (conda) ─────────────────────────────────────────────────────────
 echo "==> Installing Miniforge to ${CONDA_PREFIX}..."
@@ -104,6 +116,9 @@ echo "==> Installing launcher at ${BIN_PATH}..."
 # included explicitly so envbuilder's shutil.which("conda") succeeds at runtime.
 cat > "${BIN_PATH}" << LAUNCHER
 #!/bin/bash
+# umask 002 so shared state the tool writes (registries, templates, job dirs) is
+# group-writable by gpuusers; survives the env -i below (umask is not an env var).
+umask 002
 exec env -i \\
     HOME="\$HOME" \\
     USER="\$USER" \\

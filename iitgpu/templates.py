@@ -128,6 +128,7 @@ def save_template(cfg: Config, name: str, spec: JobSpec) -> bool:
     try:
         data = asdict(spec)
         tpath.write_text(json.dumps(data, indent=2))
+        make_shared_writable(tpath)
         auditclient.log("template_save", detail=name)
         return True
     except OSError as exc:

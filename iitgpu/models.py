@@ -22,7 +22,7 @@ import questionary
 from questionary import Style
 
 from iitgpu import auditclient
-from iitgpu.config import Config, models_dir
+from iitgpu.config import Config, models_dir, make_shared_writable
 from iitgpu.ui import err, header, info, kv, ok, warn
 
 _STYLE = Style([
@@ -70,6 +70,7 @@ def _save_registry(cfg: Config, entries: list[ModelEntry]) -> None:
             json.dump([asdict(e) for e in entries], fh, indent=2)
         finally:
             _flock(fh, LOCK_UN)
+    make_shared_writable(rpath)
 
 
 def register_model(cfg: Config, entry: ModelEntry) -> None:

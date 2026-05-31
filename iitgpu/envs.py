@@ -19,7 +19,7 @@ import questionary
 from questionary import Style
 
 from iitgpu import auditclient
-from iitgpu.config import Config, models_dir
+from iitgpu.config import Config, models_dir, make_shared_writable
 from iitgpu.ui import err, header, info, ok, warn
 
 _STYLE = Style([
@@ -75,6 +75,7 @@ def _save_venv_registry(cfg: Config, entries: list[EnvEntry]) -> None:
             json.dump([asdict(e) for e in entries], fh, indent=2)
         finally:
             _flock(fh, LOCK_UN)
+    make_shared_writable(rpath)
 
 
 def discover_conda_envs() -> list[EnvEntry]:

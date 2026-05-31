@@ -124,6 +124,27 @@ def templates_dir(cfg: Config) -> str:
     return str(Path(cfg.nfs_root) / "templates").replace("\\", "/")
 
 
+def make_shared_writable(path) -> None:
+    """Best-effort: make a shared-state path writable by every gateway user.
+
+    The cluster's NFS export uses root_squash and supports neither POSIX ACLs
+    nor setgid group inheritance, and non-root users cannot chgrp even their own
+    files — so group-based sharing of /shared cannot be configured by the
+    installer. Instead, whoever creates a shared-state file (model/env registry,
+    template) makes it world-writable so any other user can update it in place.
+    This stays within the existing trust boundary: /shared is already 0777 and
+    SSH access is restricted to gpuusers members (ForceCommand + Match Group).
+
+    Only the file owner can chmod, so later writers' calls are expected to fail
+    harmlessly (the file is already 0666 from its creator); errors are ignored.
+    """
+    try:
+        p = Path(path)
+        os.chmod(p, 0o777 if p.is_dir() else 0o666)
+    except OSError:
+        pass
+
+
 def conda_sh(cfg: Config) -> str:
     """Absolute path to conda.sh for sourcing in sbatch scripts and subprocesses."""
     return str(Path(cfg.conda_prefix) / "etc" / "profile.d" / "conda.sh")
