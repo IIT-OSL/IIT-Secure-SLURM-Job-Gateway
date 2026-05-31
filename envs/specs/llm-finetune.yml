@@ -1,0 +1,23 @@
+# envs/specs/llm-finetune.yml
+# Prebuilt conda environment — CUDA 12.8 / PyTorch >= 2.7 (sm_120 / RTX 5090)
+# Build: conda env create -p /shared/envs/llm-finetune -f envs/specs/llm-finetune.yml
+# Activate: conda activate /shared/envs/llm-finetune
+name: llm-finetune
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - torch==2.7.* torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    - transformers>=4.40
+    - peft>=0.11
+    - trl>=0.8
+    - bitsandbytes>=0.43
+    - accelerate>=0.30
+    - datasets>=2.19
+    - safetensors
+    - scipy
+    - sentencepiece
+    - protobuf

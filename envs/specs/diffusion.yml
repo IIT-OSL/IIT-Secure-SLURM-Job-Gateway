@@ -1,0 +1,20 @@
+# envs/specs/diffusion.yml
+# Prebuilt conda environment — CUDA 12.8 / PyTorch >= 2.7 (sm_120 / RTX 5090)
+# Build: conda env create -p /shared/envs/diffusion -f envs/specs/diffusion.yml
+# Activate: conda activate /shared/envs/diffusion
+name: diffusion
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - torch==2.7.* torchvision --index-url https://download.pytorch.org/whl/cu128
+    - diffusers>=0.27
+    - transformers>=4.40
+    - accelerate>=0.30
+    - safetensors
+    - xformers
+    - Pillow
+    - invisible_watermark

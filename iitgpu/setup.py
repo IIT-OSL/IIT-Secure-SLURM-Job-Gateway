@@ -257,6 +257,89 @@ def _run_model_download(cfg: Config) -> None:
 
 # ── Main setup menu ───────────────────────────────────────────────────────────
 
+# ── Prebuilt environment installer ────────────────────────────────────────────
+
+_PREBUILT_SPECS_DIR = Path(__file__).parent.parent / "envs" / "specs"
+
+_PREBUILT_DESCRIPTIONS: dict[str, str] = {
+    "llm-finetune":  "LoRA/QLoRA finetuning  (transformers, peft, trl, bitsandbytes)",
+    "llm-serve":     "LLM inference server   (vLLM, transformers, fastapi)",
+    "vision":        "Computer vision        (timm, ultralytics/YOLO, torchvision)",
+    "diffusion":     "Stable Diffusion       (diffusers, xformers)",
+    "data-science":  "Data science           (scikit-learn, xgboost, pandas, JupyterLab)",
+}
+
+
+def _run_install_prebuilt(cfg: Config) -> None:
+    header("Install Prebuilt Environment")
+    specs_dir = _PREBUILT_SPECS_DIR
+    if not specs_dir.exists():
+        warn(f"Specs directory not found: {specs_dir}")
+        warn("Run from the repo root or ensure envs/specs/ exists.")
+        return
+
+    available = {
+        name: desc
+        for name, desc in _PREBUILT_DESCRIPTIONS.items()
+        if (specs_dir / f"{name}.yml").exists()
+    }
+    if not available:
+        warn("No prebuilt specs found in envs/specs/")
+        return
+
+    choices = [f"{name}  — {desc}" for name, desc in available.items()] + ["[back]"]
+    choice = questionary.select(
+        "Which prebuilt environment?", choices=choices, style=_STYLE
+    ).ask()
+    if choice is None or choice == "[back]":
+        return
+
+    name = choice.split("  —")[0].strip()
+    spec_file = str(specs_dir / f"{name}.yml")
+
+    env_path = str(Path(cfg.nfs_root) / "envs" / name)
+    existing = Path(env_path)
+    if existing.exists():
+        if not questionary.confirm(
+            f"Environment '{name}' already exists at {env_path}. Reinstall?",
+            default=False, style=_STYLE
+        ).ask():
+            return
+
+    from iitgpu.envbuilder import _find_conda, _run_with_progress, _CONDA_PHASES, _show_error_lines
+    conda_bin = _find_conda(cfg)
+    if not conda_bin:
+        err("conda not found — cannot install prebuilt environment")
+        return
+
+    info(f"Installing '{name}' from {spec_file} into {env_path} ...")
+    info("This may take 15–40 minutes (large CUDA wheels).")
+    auditclient.log("prebuilt_env_install_start", detail=name)
+
+    rc, lines = _run_with_progress(
+        [conda_bin, "env", "create", "-p", env_path, "-f", spec_file, "--force"],
+        _CONDA_PHASES,
+        f"Installing {name}",
+    )
+    if rc != 0:
+        err(f"conda env create failed for '{name}'")
+        _show_error_lines(lines)
+        auditclient.log("prebuilt_env_install_failed", detail=name)
+        return
+
+    ok(f"Prebuilt environment '{name}' installed at {env_path}")
+    auditclient.log("prebuilt_env_install_ok", detail=name)
+
+    # Register in the env registry
+    from iitgpu.envs import EnvEntry, _save_venv_registry, _load_venv_registry
+    existing_envs = _load_venv_registry(cfg)
+    existing_envs = [e for e in existing_envs if e.name != name]
+    existing_envs.append(EnvEntry(name=name, kind="conda", path=env_path))
+    _save_venv_registry(cfg, existing_envs)
+    ok(f"Environment '{name}' registered for use in wizard.")
+
+
+
 def run_setup() -> None:
     cfg = load_config()
     header("Setup")
@@ -266,6 +349,7 @@ def run_setup() -> None:
 
     steps = [
         ("Environment (conda/venv)", _run_env_setup),
+        ("Install a prebuilt environment", _run_install_prebuilt),
         ("Data upload",              _run_data_upload),
         ("Model download",           _run_model_download),
         ("Smoke test",               _run_smoke_test),

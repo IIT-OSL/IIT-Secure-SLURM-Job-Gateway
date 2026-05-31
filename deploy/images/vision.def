@@ -1,0 +1,36 @@
+# deploy/images/vision.def — Apptainer definition for vision
+# Build: sudo apptainer build /shared/images/vision.sif deploy/images/vision.def
+# Requires: CUDA 12.8 driver on the host (RTX 5090 sm_120)
+
+Bootstrap: docker
+From: nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
+
+%environment
+    export PATH=/opt/conda/bin:$PATH
+    export CONDA_PREFIX=/opt/conda
+
+%post
+    # System dependencies
+    apt-get update && apt-get install -y --no-install-recommends \
+        wget curl git ca-certificates build-essential && \
+        rm -rf /var/lib/apt/lists/*
+
+    # Miniforge (conda)
+    wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh
+    bash /tmp/miniforge.sh -b -p /opt/conda
+    rm /tmp/miniforge.sh
+    /opt/conda/bin/conda init bash
+
+    # Vision stack — PyTorch + timm + YOLO
+    /opt/conda/bin/pip install --no-cache-dir \
+        torch==2.7.* torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu128
+    /opt/conda/bin/pip install --no-cache-dir \
+        timm>=1.0 ultralytics>=8.2 \
+        Pillow opencv-python-headless albumentations
+
+%runscript
+    exec python3 "$@"
+
+%labels
+    org.label-schema.name "IIT Vision — CUDA 12.8 / PyTorch 2.7 / YOLO"

@@ -1,0 +1,19 @@
+# envs/specs/llm-serve.yml
+# Prebuilt conda environment — CUDA 12.8 / PyTorch >= 2.7 (sm_120 / RTX 5090)
+# Build: conda env create -p /shared/envs/llm-serve -f envs/specs/llm-serve.yml
+# Activate: conda activate /shared/envs/llm-serve
+name: llm-serve
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - torch==2.7.* --index-url https://download.pytorch.org/whl/cu128
+    - vllm>=0.4.0
+    - transformers>=4.40
+    - accelerate>=0.30
+    - fastapi
+    - uvicorn
+    - huggingface_hub

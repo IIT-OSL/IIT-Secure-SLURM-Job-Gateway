@@ -1,0 +1,20 @@
+# envs/specs/vision.yml
+# Prebuilt conda environment — CUDA 12.8 / PyTorch >= 2.7 (sm_120 / RTX 5090)
+# Build: conda env create -p /shared/envs/vision -f envs/specs/vision.yml
+# Activate: conda activate /shared/envs/vision
+name: vision
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - torch==2.7.* torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    - timm>=1.0
+    - ultralytics>=8.2
+    - Pillow
+    - opencv-python-headless
+    - albumentations
+    - matplotlib
+    - scikit-image

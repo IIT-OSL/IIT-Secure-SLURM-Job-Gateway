@@ -1,0 +1,23 @@
+# envs/specs/data-science.yml
+# Prebuilt conda environment — CUDA 12.8 / PyTorch >= 2.7 (sm_120 / RTX 5090)
+# Build: conda env create -p /shared/envs/data-science -f envs/specs/data-science.yml
+# Activate: conda activate /shared/envs/data-science
+name: data-science
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - torch==2.7.* --index-url https://download.pytorch.org/whl/cu128
+    - scikit-learn>=1.4
+    - xgboost>=2.0
+    - lightgbm
+    - pandas>=2.0
+    - numpy
+    - matplotlib
+    - seaborn
+    - jupyterlab>=4.0
+    - ipywidgets
+    - plotly
