@@ -200,7 +200,6 @@ def run_wizard() -> None:
         folder = make_job_folder(jdir, spec)
         from iitgpu.jobs import render_notebook_sbatch, write_notebook_sbatch
         script_text = render_notebook_sbatch(spec, folder, port=nb_port)
-        from iitgpu.ui import panel
         panel("Generated notebook sbatch script", script_text)
 
         action = questionary.select(
@@ -209,7 +208,6 @@ def run_wizard() -> None:
             style=_STYLE,
         ).ask()
         if action is None or action == "Discard":
-            import shutil
             shutil.rmtree(folder, ignore_errors=True)
             info("Discarded.")
             return
