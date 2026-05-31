@@ -127,3 +127,27 @@ def templates_dir(cfg: Config) -> str:
 def conda_sh(cfg: Config) -> str:
     """Absolute path to conda.sh for sourcing in sbatch scripts and subprocesses."""
     return str(Path(cfg.conda_prefix) / "etc" / "profile.d" / "conda.sh")
+
+
+def user_groups() -> set[str]:
+    """Return the set of POSIX group names the current process belongs to."""
+    import grp
+    import os
+    names = set()
+    try:
+        for gid in os.getgroups():
+            try:
+                names.add(grp.getgrgid(gid).gr_name)
+            except KeyError:
+                pass
+        names.add(grp.getgrgid(os.getgid()).gr_name)
+    except OSError:
+        pass
+    return names
+
+
+def is_admin(cfg: Config | None = None) -> bool:
+    """True if the current user is a member of the admin group (sees admin panel)."""
+    if cfg is None:
+        cfg = load_config()
+    return cfg.admin_group in user_groups()

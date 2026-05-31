@@ -82,13 +82,32 @@ Keep `no_root_squash` only if a documented workflow needs root writes over NFS.
 
 ## Phase 1 — Per-user identity (see also deploy/iit-gpu-adduser.sh)
 
-### 1.1 [LOGIN] Reduce the gateway sudoers to admin-only
-Once users run SLURM as themselves (`GATEWAY_SHARED_USER=0`), the broad
-`%gpuusers ALL=(daham) NOPASSWD: ...` rule is no longer needed for normal jobs.
-Replace `/etc/sudoers.d/iit-gpu-gateway` with an admin-only scope (node
-drain/resume + provisioning). Validate with `visudo -c` before saving.
+### 1.0 Provision users
+```bash
+# [LOGIN] (GPU host must allow the SSH target passwordless sudo, or run the
+# GPU-host useradd lines manually — see the script's step 3).
+sudo IIT_SITE_ENV=/opt/iit-gpu/deploy/site.env iit-gpu-adduser alice
+sudo passwd alice           # or install ~alice/.ssh/authorized_keys
+# alice now lands in the TUI on next SSH login (gpuusers triggers ForceCommand).
+```
+The onboarding allocates a UID free on **both** nodes, creates the account on
+each, adds it to `gpuusers`, registers the SLURM association, and makes
+`/shared/alice` (0700) **on the NFS server** (root_squash-safe). `tuser` was
+provisioned this way and verified: `sacct -X --format=JobID,User` shows
+`User=tuser`.
 
-### 1.2 Cutover
-Set `GATEWAY_SHARED_USER=0` in `/opt/iit-gpu/deploy/site.env` only after every
-active user has a real account (Phase 1 provisioning). `public` keeps working as
-long as the flag is `1`.
+### 1.1 CUTOVER ORDER (do not break `public`)
+The production `/opt/iit-gpu` must be running the per-user code BEFORE the flag
+flip / sudoers reduction, or `public`'s `sudo -u daham` path breaks. Sequence:
+```
+1. Merge feature/phase1-identity → main (maintainer).
+2. cd /opt/iit-gpu && git pull --ff-only && python3 -m pytest tests/ -q
+3. Set GATEWAY_SHARED_USER=0 in /opt/iit-gpu/deploy/site.env
+   (public has a SLURM association, so it keeps working — now as itself).
+4. Swap the sudoers rule to the admin-only scope:
+     sudo cp /opt/iit-gpu/deploy/sudoers-gateway-admin /etc/sudoers.d/iit-gpu-gateway
+     sudo visudo -c -f /etc/sudoers.d/iit-gpu-gateway
+   (edit %gpuadmins to match your ADMIN_GROUP).
+5. Verify: public and a provisioned user each submit a job; sacct shows their
+   own usernames. Rollback = set GATEWAY_SHARED_USER=1 and restore the old
+   sudoers file (kept as deploy/sudoers-gateway).
