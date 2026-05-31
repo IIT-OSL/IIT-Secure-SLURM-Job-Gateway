@@ -8,7 +8,7 @@ code, and full submit / monitor / accounting / files / notebooks / admin
 coverage. Documents the Linux changes, the SLURM changes, and the tool itself.
 **Builds on:** [M01-log.md](./M01-log.md), [M02-log.md](./M02-log.md).
 **Branches:** `feature/phase0-opensource` … `feature/phase8-polish` (one per
-phase, cumulative; merged to `main` by the maintainer). **319 tests passing.**
+phase, cumulative; merged to `main` by the maintainer). **322 tests passing.**
 
 ---
 
@@ -25,7 +25,7 @@ phase, cumulative; merged to `main` by the maintainer). **319 tests passing.**
 | Upload only | **Two-pane file manager** + env/container management |
 | Notebook only | + **TensorBoard** + **running-services** view with teardown |
 | No admin tooling | **Admin panel** (gated) — drain/resume, user provision/offboard, audit viewer, cluster usage |
-| 161 → 217 tests | **319 tests** |
+| 161 → 217 tests | **322 tests** |
 
 The live cluster was cut over to per-user identity during this work: **`public`
 now runs as `public`, not `daham`** (verified job 107 → `User=public`).
@@ -171,7 +171,7 @@ is gated by group membership (`public` = not admin, verified).
 
 ## 6. Verification
 
-- **319 unit tests** green (`PYTHONPATH=. pytest tests/ -q`).
+- **322 unit tests** green (`PYTHONPATH=. pytest tests/ -q`).
 - Live, end-to-end: per-user submit (`public→public`, `tuser→tuser`,
   `demo1→demo1`); **job array** (103_0/1/2) + **dependency** (104 waited then ran);
   **hold→release** (109); GPU jobs on the RTX 5090 (sm_120) under cgroup limits;
@@ -192,7 +192,7 @@ is gated by group membership (`public` = not admin, verified).
 
 Four issues surfaced when exercising **Setup -> Install a prebuilt environment**
 and **Model download** on the live box (system `python3` 3.14, conda 26.3.2).
-All fixed, tested (**305 -> 319 tests**), pushed, and redeployed to `/opt/iit-gpu`.
+All fixed, tested (**305 -> 322 tests**), pushed, and redeployed to `/opt/iit-gpu`.
 
 | # | Symptom | Root cause | Fix | Commit |
 |---|---------|-----------|-----|--------|
@@ -200,6 +200,8 @@ All fixed, tested (**305 -> 319 tests**), pushed, and redeployed to `/opt/iit-gp
 | 2 | `ERROR: Invalid requirement: 'torch==2.7.* torchvision torchaudio'` at the pip stage | conda writes each pip list item as one requirements-file line; all 5 specs packed several packages **plus** `--index-url` onto one line | One package per line; wheel index moved to its own `--extra-index-url` line (keeps PyPI for transformers/vllm/etc.). All of `envs/specs/*.yml` | `7b50526` |
 | 3 | `huggingface_hub not installed` on model download | `install.sh` hardcoded `pip3 install rich questionary` -- never installed `huggingface_hub` (nor `prompt_toolkit`) | `requirements.txt` is now the single source of truth; `install.sh` runs `pip3 install -r requirements.txt`; added `huggingface_hub` | `2790b23` |
 | 4 | `Cannot uninstall click 8.1.8 ... no RECORD file` while installing dep #3 | `huggingface_hub` 1.x adds a `typer` CLI -> pulls `click 8.4.1` over Debian-managed `click 8.1.8` | Pin `huggingface_hub>=0.20,<1.0` -- we only use `snapshot_download`, present in the 0.x line (resolves to 0.36.2) | `ac5a7ce` |
+| 5 | Prebuilt build died mid-CUDA-wheel on a fresh box (no spec error) | `setup.py` ran `conda env create` under the default `TMPDIR=/tmp`, a 2 GB tmpfs that overflows unpacking cudnn/cublas wheels | Installer sets `TMPDIR`/`PIP_CACHE_DIR` to `<nfs_root>/tmp` (1.7 TB) for the build | `f3211fa` |
+| 6 | A prebuilt conda env did not show for other users; installing a second prebuilt env dropped the first from the shared registry | `_load_venv_registry` filtered to `kind=="venv"`, discarding conda entries on load (conda envs are otherwise only found via the installing user's `environments.txt`) | Load all registry entries; `list_all_envs` already merges + de-dupes with per-user discovery | `dd09149` |
 
 ### 8.1 Why `--extra-index-url` (not `--index-url`)
 
