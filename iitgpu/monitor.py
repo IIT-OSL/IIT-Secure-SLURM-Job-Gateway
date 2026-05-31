@@ -7,7 +7,8 @@ from questionary import Style
 from rich.table import Table
 
 from iitgpu import auditclient
-from iitgpu.slurm import cancel, queue
+from iitgpu.slurm import (cancel, hold, release, requeue, queue,
+                          job_detail, job_efficiency, filtered_history)
 from iitgpu.ui import console, err, header, info, kv, ok, warn
 from iitgpu.validate import in_jail, safe_listdir
 
@@ -39,20 +40,53 @@ def show_queue() -> None:
 
 
 def cancel_job() -> None:
-    header("Cancel Job")
+    """Back-compat alias — opens the full job-management menu."""
+    manage_job()
+
+
+def manage_job() -> None:
+    header("Manage Job")
     entries = queue(user=getpass.getuser())
     if not entries:
-        info("No jobs to cancel.")
+        info("No active jobs.")
         return
     choices = [f"{e.job_id}  {e.name}  [{e.state}]" for e in entries] + ["[back]"]
-    choice = questionary.select("Select job to cancel:", choices=choices, style=_STYLE).ask()
+    choice = questionary.select("Select a job:", choices=choices, style=_STYLE).ask()
     if choice is None or choice == "[back]":
         return
     job_id = choice.split()[0]
-    if not questionary.confirm(f"Cancel job {job_id}?", default=False, style=_STYLE).ask():
+
+    action = questionary.select(
+        f"Action for job {job_id}:",
+        choices=["Cancel", "Hold", "Release", "Requeue", "Details + efficiency", "[back]"],
+        style=_STYLE,
+    ).ask()
+    if action is None or action == "[back]":
         return
-    auditclient.log("job_cancel", detail="user_requested", job_id=job_id)
-    success, msg = cancel(job_id)
+
+    if action == "Details + efficiency":
+        from iitgpu.ui import console
+        header(f"Job {job_id} detail")
+        console.print(job_detail(job_id))
+        console.print()
+        console.print("[bold cyan]── Efficiency (seff) ──[/]")
+        console.print(job_efficiency(job_id))
+        questionary.press_any_key_to_continue("").ask()
+        return
+
+    _ACTIONS = {
+        "Cancel":  (cancel,  "job_cancel"),
+        "Hold":    (hold,    "job_hold"),
+        "Release": (release, "job_release"),
+        "Requeue": (requeue, "job_requeue"),
+    }
+    fn, audit_action = _ACTIONS[action]
+    if action in ("Cancel", "Requeue") and not questionary.confirm(
+        f"{action} job {job_id}?", default=False, style=_STYLE
+    ).ask():
+        return
+    auditclient.log(audit_action, detail="user_requested", job_id=job_id)
+    success, msg = fn(job_id)
     (ok if success else err)(msg)
 
 
@@ -144,3 +178,72 @@ def monitor_menu() -> None:
         elif choice == "View hardware stats":
             from iitgpu.dashboard import run_hardware_stats
             run_hardware_stats()
+
+
+def follow_log() -> None:
+    """Live-follow a running job's output (like tail -f). Ctrl-C to stop."""
+    import time
+    from iitgpu.config import load_config, jobs_dir
+    cfg = load_config()
+    user_dir = str(Path(jobs_dir(cfg)) / getpass.getuser())
+    folders = safe_listdir(user_dir)
+    if not folders:
+        info("No job folders found.")
+        return
+    choice = questionary.select(
+        "Follow which job folder?", choices=sorted(folders, reverse=True) + ["[back]"], style=_STYLE
+    ).ask()
+    if choice is None or choice == "[back]":
+        return
+    folder = str(Path(user_dir) / choice)
+    if not in_jail(folder):
+        err("Access denied."); return
+    logs = [f for f in safe_listdir(folder) if f.endswith(".out")]
+    if not logs:
+        info("No .out file yet."); return
+    log_path = str(Path(folder) / sorted(logs)[0])
+    header(f"Following {Path(log_path).name}  (Ctrl-C to stop)")
+    try:
+        pos = 0
+        for _ in range(100000):  # bounded so it can't run forever in a TUI
+            try:
+                with open(log_path, "r", errors="replace") as fh:
+                    fh.seek(pos)
+                    chunk = fh.read()
+                    pos = fh.tell()
+                if chunk:
+                    console.print(chunk, end="")
+            except OSError:
+                pass
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        console.print("\n[dim]— stopped following —[/]")
+
+
+def show_history() -> None:
+    """Completed-job history with state filter and user scope."""
+    from iitgpu.config import load_config, jobs_dir, is_admin
+    from rich.table import Table
+    cfg = load_config()
+    header("Job History")
+    state = questionary.select(
+        "Filter by state:",
+        choices=["All", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"], style=_STYLE,
+    ).ask()
+    if state is None:
+        return
+    all_users = False
+    if is_admin(cfg):
+        all_users = questionary.confirm("Show ALL users (admin)?", default=False, style=_STYLE).ask()
+    rows = filtered_history(jobs_dir(cfg), limit=50,
+                            state=None if state == "All" else state,
+                            all_users=all_users)
+    if not rows:
+        info("No matching history."); return
+    table = Table(show_header=True, header_style="bold cyan")
+    for col in ("Job ID", "User", "Name", "State", "Elapsed"):
+        table.add_column(col)
+    for e in rows:
+        sc = "green" if e.state == "COMPLETED" else "red" if e.state in ("FAILED","TIMEOUT") else "yellow"
+        table.add_row(e.job_id, e.user, e.name, f"[{sc}]{e.state}[/]", e.time_used)
+    console.print(table)

@@ -69,7 +69,8 @@ def run_menu() -> None:
 
 def _monitor_menu() -> None:
     from iitgpu.dashboard import run_dashboard, run_hardware_stats
-    from iitgpu.monitor import show_queue, cancel_job, browse_and_tail_log
+    from iitgpu.monitor import (show_queue, manage_job, browse_and_tail_log,
+                                follow_log, show_history)
 
     while True:
         header("Monitor")
@@ -78,8 +79,10 @@ def _monitor_menu() -> None:
             choices=[
                 "Live dashboard  (auto-refresh)",
                 "View my queue",
-                "Cancel a job",
+                "Manage a job  (cancel/hold/release/requeue/details)",
                 "View job log",
+                "Follow job output  (live)",
+                "Job history  (filters)",
                 "Cluster status",
                 "View hardware stats",
                 "Back to main menu",
@@ -93,10 +96,14 @@ def _monitor_menu() -> None:
             run_dashboard()
         elif choice == "View my queue":
             show_queue()
-        elif choice == "Cancel a job":
-            cancel_job()
+        elif choice.startswith("Manage a job"):
+            manage_job()
         elif choice == "View job log":
             browse_and_tail_log()
+        elif choice.startswith("Follow job output"):
+            follow_log()
+        elif choice.startswith("Job history"):
+            show_history()
         elif choice == "Cluster status":
             _show_cluster_status()
         elif choice == "View hardware stats":

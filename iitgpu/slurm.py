@@ -508,3 +508,112 @@ def cancel(job_id: str) -> tuple[bool, str]:
         return False, result.stderr.strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
+
+
+# ── Job control + detail (Phase 3) ─────────────────────────────────────────────
+
+def _scontrol_action(action: str, job_id: str) -> tuple[bool, str]:
+    """Run a scontrol hold/release/requeue on a job. Returns (ok, message)."""
+    if _demo_mode():
+        return True, f"Job {job_id} {action} (demo)"
+    if action == "requeue":
+        cmd = _gateway_prefix() + ["scontrol", "requeue", job_id]
+    else:
+        cmd = _gateway_prefix() + ["scontrol", action, job_id]   # hold | release
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return True, f"Job {job_id} {action}ed" if action != "requeue" else f"Job {job_id} requeued"
+        return False, r.stderr.strip() or f"scontrol {action} failed"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+
+def hold(job_id: str) -> tuple[bool, str]:
+    return _scontrol_action("hold", job_id)
+
+
+def release(job_id: str) -> tuple[bool, str]:
+    return _scontrol_action("release", job_id)
+
+
+def requeue(job_id: str) -> tuple[bool, str]:
+    return _scontrol_action("requeue", job_id)
+
+
+def job_detail(job_id: str) -> str:
+    """Return `scontrol show job <id>` output (full job record)."""
+    if _demo_mode():
+        return f"JobId={job_id} (demo) JobState=RUNNING"
+    try:
+        r = subprocess.run(_gateway_prefix() + ["scontrol", "show", "job", job_id],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else (r.stderr.strip() or "no detail")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"error: {exc}"
+
+
+def job_efficiency(job_id: str) -> str:
+    """Return `seff <id>` efficiency report (CPU/mem utilisation vs request)."""
+    if _demo_mode():
+        return f"Job ID: {job_id}\nCPU Efficiency: 95.0%\nMemory Efficiency: 40.0%"
+    try:
+        r = subprocess.run(_gateway_prefix() + ["seff", job_id],
+                           capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "").strip()
+        return out if out else "seff unavailable (job may still be running or seff not installed)"
+    except FileNotFoundError:
+        return "seff is not installed on this cluster"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"error: {exc}"
+
+
+def filtered_history(search_root: str, limit: int = 50, state: str | None = None,
+                     days: int = 30, all_users: bool = False) -> list[QueueEntry]:
+    """Job history with optional state filter and user scope.
+
+    state: keep only entries whose state startswith this (e.g. 'COMPLETED','FAILED').
+    all_users: if True and not in shared mode, query every user (admin view).
+    """
+    import getpass
+    from iitgpu.config import load_config
+    cfg = load_config()
+    if cfg.sacct_enabled:
+        user = None if all_users else _effective_user()
+        rows = _sacct_history_user(limit=limit, user=user, days=days, all_users=all_users)
+    else:
+        rows = recent_jobs(search_root, limit=min(limit, 50))
+    if state:
+        rows = [r for r in rows if r.state.upper().startswith(state.upper())]
+    return rows[:limit]
+
+
+def _sacct_history_user(limit: int, user: str | None, days: int, all_users: bool) -> list[QueueEntry]:
+    """sacct query that can target one user or the whole cluster (-a)."""
+    base = _gateway_prefix() + [
+        "sacct", "--noheader", "--parsable2", "-X",
+        "--format=JobID,JobName,User,State,Elapsed,Start,End,AllocTRES",
+        "-S", f"now-{days}days",
+    ]
+    if all_users:
+        base.append("-a")
+    elif user:
+        base += ["--user", user]
+    try:
+        r = subprocess.run(base, capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return []
+        out: list[QueueEntry] = []
+        for line in r.stdout.splitlines():
+            parts = line.split("|")
+            if len(parts) < 8 or "." in parts[0]:
+                continue
+            st = parts[3].split()[0] if parts[3].split() else parts[3]
+            if st not in _SACCT_TERMINAL_STATES:
+                continue
+            out.append(QueueEntry(job_id=parts[0], name=parts[1] or parts[0],
+                                  user=parts[2] or "?", state=st, partition="gpu",
+                                  time_used=parts[4] or "-", time_limit="N/A", nodes=1))
+        return list(reversed(out))[:limit]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
