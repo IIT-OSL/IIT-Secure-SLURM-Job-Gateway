@@ -8,7 +8,7 @@ code, and full submit / monitor / accounting / files / notebooks / admin
 coverage. Documents the Linux changes, the SLURM changes, and the tool itself.
 **Builds on:** [M01-log.md](./M01-log.md), [M02-log.md](./M02-log.md).
 **Branches:** `feature/phase0-opensource` … `feature/phase8-polish` (one per
-phase, cumulative; merged to `main` by the maintainer). **331 tests passing.**
+phase, cumulative; merged to `main` by the maintainer). **332 tests passing.**
 
 ---
 
@@ -25,7 +25,7 @@ phase, cumulative; merged to `main` by the maintainer). **331 tests passing.**
 | Upload only | **Two-pane file manager** + env/container management |
 | Notebook only | + **TensorBoard** + **running-services** view with teardown |
 | No admin tooling | **Admin panel** (gated) — drain/resume, user provision/offboard, audit viewer, cluster usage |
-| 161 → 217 tests | **331 tests** |
+| 161 → 217 tests | **332 tests** |
 
 The live cluster was cut over to per-user identity during this work: **`public`
 now runs as `public`, not `daham`** (verified job 107 → `User=public`).
@@ -171,7 +171,7 @@ is gated by group membership (`public` = not admin, verified).
 
 ## 6. Verification
 
-- **331 unit tests** green (`PYTHONPATH=. pytest tests/ -q`).
+- **332 unit tests** green (`PYTHONPATH=. pytest tests/ -q`).
 - Live, end-to-end: per-user submit (`public→public`, `tuser→tuser`,
   `demo1→demo1`); **job array** (103_0/1/2) + **dependency** (104 waited then ran);
   **hold→release** (109); GPU jobs on the RTX 5090 (sm_120) under cgroup limits;
@@ -192,7 +192,7 @@ is gated by group membership (`public` = not admin, verified).
 
 Four issues surfaced when exercising **Setup -> Install a prebuilt environment**
 and **Model download** on the live box (system `python3` 3.14, conda 26.3.2).
-All fixed, tested (**305 -> 331 tests**), pushed, and redeployed to `/opt/iit-gpu`.
+All fixed, tested (**305 -> 332 tests**), pushed, and redeployed to `/opt/iit-gpu`.
 
 | # | Symptom | Root cause | Fix | Commit |
 |---|---------|-----------|-----|--------|
@@ -204,6 +204,7 @@ All fixed, tested (**305 -> 331 tests**), pushed, and redeployed to `/opt/iit-gp
 | 6 | A prebuilt conda env did not show for other users; installing a second prebuilt env dropped the first from the shared registry | `_load_venv_registry` filtered to `kind=="venv"`, discarding conda entries on load (conda envs are otherwise only found via the installing user's `environments.txt`) | Load all registry entries; `list_all_envs` already merges + de-dupes with per-user discovery | `dd09149` |
 | 7 | Large HF model download dropped the session mid-transfer ("Connection to login-node closed"), though the network was fine | Login node has ~3.8 GB RAM and **no swap**; huggingface_hub auto-used the Xet backend (`hf_xet`), which buffered chunks to ~3.4 GB RSS and was **OOM-killed** -- killing the ForceCommand TUI session | `download_hf` sets `HF_HUB_DISABLE_XET` (env + the dynamically-read constant) to stream via the low-memory HTTP backend, caps `max_workers=4`, drops the deprecated `local_dir_use_symlinks`; downloads resume on re-run | `1108a47` |
 | 8 | Registering a downloaded model failed: `Permission denied: /shared/models/.registry.json` | Shared-state files were owned by their first creator (with that user primary group), locking out others. On this NFS export none of the install-time fixes work: **root is squashed** (no chown/chmod of others files), **ACLs are "Operation not supported"**, **setgid group-inheritance is ignored**, and members cannot `chgrp` even their own files | App-side `config.make_shared_writable`: whoever writes a shared registry/template makes it world-writable (0666 / dirs 0777) so any user can update it in place -- safe because `/shared` is already 0777 and SSH is gpuusers-only (ForceCommand + Match Group). install.sh also hardened for portable FSes (umask 002, setgid, default ACLs, acl pkg) | `71d5045` |
+| 9 | Smoke test / job submit refused: "Audit logging failed. Refusing to submit (safety policy)" | The audit daemon runs as **gpusync** and execs `deploy/audit_daemon.py` from the 0750 `slurmadmin:gpuusers` install tree; gpusync was not in gpuusers, so it could not read the script -> the service crash-looped ("Permission denied"), `/run/iit-gpu/audit.sock` was never created, the spool dir was unreachable, and `log_or_block` returned False | `usermod -aG gpuusers gpusync` (install.sh + live), then restart the daemon -> socket comes up and `log_or_block` succeeds | `1093479` |
 
 ### 8.1 Why `--extra-index-url` (not `--index-url`)
 
