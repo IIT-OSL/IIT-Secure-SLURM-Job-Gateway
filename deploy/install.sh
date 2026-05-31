@@ -108,6 +108,12 @@ pip3 install --quiet --break-system-packages -r "${INSTALL_DIR}/requirements.txt
 echo "==> Setting up audit log state directory..."
 usermod -aG auditadmin gpusync
 usermod -aG auditadmin slurmadmin
+# The audit daemon runs as gpusync and execs deploy/audit_daemon.py from the
+# install dir. When that tree is hardened to 0750 root/slurmadmin:gpuusers,
+# gpusync needs gpuusers membership to read it — otherwise the daemon crash-loops
+# ("Permission denied"), the audit socket never appears, and every action that
+# calls log_or_block (smoke test, job submit) is refused.
+usermod -aG gpuusers gpusync
 install -d -o gpusync -g auditadmin -m 0750 "${STATE_DIR}"
 
 # ── Launcher ──────────────────────────────────────────────────────────────────

@@ -67,3 +67,11 @@ def test_install_sh_sets_group_writable_umask_in_launcher():
     assert "umask 002" in sh
     # installer must group-own shared dirs to gpuusers and try setgid + ACLs
     assert "gpuusers" in sh and "g+s" in sh
+
+
+def test_install_sh_grants_audit_daemon_read_access():
+    """The audit daemon (gpusync) must be able to read deploy/audit_daemon.py from
+    the 0750 install tree, or it crash-loops and audit logging is refused."""
+    from pathlib import Path
+    sh = (Path(__file__).parent.parent / 'deploy' / 'install.sh').read_text()
+    assert 'usermod -aG gpuusers gpusync' in sh
