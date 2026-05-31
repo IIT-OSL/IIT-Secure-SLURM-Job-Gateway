@@ -102,13 +102,31 @@ def _dir_size_mb(path: str) -> float:
     return round(total / (1024 * 1024), 1)
 
 
+# Downloading 4 files at a time with the standard HTTP backend keeps peak
+# memory low on the RAM-constrained, swapless login node.
+_HF_MAX_WORKERS = 4
+
+
 def download_hf(cfg: Config, repo_id: str) -> tuple[bool, str]:
-    """Download a HuggingFace model using huggingface_hub."""
+    """Download a HuggingFace model using huggingface_hub.
+
+    The login node has little RAM and no swap. huggingface_hub auto-uses the
+    Xet transfer backend (hf_xet) when installed, which buffers large chunks in
+    memory and OOM-killed the download mid-transfer on multi-GB models (the
+    kernel kill also tore down the SSH/TUI session). Disable Xet so files stream
+    to disk with the low-memory HTTP backend, and limit concurrency. Interrupted
+    downloads resume automatically on re-run.
+    """
     dest = str(Path(models_dir(cfg)) / repo_id.replace("/", "--"))
     auditclient.log("model_download_start", detail=f"hf:{repo_id}")
+    # is_xet_available() reads constants.HF_HUB_DISABLE_XET dynamically, so set
+    # both the env var (for any subprocess) and the constant (for this process).
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
     try:
+        import huggingface_hub.constants as _hf_constants
+        _hf_constants.HF_HUB_DISABLE_XET = True
         from huggingface_hub import snapshot_download
-        snapshot_download(repo_id=repo_id, local_dir=dest, local_dir_use_symlinks=False)
+        snapshot_download(repo_id=repo_id, local_dir=dest, max_workers=_HF_MAX_WORKERS)
     except ImportError:
         err("huggingface_hub not installed. Run: pip install huggingface-hub")
         auditclient.log("model_download_failed", detail=f"hf:{repo_id} missing_dep")
