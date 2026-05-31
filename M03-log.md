@@ -8,7 +8,7 @@ code, and full submit / monitor / accounting / files / notebooks / admin
 coverage. Documents the Linux changes, the SLURM changes, and the tool itself.
 **Builds on:** [M01-log.md](./M01-log.md), [M02-log.md](./M02-log.md).
 **Branches:** `feature/phase0-opensource` … `feature/phase8-polish` (one per
-phase, cumulative; merged to `main` by the maintainer). **305 tests passing.**
+phase, cumulative; merged to `main` by the maintainer). **319 tests passing.**
 
 ---
 
@@ -25,7 +25,7 @@ phase, cumulative; merged to `main` by the maintainer). **305 tests passing.**
 | Upload only | **Two-pane file manager** + env/container management |
 | Notebook only | + **TensorBoard** + **running-services** view with teardown |
 | No admin tooling | **Admin panel** (gated) — drain/resume, user provision/offboard, audit viewer, cluster usage |
-| 161 → 217 tests | **305 tests** |
+| 161 → 217 tests | **319 tests** |
 
 The live cluster was cut over to per-user identity during this work: **`public`
 now runs as `public`, not `daham`** (verified job 107 → `User=public`).
@@ -171,7 +171,7 @@ is gated by group membership (`public` = not admin, verified).
 
 ## 6. Verification
 
-- **305 unit tests** green (`PYTHONPATH=. pytest tests/ -q`).
+- **319 unit tests** green (`PYTHONPATH=. pytest tests/ -q`).
 - Live, end-to-end: per-user submit (`public→public`, `tuser→tuser`,
   `demo1→demo1`); **job array** (103_0/1/2) + **dependency** (104 waited then ran);
   **hold→release** (109); GPU jobs on the RTX 5090 (sm_120) under cgroup limits;
@@ -186,6 +186,53 @@ is gated by group membership (`public` = not admin, verified).
 2. **Provision real users** with `addUser.sh`; retire reliance on `public`.
 3. Optional: enable `ConstrainDevices` once a per-job NVIDIA eBPF allowlist is in
    place; add an MTA for email notifications; XFS project quotas on `/shared`.
+
+
+## 8. Post-deployment fixes (2026-05-31, conda 26.3.2 cluster)
+
+Four issues surfaced when exercising **Setup -> Install a prebuilt environment**
+and **Model download** on the live box (system `python3` 3.14, conda 26.3.2).
+All fixed, tested (**305 -> 319 tests**), pushed, and redeployed to `/opt/iit-gpu`.
+
+| # | Symptom | Root cause | Fix | Commit |
+|---|---------|-----------|-----|--------|
+| 1 | `conda: error: unrecognized arguments: --force` on prebuilt env install | conda >=24 removed `--force` from `conda env create` (cluster runs 26.3.2) | `setup.py` -> `conda env create ... --yes` (auto-confirms the reinstall/overwrite path) | `453185d` |
+| 2 | `ERROR: Invalid requirement: 'torch==2.7.* torchvision torchaudio'` at the pip stage | conda writes each pip list item as one requirements-file line; all 5 specs packed several packages **plus** `--index-url` onto one line | One package per line; wheel index moved to its own `--extra-index-url` line (keeps PyPI for transformers/vllm/etc.). All of `envs/specs/*.yml` | `7b50526` |
+| 3 | `huggingface_hub not installed` on model download | `install.sh` hardcoded `pip3 install rich questionary` -- never installed `huggingface_hub` (nor `prompt_toolkit`) | `requirements.txt` is now the single source of truth; `install.sh` runs `pip3 install -r requirements.txt`; added `huggingface_hub` | `2790b23` |
+| 4 | `Cannot uninstall click 8.1.8 ... no RECORD file` while installing dep #3 | `huggingface_hub` 1.x adds a `typer` CLI -> pulls `click 8.4.1` over Debian-managed `click 8.1.8` | Pin `huggingface_hub>=0.20,<1.0` -- we only use `snapshot_download`, present in the 0.x line (resolves to 0.36.2) | `ac5a7ce` |
+
+### 8.1 Why `--extra-index-url` (not `--index-url`)
+
+`--index-url` *replaces* PyPI, so `transformers`, `vllm`, `scikit-learn`, etc.
+would 404 on the cu128 wheel index. `--extra-index-url` keeps PyPI **and** adds
+the PyTorch index; for `torch==2.7.*`, PEP 440 ranks `2.7.x+cu128` above plain
+`2.7.x`, so pip still selects the CUDA build. Confirmed live: the install now
+pulls `nvidia-cuda-*-cu12 12.8.*` / `nvidia-cudnn-cu12 9.7.1` / `torch ...+cu128`.
+
+### 8.2 New regression tests (catch the class, not just the instance)
+
+- `tests/test_prebuilt_envs.py` -- parses every spec's pip block with
+  `packaging.Requirement`; asserts each entry is a single requirement or a pip
+  flag, and that index URLs live on their own line. (10 new params.)
+- `tests/test_dependencies.py` -- AST-scans `iitgpu/` for **every** third-party
+  import and asserts it is declared in `requirements.txt`, and that `install.sh`
+  installs `-r requirements.txt` (not a hardcoded subset). A future missing dep
+  now fails CI, not the user.
+
+### 8.3 Deployment / infra notes
+
+- **`core.fileMode false`** set on `/opt/iit-gpu` -- the deploy tree had only
+  exec-bit (mode) diffs that aborted `git pull --ff-only`; this keeps pulls clean.
+- **`/tmp` is a 2 GB tmpfs.** The cu128 wheels (cudnn 727 MB, cublas 610 MB, ...)
+  can overflow it during pip unpack; build prebuilt envs with
+  `TMPDIR=/shared/tmp` (NFS, 1.7 TB free). `/shared` (1.7 TB) and `/` (34 GB) are
+  otherwise ample.
+- **Two ways to get the stack, by design:** the prebuilt **conda env**
+  (`/shared/envs/<name>`, built from `envs/specs/*.yml`, 15-40 min of CUDA
+  wheels) and the **Apptainer container** (`/shared/images/<name>.sif`,
+  prebuilt, instant). They are independent -- installing the `.sif` does not
+  speed up the conda build. Pick the container at submit time via
+  *Environment type -> Container image (.sif via Apptainer)* to skip the build.
 
 ---
 
