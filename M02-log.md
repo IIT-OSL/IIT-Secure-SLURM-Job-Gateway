@@ -23,6 +23,9 @@ filesystem, Linux users/groups, and the TUI tool architecture & data flow.
 10. [Prebuilt Environments & Containers](#10-prebuilt-environments--containers)
 11. [Test Campaign & Results](#11-test-campaign--results)
 12. [Quick Operational Reference](#12-quick-operational-reference)
+13. [Full System Blueprint](#13-full-system-blueprint--recreating-from-scratch)
+14. [TUI Page-by-Page Walkthrough](#14-tui-page-by-page-walkthrough)
+15. [Suitability Assessment](#15-suitability-assessment--is-this-a-general-purpose-job-tool)
 
 ---
 
@@ -918,6 +921,215 @@ Persists events to:
 | `/shared` must be mounted (NFS) before `slurmctld` starts | State save and job output paths are on NFS |
 
 ---
+
+
+---
+
+## 14. TUI Page-by-Page Walkthrough
+
+This section documents every screen the `public` user sees, in the order they
+appear, with what each does and what it writes/runs underneath.
+
+### 14.0 Launch & splash
+
+```
+ssh -p 2225 public@10.35.4.100
+```
+`sshd` `Match Group gpuusers` forces `/usr/local/bin/iit-gpu-manager`, which runs
+`python3 -m iitgpu` in a stripped environment (`env -i` + the 5 runtime vars).
+`__main__.py` installs signal handlers (Ctrl-C → clean audited exit, Ctrl-Z
+ignored), logs `session_start`, shows the ASCII splash, then opens the Main Menu.
+There is no shell access — quitting the TUI ends the SSH session.
+
+### 14.1 Main Menu (`menu.py → run_menu`)
+
+```
+1. Upload files   (store datasets in /shared for jobs)
+2. Setup          (environment, data, model, health check)
+3. Run a job      (submit ML training / inference job)
+4. Monitor        (live dashboard, job queue, logs)
+5. Advanced       (SLURM command shell)
+6. Quit
+```
+A loop: each choice calls one sub-module and returns here afterward. Ctrl-C or
+"6. Quit" logs `session_end` and exits.
+
+### 14.2 Page 1 — Upload files (`upload.py → run_upload`)
+
+Stores datasets on `/shared` so compute jobs can read them.
+
+1. **Folder name** prompt → validated `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`,
+   created at `/shared/<name>` (path-jailed). Audit: `data_folder_open`.
+2. Then a sub-menu:
+   - **Upload from my computer** — prints the exact `scp -r` and
+     `rsync -avz --progress` commands to run *from your laptop* into that folder.
+     The tool does not pull files; it shows you how to push them.
+   - **Download from a URL** — `https://`/`http://` only; filename sanitised;
+     path-jailed; runs `wget` then falls back to `curl`. Audit: `data_download_url`.
+   - **Browse folder contents** — lists files + sizes.
+   - **Back to main menu**.
+
+### 14.3 Page 2 — Setup (`setup.py → run_setup`)
+
+First runs a **Cluster Health Check** (`sinfo` returns partitions + `/shared`
+writable). If it fails, Setup stops. Otherwise it walks five optional steps,
+each gated by a yes/no confirm:
+
+1. **Environment (conda/venv)** — pick a base framework
+   (`pytorch-2.7` cu128 recommended, `pytorch-2.5`, `pytorch-2.4`,
+   `tensorflow-2.18`, `jax-0.4`, `bare`), name it, optionally add a
+   `requirements.txt`. Builds a conda env at `/shared/envs/<name>` with a live
+   progress bar; for PyTorch frameworks it runs the **sm_120 smoke check**
+   (`torch.cuda.get_device_capability()==(12,0)` + a `torch.compile` matmul).
+   On success it registers the env so the wizard can pick it.
+2. **Install a prebuilt environment** — materialises one of the five curated
+   specs (`llm-finetune`, `llm-serve`, `vision`, `diffusion`, `data-science`)
+   into `/shared/envs/` via `conda env create` and auto-registers it.
+3. **Data upload** — same as Page 1.
+4. **Model download** — HuggingFace (`snapshot_download`) or URL into
+   `/shared/models/`, tracked in a JSON registry (`models.py`).
+5. **Smoke test** — submits a tiny GPU job in a chosen env to confirm it runs.
+
+### 14.4 Page 3 — Run a job (`wizard.py → run_wizard`)  ← the core page
+
+The main flow. Steps:
+
+- **Step 0 — Template?** Optionally load a saved template (`/shared/templates/`)
+  to pre-fill the task type.
+- **Step 1 — Task type:** `Train from scratch`, `Fine-tune a model`,
+  `Run inference`, `Quick test (30 min)`, or `Notebook (JupyterLab)`.
+  This selection picks a **fixed resource profile** (see §15 — you cannot
+  change GPU/CPU/RAM/time in the UI):
+  | Task | GPU | CPU | RAM | Time limit |
+  |------|-----|-----|-----|-----------|
+  | train / finetune / custom | 1 | 16 | 60 GB | none (→ partition 24 h cap) |
+  | inference | 1 | 8 | 32 GB | 4 h |
+  | test | 1 | 4 | 16 GB | 30 min |
+  | notebook | 1 | 8 | 32 GB | 8 h |
+- **Step 2 — Environment type:**
+  - *Conda / venv* — pick a registered env (activates via `conda activate`).
+  - *Container image (.sif)* — lists `/shared/images/*.sif` (path-jailed,
+    audited as `container_selected`); job runs inside `apptainer exec --nv`.
+  - *none / skip* — runs in the bare job environment.
+- **Step 3 — Script** (non-notebook): a jailed file browser showing only `.py`
+  and `.sh` files under your `/shared` area. `.py` → `python <script>`;
+  `.sh` → `bash <script>`.
+  - *Special case:* if the script is named **`train_cifar10.py`**, two extra
+    prompts appear (model: SmallResNet/WideResNet; epochs). No other script gets
+    guided prompts.
+  - **Step 3 (notebook variant):** instead of a script, it asks for a port
+    (default 8888), generates a JupyterLab sbatch (per-job token bound to
+    `127.0.0.1`), submits it, and prints the SSH tunnel command.
+- **Step 4 — Extra arguments:** a free-text box appended verbatim to the run
+  command (control chars stripped, capped 1000 chars). This is the only way to
+  pass anything custom to a non-CIFAR script.
+- **Preview:** the generated `job.sbatch` is shown in a panel.
+- **Action:** `Submit job` · `Save as template + submit` · `Save template only`
+  · `Discard`. On submit, the tool writes `job.sbatch` into a freshly created
+  `0770 gpuusers` job folder, logs `job_submit` (refuses if audit fails), runs
+  `sudo -u daham sbatch`, prints the Job ID, and offers to open the live
+  dashboard.
+
+### 14.5 Page 4 — Monitor (`menu.py → _monitor_menu`)
+
+```
+Live dashboard  (auto-refresh)   → dashboard.run_dashboard()
+View my queue                    → monitor.show_queue()    (squeue table)
+Cancel a job                     → monitor.cancel_job()    (pick + confirm → scancel)
+View job log                     → monitor.browse_and_tail_log()  (jailed .out/.err tail)
+Cluster status                   → partition table (sinfo)
+View hardware stats              → dashboard.run_hardware_stats()  (live GPU/CPU/RAM)
+Back to main menu
+```
+- **Live dashboard** — a Rich full-screen view refreshing every ~2 s: cluster
+  panel (node state + live GPU%/VRAM/temp/W + CPU + RAM from
+  `/shared/.gpu_stats.json`), the running/pending queue, recent finished jobs
+  (from `sacct_history`), and a rolling tail of the selected job's output.
+- **View my queue** — `squeue` parsed into a table; the real gateway user is
+  recovered from the job's output path (since everything runs as `daham`).
+- **Cancel a job** — select from your jobs, confirm, `scancel` (audited).
+- **View job log** — browse your job folders, pick `.out`/`.err`, tail it
+  (path-jailed).
+
+### 14.6 Page 5 — Advanced: SLURM shell (`shell.py → run_shell`)
+
+A restricted prompt (`slurm>`). Only `sbatch`, `squeue`, `scancel`, `sinfo`,
+`tail` are allowed; `sbatch --wrap` is blocked; file-path arguments are
+path-jailed; every command is audited (`shell_cmd`). `exit` returns to the menu.
+This is the escape hatch for power users — but they must hand-write sbatch
+scripts; there is no resource builder here.
+
+### 14.7 What every job folder ends up containing
+
+```
+/shared/jobs/<user>/<task>_<YYYYMMDD_HHMMSS>/   (0770, group gpuusers)
+  ├── job.sbatch          generated submission script
+  ├── slurm-<id>.out      everything the job printed (stdout)
+  ├── slurm-<id>.err      errors (empty = clean)
+  └── <whatever the script saves>   e.g. best_model.pt — only if the script saves it
+```
+
+---
+
+## 15. Suitability Assessment — Is This a General-Purpose Job Tool?
+
+> **Short answer:** For this single-node, single-GPU cluster it covers the large
+> majority (~90%) of everyday ML training and testing — it is *not* a niche
+> one-trick tool. But it is a **guided gateway**, not a full SLURM front-end:
+> it deliberately hides SLURM's advanced features, and a few real gaps limit
+> "all kinds of training." Details below.
+
+### 15.1 What it handles well (genuinely general)
+
+| Capability | Why it's general-purpose |
+|-----------|--------------------------|
+| **Arbitrary scripts** | Any `.py` or `.sh` runs — so *any* framework or workload that fits in a script works (PyTorch, TF, JAX, sklearn, custom CUDA, bash pipelines). Not tied to one model type. |
+| **Reproducible environments** | Three independent paths: conda envs, venvs, and **Apptainer `.sif` containers** — covers nearly any dependency/reproducibility need, including fully isolated images. |
+| **Interactive work** | The **JupyterLab notebook** job type gives a real interactive GPU session with a secure tunnel — covers exploration/debugging, not just batch. |
+| **Curated stacks** | Five prebuilt environments (LLM finetune/serve, vision, diffusion, data-science) cover the most common workloads out of the box. |
+| **Full job lifecycle** | Upload data → build env → submit → monitor live → view history (sacct) → cancel. End-to-end without leaving the TUI. |
+| **Safe multi-user** | Path jail, scoped sudoers, forced TUI, 0770 isolation, full audit — suitable for untrusted student users sharing one GPU. |
+
+### 15.2 Real gaps (where it is *not* a complete SLURM tool)
+
+| Gap | Impact | Severity |
+|-----|--------|----------|
+| **No resource customisation in the wizard** | GPU/CPU/RAM/time are fixed per task type. A user who needs more RAM, a longer wall-time, fewer CPUs, or (on a multi-GPU node) >1 GPU **cannot set it** through the UI — they must hand-write sbatch in the Advanced shell. This is the single biggest limitation for "all kinds of training." | **High** |
+| **No array jobs / sweeps** | Hyper-parameter grid search (`sbatch --array`) is not exposed. Each submission is one job; sweeps mean many manual submissions. | Med |
+| **No job dependencies / chaining** | Cannot express "run B after A succeeds" (`--dependency`). Multi-stage pipelines must be scripted by the user inside one job. | Med |
+| **No multi-node / distributed** | Single-node only (no `--nodes`, `torchrun`/MPI orchestration). *Irrelevant on this 1-node cluster, but limits portability.* | Low (here) |
+| **No interactive `srun`/`salloc`** | Only batch + the notebook path. No quick interactive shell on the compute node. | Low |
+| **No artifact management** | The tool never enforces or manages model saving — output depends entirely on the user's script (e.g. the stock `train_cifar10.py` saved nothing until fixed). | Med |
+| **One hard-coded guided script** | Only `train_cifar10.py` gets guided prompts (model/epochs); every other script gets a single free-text argument box. | Low |
+| **No completion notification** | No email/`--mail-type`; you poll the dashboard. | Low |
+
+### 15.3 Verdict by workload type
+
+| Workload | Supported? |
+|----------|-----------|
+| Single-GPU training (any framework, via script + conda/container) | ✅ Fully |
+| Fine-tuning / LoRA / QLoRA (prebuilt `llm-finetune`) | ✅ Fully |
+| Inference / generation / serving | ✅ Fully |
+| Interactive exploration (Jupyter) | ✅ Fully |
+| Quick functional tests / smoke tests | ✅ Fully |
+| Custom resource shapes (RAM/time/CPU tuning) | ⚠️ Only via Advanced shell (hand-written sbatch) |
+| Hyper-parameter sweeps (job arrays) | ⚠️ Manual / shell only |
+| Multi-stage pipelines (dependencies) | ⚠️ Script it yourself inside one job |
+| Multi-node distributed training | ❌ Not supported (and not needed on 1 node) |
+
+### 15.4 Recommendation
+
+The tool is **production-appropriate for its intended audience** — students and
+researchers running single-GPU training/testing on a shared box who should *not*
+be handed raw SLURM. It is not "niche": through arbitrary scripts + containers +
+notebooks it spans essentially all common single-node workloads.
+
+To make it a fuller general-purpose front-end, the highest-value addition is an
+**optional "Advanced resources" step in the wizard** exposing GPU count, CPU,
+memory, and wall-time (clamped by `validate.py` and the QOS), followed by
+**job-array support** for sweeps and **`--dependency`** for simple pipelines.
+These three changes would close the gap between "guided gateway" and "full SLURM
+tool" without sacrificing the safety model.
 
 ---
 
