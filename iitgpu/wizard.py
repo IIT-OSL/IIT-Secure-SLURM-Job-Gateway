@@ -29,6 +29,7 @@ _TASK_LABELS: dict[str, str] = {
     "finetune":  "Fine-tune a model",
     "inference": "Run inference / generate output",
     "test":      "Quick test  (30 min, reduced resources)",
+    "notebook":  "Notebook (JupyterLab)  — interactive GPU session",
 }
 
 
@@ -168,7 +169,71 @@ def run_wizard() -> None:
             return
         auditclient.log("container_selected", detail=Path(chosen_container).name)
 
-    # ── Step 3: Script ────────────────────────────────────────────────────────
+    # ── Step 3: Script / Notebook config ─────────────────────────────────────
+    job_name = task_type
+
+    if task_type == "notebook":
+        # Notebook jobs launch JupyterLab — no script path needed
+        port_str = questionary.text(
+            "JupyterLab port (on the GPU node):", default="8888", style=_STYLE
+        ).ask()
+        if port_str is None:
+            return
+        try:
+            nb_port = max(1024, min(65535, int(port_str.strip())))
+        except ValueError:
+            nb_port = 8888
+
+        spec = JobSpec(
+            job_name=job_name,
+            partition="gpu",
+            gpus=defaults.gpus,
+            cpus=defaults.cpus,
+            mem_gb=defaults.mem_gb,
+            time_limit=defaults.time_limit,
+            run_command="",   # not used for notebooks
+            task_type=task_type,
+            conda_env=chosen_env.path if chosen_env and chosen_env.kind == "conda" else "",
+            venv_path=chosen_env.path if chosen_env and chosen_env.kind == "venv" else "",
+            container_image=chosen_container,
+        )
+        folder = make_job_folder(jdir, spec)
+        from iitgpu.jobs import render_notebook_sbatch, write_notebook_sbatch
+        script_text = render_notebook_sbatch(spec, folder, port=nb_port)
+        from iitgpu.ui import panel
+        panel("Generated notebook sbatch script", script_text)
+
+        action = questionary.select(
+            "What would you like to do?",
+            choices=["Submit notebook job", "Discard"],
+            style=_STYLE,
+        ).ask()
+        if action is None or action == "Discard":
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
+            info("Discarded.")
+            return
+
+        sbatch_path = str(Path(folder) / "job.sbatch")
+        Path(sbatch_path).write_text(script_text)
+        Path(sbatch_path).chmod(0o644)
+        kv("Script saved", sbatch_path)
+
+        if not auditclient.log_or_block("notebook_submit", detail=job_name):
+            err("Audit logging failed. Refusing to submit (safety policy).")
+            return
+
+        success, result = submit_job(sbatch_path)
+        if success:
+            ok(f"Notebook job submitted! ID: {result}")
+            ok(f"SSH tunnel: ssh -p 2225 -L {nb_port}:localhost:{nb_port} public@10.35.4.100")
+            auditclient.log("notebook_submitted_ok", detail=job_name, job_id=result)
+        else:
+            err(f"Submission failed: {result}")
+            auditclient.log("notebook_submit_failed", detail=result)
+        return
+
+    # ── Step 3 (non-notebook): Script ─────────────────────────────────────────
     start = str(Path(cfg.nfs_root) / getpass.getuser())
     if not Path(start).exists():
         start = cfg.nfs_root
@@ -213,7 +278,6 @@ def run_wizard() -> None:
     args = clean_run_command(raw_args) if raw_args.strip() else ""
 
     # ── Build job spec ────────────────────────────────────────────────────────
-    job_name = task_type
 
     if script_path.endswith(".py"):
         run_cmd = f"python {script_path}"

@@ -20,6 +20,7 @@ TASK_DEFAULTS: dict[str, TaskDefaults] = {
     "finetune":  TaskDefaults(gpus=1, cpus=16, mem_gb=60, time_limit=""),
     "inference": TaskDefaults(gpus=1, cpus=8,  mem_gb=32, time_limit="04:00:00"),
     "test":      TaskDefaults(gpus=1, cpus=4,  mem_gb=16, time_limit="00:30:00"),
+    "notebook":  TaskDefaults(gpus=1, cpus=8,  mem_gb=32, time_limit="08:00:00"),
     "custom":    TaskDefaults(gpus=1, cpus=16, mem_gb=60, time_limit=""),
 }
 
@@ -121,5 +122,91 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
 def write_sbatch(spec: JobSpec, folder: str) -> str:
     path = Path(folder) / "job.sbatch"
     path.write_text(render_sbatch(spec, folder))
+    path.chmod(0o644)
+    return str(path)
+
+
+def render_notebook_sbatch(
+    spec: "JobSpec",
+    folder: str,
+    port: int = 8888,
+    gateway_host: str = "10.35.4.100",
+    gateway_port: int = 2225,
+) -> str:
+    """Generate an sbatch script that launches JupyterLab on the GPU node.
+
+    The script:
+    - Binds JupyterLab to 127.0.0.1 only (not exposed to network)
+    - Writes port + token to the job's stdout
+    - Prints the exact SSH tunnel command for the user's laptop
+    - Shuts JupyterLab down when the job's time limit is reached
+    Token is per-job and appears only in the job's stdout (never logged).
+    """
+    lines = [
+        "#!/bin/bash",
+        f"#SBATCH --job-name={spec.job_name}",
+        f"#SBATCH --partition={spec.partition}",
+        f"#SBATCH --gres=gpu:{spec.gpus}",
+        f"#SBATCH --cpus-per-task={spec.cpus}",
+        f"#SBATCH --mem={spec.mem_gb}G",
+    ]
+    if spec.time_limit:
+        lines.append(f"#SBATCH --time={spec.time_limit}")
+    lines += [
+        f"#SBATCH --output={folder}/slurm-%j.out",
+        f"#SBATCH --error={folder}/slurm-%j.err",
+        f"#SBATCH --chdir={folder}",
+        "",
+    ]
+
+    # Environment activation (container or conda/venv)
+    if spec.container_image:
+        # Notebook inside container — wrap the entire jupyter launch
+        launcher = (
+            f"apptainer exec --nv --bind /shared {spec.container_image} "
+            f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
+            f"--notebook-dir=/shared --ServerApp.token=\"$JUPYTER_TOKEN\""
+        )
+    else:
+        if spec.conda_env:
+            lines += [
+                '_conda_sh="${CONDA_PREFIX_SHARED:-/shared/miniforge3}/etc/profile.d/conda.sh"',
+                '[ -f "$_conda_sh" ] && source "$_conda_sh"',
+                f"conda activate {spec.conda_env}",
+                "",
+            ]
+        elif spec.venv_path:
+            lines.append(f"source {spec.venv_path}/bin/activate")
+            lines.append("")
+
+        launcher = (
+            f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
+            f"--notebook-dir=/shared --ServerApp.token=\"$JUPYTER_TOKEN\""
+        )
+
+    lines += [
+        "# Generate a random per-job token (not logged beyond this script's stdout)",
+        'JUPYTER_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(24))")',
+        "",
+        "echo '================================================='",
+        "echo 'JupyterLab is starting on the GPU node.'",
+        "echo 'Run this SSH tunnel command from YOUR LAPTOP:'",
+        f"echo '  ssh -p {gateway_port} -L {port}:localhost:{port} public@{gateway_host}'",
+        f"echo 'Then open: http://localhost:{port}'",
+        "echo '================================================='",
+        "",
+        launcher,
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_notebook_sbatch(
+    spec: "JobSpec",
+    folder: str,
+    port: int = 8888,
+) -> str:
+    """Write the notebook sbatch script to folder/job.sbatch."""
+    path = Path(folder) / "job.sbatch"
+    path.write_text(render_notebook_sbatch(spec, folder, port=port))
     path.chmod(0o644)
     return str(path)
