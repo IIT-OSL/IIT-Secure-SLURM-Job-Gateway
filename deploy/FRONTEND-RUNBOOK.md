@@ -11,16 +11,22 @@
 
 ### 0.1 [LOGIN] slurm.conf — declare full CPUs, sane memory, fairshare, quieter logs
 
-Edit `/etc/slurm/slurm.conf`:
-```ini
-# Node: host has 32 threads; leave ~2 GB RAM headroom for the OS
-NodeName=iit-MS-7E06 NodeAddr=192.168.122.1 CPUs=32 RealMemory=61000 Gres=gpu:1 State=UNKNOWN
+The GPU host is an Intel i9-14900K: 32 logical CPUs but a *hybrid* layout
+(8 P-cores x2 threads + 16 E-cores x1 thread). slurmd's hwloc miscounts this as
+16, so configuring CPUs=32 alone marks the node INVALID_REG ("Low
+socket*core*thread count"). Fix: add SlurmdParameters=config_overrides so SLURM
+trusts the configured geometry.
 
-# Quieter logging, off the NFS share
+RealMemory: the default train task requests --mem=60G (61440 MB), so RealMemory
+must stay >= 61440. Set 62000 (~1 GB headroom; ConstrainRAMSpace=yes prevents
+per-job overrun, so tight headroom is safe).
+
+Edit /etc/slurm/slurm.conf (APPLIED values):
+```ini
+SlurmdParameters=config_overrides
+NodeName=iit-MS-7E06 NodeAddr=192.168.122.1 CPUs=32 RealMemory=62000 Gres=gpu:1 State=UNKNOWN
 SlurmdDebug=info
 SlurmdLogFile=/var/log/slurm/slurmd.log
-
-# Fair-share scheduling across users
 PriorityType=priority/multifactor
 PriorityWeightFairshare=100000
 PriorityWeightAge=1000
@@ -33,7 +39,7 @@ CgroupPlugin=autodetect
 ConstrainCores=yes
 ConstrainRAMSpace=yes
 ConstrainSwapSpace=no
-ConstrainDevices=yes      # see 0.4 — test GPU visibility before keeping
+ConstrainDevices=no       # KEPT no — see 0.4 (GPU works without it; enabling risks hiding it)
 ```
 
 ### 0.3 [LOGIN→GPU-HOST] sync + restart
@@ -61,7 +67,7 @@ submit a GPU job and confirm `nvidia-smi` still sees the 5090 inside the job.
 If the GPU disappears, revert `ConstrainDevices=yes → no` on both nodes and
 restart — the per-job eBPF device allowlist needs extra kernel config (see M01).
 
-### 0.5 [GPU-HOST] NFS root_squash (security hardening)
+### 0.5 [GPU-HOST] NFS root_squash — APPLIED & verified
 `/etc/exports`:
 ```
 /mnt/nvme_storage/shared 192.168.122.0/24(rw,sync,no_subtree_check,root_squash)
