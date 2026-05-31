@@ -1,3 +1,8 @@
+# Runtime Python dependencies for IIT-GPU-Manager.
+# This file is the single source of truth — deploy/install.sh installs from it
+# (pip3 install -r requirements.txt), and tests/test_dependencies.py asserts every
+# third-party module imported under iitgpu/ is listed here.
 rich>=13.0
 questionary>=2.0
 prompt_toolkit>=3.0.36,<3.0.47
+huggingface_hub>=0.20

@@ -90,7 +90,7 @@ find "${INSTALL_DIR}" -type d -exec chmod 755 {} \;
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 echo "==> Installing Python dependencies..."
-pip3 install --quiet --break-system-packages rich questionary
+pip3 install --quiet --break-system-packages -r "${INSTALL_DIR}/requirements.txt"
 
 # ── Audit log state dir ───────────────────────────────────────────────────────
 echo "==> Setting up audit log state directory..."
