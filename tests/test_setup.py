@@ -116,3 +116,53 @@ def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
     assert env.get("TMPDIR", "").startswith(str(tmp_path)), (
         f"TMPDIR should be under nfs_root ({tmp_path}), got {env.get('TMPDIR')!r}"
     )
+
+
+def test_run_setup_uses_arrow_select_menu_not_confirm_chain(monkeypatch):
+    """Setup shows one arrow-key select menu (all actions at once), dispatches
+    the chosen action, loops, and exits on 'Back to main menu' — it must NOT
+    ask a yes/no confirm per step.
+    """
+    from iitgpu import setup as s
+
+    calls = []
+    select_returns = iter(["Model download", "Smoke test", "Back to main menu"])
+    sel = MagicMock()
+    sel.ask.side_effect = lambda: next(select_returns)
+    confirm_mock = MagicMock()
+
+    with patch("iitgpu.setup.load_config", return_value=MagicMock()), \
+         patch("iitgpu.setup._run_health_check", return_value=True), \
+         patch("iitgpu.setup.questionary.select", return_value=sel) as select_patch, \
+         patch("iitgpu.setup.questionary.confirm", confirm_mock), \
+         patch("iitgpu.setup._run_model_download", side_effect=lambda cfg: calls.append("model")), \
+         patch("iitgpu.setup._run_smoke_test", side_effect=lambda cfg: calls.append("smoke")):
+        s.run_setup()
+
+    # both chosen actions ran, in order, then the menu exited
+    assert calls == ["model", "smoke"]
+    # menu was shown once per loop iteration (2 actions + the exit choice)
+    assert select_patch.call_count >= 1 and sel.ask.call_count == 3
+    # no per-step yes/no confirm was used as navigation
+    confirm_mock.assert_not_called()
+
+    # every action must appear in the one menu's choice list
+    choices = select_patch.call_args.kwargs["choices"]
+    for label in ("Environment (conda/venv)", "Install a prebuilt environment",
+                  "Manage environments & containers", "Data upload",
+                  "Model download", "Smoke test"):
+        assert label in choices
+    assert "Back to main menu" in choices
+
+
+def test_run_setup_back_exits_without_running_steps(monkeypatch):
+    from iitgpu import setup as s
+    sel = MagicMock()
+    sel.ask.return_value = "Back to main menu"
+    ran = []
+    with patch("iitgpu.setup.load_config", return_value=MagicMock()), \
+         patch("iitgpu.setup._run_health_check", return_value=True), \
+         patch("iitgpu.setup.questionary.select", return_value=sel), \
+         patch("iitgpu.setup._run_model_download", side_effect=lambda cfg: ran.append("x")):
+        s.run_setup()
+    assert ran == []

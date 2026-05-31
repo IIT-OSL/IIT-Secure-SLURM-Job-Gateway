@@ -386,6 +386,15 @@ def run_setup() -> None:
         ("Smoke test",               _run_smoke_test),
     ]
 
-    for label, fn in steps:
-        if questionary.confirm(f"Run: {label}?", default=True, style=_STYLE).ask():
-            fn(cfg)
+    by_label = dict(steps)
+    # Single arrow-key menu: show every setup action at once instead of asking a
+    # yes/no for each. Loop so several actions can run in one visit; Enter selects.
+    while True:
+        choice = questionary.select(
+            "What would you like to set up?",
+            choices=[label for label, _ in steps] + ["Back to main menu"],
+            style=_STYLE,
+        ).ask()
+        if choice is None or choice == "Back to main menu":
+            return
+        by_label[choice](cfg)
