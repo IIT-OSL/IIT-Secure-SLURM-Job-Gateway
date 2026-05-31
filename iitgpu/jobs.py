@@ -44,6 +44,7 @@ class JobSpec:
     conda_env: str = ""
     venv_path: str = ""
     task_type: str = "custom"
+    container_image: str = ""  # path to .sif — when set, skips conda/venv
 
 
 def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
@@ -82,6 +83,15 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
         lines.append(f"module load {mod}")
     if spec.modules:
         lines.append("")
+
+    if spec.container_image:
+        # Container mode: wrap run_command in apptainer exec; skip conda/venv
+        lines.append(f"cd {folder}")
+        lines.append(
+            f"apptainer exec --nv --bind /shared {spec.container_image} "
+            f"bash -lc {spec.run_command!r}"
+        )
+        return "\n".join(lines) + "\n"
 
     if spec.conda_env:
         # Source conda.sh before activating — required in non-interactive bash

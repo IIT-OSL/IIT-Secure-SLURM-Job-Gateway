@@ -98,26 +98,75 @@ def run_wizard() -> None:
     task_type = next(k for k, v in _TASK_LABELS.items() if v == task_choice)
     defaults = resource_defaults(task_type)
 
-    # ── Step 2: Environment ───────────────────────────────────────────────────
+    # ── Step 2: Environment (conda env OR container image) ──────────────────
     from iitgpu.envs import list_all_envs
+    from iitgpu.containers import list_images, validate_image
     envs = list_all_envs(cfg)
     chosen_env = None
-    if not envs:
-        warn("No environments registered. Run Setup → Environment first.")
-        if not questionary.confirm(
-            "Continue without an environment?", default=False, style=_STYLE
-        ).ask():
+    chosen_container: str = ""
+
+    env_type = questionary.select(
+        "Environment type:",
+        choices=[
+            "Conda / venv environment",
+            "Container image  (.sif via Apptainer)",
+            "[none / skip]",
+        ],
+        style=_STYLE,
+    ).ask()
+    if env_type is None:
+        return
+
+    if env_type == "Conda / venv environment":
+        if not envs:
+            warn("No environments registered. Run Setup → Environment first.")
+            if not questionary.confirm(
+                "Continue without an environment?", default=False, style=_STYLE
+            ).ask():
+                return
+        else:
+            env_choices = [f"{e.name}  ({e.kind})" for e in envs] + ["[none / skip]"]
+            env_sel = questionary.select(
+                "Which environment?", choices=env_choices, style=_STYLE
+            ).ask()
+            if env_sel is None:
+                return
+            if env_sel != "[none / skip]":
+                chosen_name = env_sel.split("  (")[0]
+                chosen_env = next((e for e in envs if e.name == chosen_name), None)
+
+    elif env_type == "Container image  (.sif via Apptainer)":
+        images = list_images(cfg.nfs_root)
+        if not images:
+            warn(f"No .sif images found in {cfg.nfs_root}/images/")
+            warn("Build or pull images first (see deploy/build-images.md).")
+            if not questionary.confirm(
+                "Enter image path manually?", default=False, style=_STYLE
+            ).ask():
+                return
+            manual = questionary.text("Full path to .sif image:", style=_STYLE).ask()
+            if not manual or not manual.strip():
+                return
+            chosen_container = manual.strip()
+        else:
+            img_choices = [Path(i).name + "  " + i for i in images] + ["[enter path manually]", "[cancel]"]
+            img_sel = questionary.select(
+                "Which container image?", choices=img_choices, style=_STYLE
+            ).ask()
+            if img_sel is None or img_sel == "[cancel]":
+                return
+            if img_sel == "[enter path manually]":
+                manual = questionary.text("Full path to .sif image:", style=_STYLE).ask()
+                if not manual or not manual.strip():
+                    return
+                chosen_container = manual.strip()
+            else:
+                chosen_container = img_sel.split("  ", 1)[1].strip()
+
+        if chosen_container and not validate_image(chosen_container):
+            warn("Image path is outside the allowed jail or is not a .sif file — rejected.")
             return
-    else:
-        env_choices = [f"{e.name}  ({e.kind})" for e in envs] + ["[none / skip]"]
-        env_sel = questionary.select(
-            "Which environment?", choices=env_choices, style=_STYLE
-        ).ask()
-        if env_sel is None:
-            return
-        if env_sel != "[none / skip]":
-            chosen_name = env_sel.split("  (")[0]
-            chosen_env = next((e for e in envs if e.name == chosen_name), None)
+        auditclient.log("container_selected", detail=Path(chosen_container).name)
 
     # ── Step 3: Script ────────────────────────────────────────────────────────
     start = str(Path(cfg.nfs_root) / getpass.getuser())
@@ -186,6 +235,7 @@ def run_wizard() -> None:
         task_type=task_type,
         conda_env=chosen_env.path if chosen_env and chosen_env.kind == "conda" else "",
         venv_path=chosen_env.path if chosen_env and chosen_env.kind == "venv" else "",
+        container_image=chosen_container,
     )
 
     folder = make_job_folder(jdir, spec)
