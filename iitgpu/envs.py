@@ -43,12 +43,23 @@ def _envs_registry_path(cfg: Config) -> Path:
 
 
 def _load_venv_registry(cfg: Config) -> list[EnvEntry]:
+    """Load every entry from the shared env registry (.envs.json).
+
+    Returns both pip venv envs and prebuilt conda envs. Conda envs are
+    recorded here so they are visible to *all* users -- per-user conda env
+    list discovery only sees envs in that user's environments.txt.
+    list_all_envs merges and de-dupes these with discovery.
+
+    (Previously this filtered to kind == "venv", which silently dropped
+    prebuilt conda envs: they never appeared for other users, and each prebuilt
+    install overwrote the previous one in the registry.)
+    """
     rpath = _envs_registry_path(cfg)
     if not rpath.exists():
         return []
     try:
         data = json.loads(rpath.read_text())
-        return [EnvEntry(**e) for e in data if e.get("kind") == "venv"]
+        return [EnvEntry(**e) for e in data]
     except (json.JSONDecodeError, TypeError, KeyError):
         return []
 
