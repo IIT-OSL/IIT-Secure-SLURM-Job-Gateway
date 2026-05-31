@@ -329,7 +329,7 @@ def _run_install_prebuilt(cfg: Config) -> None:
     auditclient.log("prebuilt_env_install_start", detail=name)
 
     rc, lines = _run_with_progress(
-        [conda_bin, "env", "create", "-p", env_path, "-f", spec_file, "--force"],
+        [conda_bin, "env", "create", "-p", env_path, "-f", spec_file, "--yes"],
         _CONDA_PHASES,
         f"Installing {name}",
     )

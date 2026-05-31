@@ -62,3 +62,48 @@ def test_smoke_test_script_output_under_shared(tmp_path, monkeypatch):
     script = _build_smoke_test_script("/shared/envs/pytorch-2.5", load_config(), out_dir)
     assert "slurm-%j.out" in script
     assert out_dir in script
+
+
+def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
+    """conda >=24 removed `conda env create --force`; ensure we pass --yes instead.
+
+    Regression for the cluster failure: `conda: error: unrecognized
+    arguments: --force` (conda 26.x) when installing a prebuilt env.
+    """
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    (tmp_path / "envs").mkdir()
+
+    from iitgpu import setup as s
+    from iitgpu.config import load_config
+    cfg = load_config()
+
+    available = [
+        n for n in s._PREBUILT_DESCRIPTIONS
+        if (s._PREBUILT_SPECS_DIR / f"{n}.yml").exists()
+    ]
+    assert available, "expected prebuilt specs to exist in envs/specs/"
+    name = available[0]
+    choice = f"{name}  — {s._PREBUILT_DESCRIPTIONS[name]}"
+
+    captured = {}
+
+    def fake_run_with_progress(argv, phases, label):
+        captured["argv"] = argv
+        return 0, []
+
+    sel = MagicMock()
+    sel.ask.return_value = choice
+
+    with patch("iitgpu.setup.questionary.select", return_value=sel), \
+         patch("iitgpu.envbuilder._find_conda", return_value="/shared/miniforge3/bin/conda"), \
+         patch("iitgpu.envbuilder._run_with_progress", side_effect=fake_run_with_progress), \
+         patch("iitgpu.setup.auditclient"), \
+         patch("iitgpu.envs._save_venv_registry"), \
+         patch("iitgpu.envs._load_venv_registry", return_value=[]):
+        s._run_install_prebuilt(cfg)
+
+    argv = captured.get("argv")
+    assert argv is not None, "conda env create was never invoked"
+    assert argv[1:3] == ["env", "create"], f"unexpected conda argv: {argv}"
+    assert "--force" not in argv, "must not use removed `conda env create --force` flag"
+    assert "--yes" in argv or "-y" in argv, f"expected --yes to auto-confirm: {argv}"
