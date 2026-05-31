@@ -41,3 +41,15 @@ def validate_image(image_path: str) -> bool:
         in_jail(image_path)
         and image_path.endswith(".sif")
     )
+
+
+def delete_image(image_path: str) -> tuple[bool, str]:
+    """Delete a .sif image (jailed + must be a .sif)."""
+    import os
+    if not validate_image(image_path):
+        return False, "Access denied or not a .sif file."
+    try:
+        os.remove(image_path)
+        return True, f"Deleted {os.path.basename(image_path)}"
+    except OSError as exc:
+        return False, str(exc)

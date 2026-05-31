@@ -161,3 +161,41 @@ def pick_env(cfg: Config) -> EnvEntry | None:
         return None
     name = choice.split("  ")[0]
     return next((e for e in envs if e.name == name), None)
+
+
+def env_manager(cfg: Config) -> None:
+    """List conda envs + container images; create (conda) or delete either."""
+    import questionary
+    from iitgpu.ui import header, info, ok, err
+    from iitgpu.containers import list_images, delete_image
+    from iitgpu.envbuilder import delete_env
+
+    while True:
+        header("Environments & Containers")
+        envs = list_all_envs(cfg)
+        images = list_images(cfg.nfs_root)
+        lines = [f"[env] {e.name}  ({e.kind})" for e in envs]
+        lines += [f"[img] {Path(i).name}" for i in images]
+        choices = lines + ["[ create conda env ]", "[ back ]"]
+        choice = questionary.select("Select to manage:", choices=choices, style=_STYLE).ask()
+        if choice is None or choice == "[ back ]":
+            return
+        if choice == "[ create conda env ]":
+            from iitgpu.setup import _run_env_setup
+            _run_env_setup(cfg)
+            continue
+        if choice.startswith("[env] "):
+            name = choice[6:].split("  (")[0]
+            entry = next((e for e in envs if e.name == name), None)
+            if entry and questionary.confirm(f"Delete conda env '{name}'?", default=False, style=_STYLE).ask():
+                good, msg = delete_env(entry.path, cfg)
+                if good:
+                    reg = [e for e in _load_venv_registry(cfg) if e.name != name]
+                    _save_venv_registry(cfg, reg)
+                (ok if good else err)(str(msg))
+        elif choice.startswith("[img] "):
+            iname = choice[6:]
+            full = next((i for i in images if Path(i).name == iname), None)
+            if full and questionary.confirm(f"Delete image '{iname}'?", default=False, style=_STYLE).ask():
+                good, msg = delete_image(full)
+                (ok if good else err)(str(msg))

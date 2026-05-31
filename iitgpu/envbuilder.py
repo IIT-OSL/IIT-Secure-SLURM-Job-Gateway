@@ -600,3 +600,19 @@ def build_env(
 
     ok(f"Environment '{name}' ready at {env_path}")
     return True, env_path
+
+
+def delete_env(env_path: str, cfg) -> tuple[bool, str]:
+    """Delete a conda env directory under <nfs_root>/envs (jailed)."""
+    import shutil as _sh
+    from pathlib import Path as _P
+    from iitgpu.validate import in_jail
+    envs_root = str(_P(cfg.nfs_root) / "envs")
+    rp = str(_P(env_path).resolve())
+    if not in_jail(env_path) or not rp.startswith(envs_root):
+        return False, "Refusing: env path is outside <nfs_root>/envs."
+    try:
+        _sh.rmtree(env_path)
+        return True, f"Deleted {_P(env_path).name}"
+    except OSError as exc:
+        return False, str(exc)

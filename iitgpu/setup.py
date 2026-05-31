@@ -352,6 +352,11 @@ def _run_install_prebuilt(cfg: Config) -> None:
 
 
 
+def _run_env_manager(cfg: Config) -> None:
+    from iitgpu.envs import env_manager
+    env_manager(cfg)
+
+
 def run_setup() -> None:
     cfg = load_config()
     header("Setup")
@@ -362,6 +367,7 @@ def run_setup() -> None:
     steps = [
         ("Environment (conda/venv)", _run_env_setup),
         ("Install a prebuilt environment", _run_install_prebuilt),
+        ("Manage environments & containers", _run_env_manager),
         ("Data upload",              _run_data_upload),
         ("Model download",           _run_model_download),
         ("Smoke test",               _run_smoke_test),

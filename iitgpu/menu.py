@@ -48,8 +48,19 @@ def run_menu() -> None:
             return
 
         elif choice.startswith("1."):
-            from iitgpu.upload import run_upload
-            run_upload()
+            import questionary as _q
+            sub = _q.select(
+                "Files:",
+                choices=["Upload data (scp/url)",
+                         "Manage files (browse/rename/delete)", "Back"],
+                style=_STYLE,
+            ).ask()
+            if sub == "Upload data (scp/url)":
+                from iitgpu.upload import run_upload
+                run_upload()
+            elif sub and sub.startswith("Manage"):
+                from iitgpu.files import file_manager
+                file_manager()
 
         elif choice.startswith("2."):
             from iitgpu.setup import run_setup
