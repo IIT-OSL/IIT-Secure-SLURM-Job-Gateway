@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""
+Writes live GPU/CPU/RAM stats to /shared/.gpu_stats.json every 2 seconds.
+Runs as a systemd service on the GPU host (iit-MS-7E06).
+"""
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+
+STATS_FILE = Path("/shared/.gpu_stats.json")
+INTERVAL   = 2
+
+
+def collect() -> dict:
+    stats: dict = {}
+
+    try:
+        r = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,utilization.memory,"
+                "memory.used,memory.total,temperature.gpu,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            parts = [p.strip() for p in r.stdout.strip().split(",")]
+            stats["gpu_util"]         = int(parts[0])
+            stats["gpu_mem_util"]     = int(parts[1])
+            stats["gpu_mem_used_mb"]  = int(parts[2])
+            stats["gpu_mem_total_mb"] = int(parts[3])
+            stats["gpu_temp"]         = int(parts[4])
+            try:
+                stats["gpu_power_w"] = float(parts[5])
+            except (ValueError, IndexError):
+                stats["gpu_power_w"] = 0.0
+    except Exception:
+        pass
+
+    try:
+        vals = Path("/proc/loadavg").read_text().split()
+        ncpu = os.cpu_count() or 1
+        stats["cpu_load1"] = float(vals[0])
+        stats["cpu_load5"] = float(vals[1])
+        stats["cpu_util"]  = min(int(float(vals[0]) / ncpu * 100), 100)
+    except Exception:
+        pass
+
+    try:
+        mem: dict[str, int] = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, v = line.split(":", 1)
+            mem[k.strip()] = int(v.strip().split()[0])
+        total_mb = mem.get("MemTotal", 0) // 1024
+        avail_mb = mem.get("MemAvailable", 0) // 1024
+        stats["mem_total_mb"] = total_mb
+        stats["mem_used_mb"]  = total_mb - avail_mb
+    except Exception:
+        pass
+
+    stats["ts"] = time.time()
+    return stats
+
+
+def main() -> None:
+    STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            data = collect()
+            tmp = STATS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.rename(STATS_FILE)
+        except Exception:
+            pass
+        time.sleep(INTERVAL)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,17 @@
+[Unit]
+Description=IIT GPU stats writer — feeds live metrics to NFS for dashboard
+Documentation=https://github.com/DahamDissanayake/IIT-Secure-SLURM-Job-Gateway
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/iit-gpu-stats-writer
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+# Run as root-daham so it can write to /shared (NFS-mounted, world-writable)
+User=root-daham
+
+[Install]
+WantedBy=multi-user.target
