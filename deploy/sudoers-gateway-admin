@@ -21,4 +21,5 @@ Defaults:%gpuadmins !lecture, timestamp_timeout=0
     /usr/local/bin/iit-gpu-adduser, \
     /usr/local/bin/iit-gpu-deluser, \
     /usr/sbin/chpasswd, \
-    /usr/bin/sacctmgr
+    /usr/bin/sacctmgr, \
+    /usr/bin/scancel

@@ -45,8 +45,11 @@ def test_fmt_ts_handles_empty():
 
 def test_drain_node_uses_sudo_n():
     with patch("subprocess.run", return_value=_proc()) as r:
-        ok, _ = admin.drain_node("node1", "maintenance")
-    cmd = r.call_args[0][0]
+        ok, msg = admin.drain_node("node1", "maintenance")
+    # drain_node calls squeue (get_jobs_on_node) then scontrol
+    scontrol_call = next(c for c in r.call_args_list
+                         if "scontrol" in c[0][0])
+    cmd = scontrol_call[0][0]
     assert cmd[:3] == ["sudo", "-n", "scontrol"]
     assert "nodename=node1" in cmd
     assert "state=drain" in cmd
@@ -57,6 +60,33 @@ def test_drain_node_uses_sudo_n():
 def test_drain_node_requires_reason():
     ok, _ = admin.drain_node("node1", "")
     assert not ok
+
+
+def test_drain_node_force_cancels_jobs():
+    squeue_out = "42|public|train|RUNNING\n"
+    responses = [_proc(out=squeue_out), _proc(), _proc()]  # squeue, scancel, scontrol
+    with patch("subprocess.run", side_effect=responses) as r:
+        ok, msg = admin.drain_node("node1", "maint", cancel_running=True)
+    assert ok
+    assert "42" in msg
+    scancel_call = r.call_args_list[1][0][0]
+    assert "scancel" in scancel_call
+    assert "42" in scancel_call
+
+
+def test_get_jobs_on_node_parses_squeue():
+    out = "42|public|train|RUNNING\n99|daham|test|RUNNING\n"
+    with patch("subprocess.run", return_value=_proc(out=out)):
+        jobs = admin.get_jobs_on_node("iit-MS-7E06")
+    assert len(jobs) == 2
+    assert jobs[0]["id"] == "42" and jobs[0]["user"] == "public"
+    assert jobs[1]["id"] == "99"
+
+
+def test_get_jobs_on_node_empty():
+    with patch("subprocess.run", return_value=_proc(out="")):
+        jobs = admin.get_jobs_on_node("iit-MS-7E06")
+    assert jobs == []
 
 
 def test_resume_node_uses_sudo_n():

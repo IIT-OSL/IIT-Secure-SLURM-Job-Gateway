@@ -854,6 +854,84 @@ Refresh rates: data every 2.0s (squeue + node stats + log tail), display at 4 FP
 
 ---
 
+## 11b. Node Drain — Force vs Graceful
+
+When the admin drains a node from the **Admin Panel → Drain node**:
+
+```
+Admin Panel → Drain node
+  → Enter node name (default: iit-MS-7E06)
+  → Enter reason (mandatory)
+  → TUI calls get_jobs_on_node() → squeue --nodelist=<node> --format=%i|%u|%j|%T
+  → If jobs are running, shows list and asks:
+      "Cancel these jobs now? (force drain — node becomes DRAINED immediately)"
+       YES → cancel_jobs_on_node(): sudo -n scancel <id> for each job
+              + audit log per cancellation
+       NO  → node goes to DRAINING state; existing jobs run to completion
+  → sudo -n scontrol update nodename=<node> state=drain reason=<reason>
+```
+
+**Node states:**
+
+| State | Meaning |
+|-------|---------|
+| `IDLE` | Ready, no jobs |
+| `ALLOCATED` | Jobs running |
+| `IDLE+DRAIN` / `DRAINING` | Drain requested; running jobs allowed to finish; no new jobs |
+| `DRAINED` | Fully drained; no jobs running; maintenance safe |
+
+**To resume after maintenance:**
+Admin Panel → Resume node → `sudo -n scontrol update nodename=<node> state=resume`
+
+**Root cause of "job stuck PENDING":** if the node is drained and you forgot to
+resume it, all new jobs pend with reason *"Nodes required for job are DOWN,
+DRAINED or reserved..."* even if the node is physically idle. Always Resume after
+maintenance. The drain reason appears in `sinfo -R` so it's visible to the admin.
+
+---
+
+## 11c. Maintenance Notice
+
+The admin can broadcast a maintenance notice that all users see at the top of
+their main menu on next login (or on each menu redraw).
+
+**Setting a notice:**
+```
+Admin Panel → Set maintenance notice → enter reason text
+→ admin.set_maintenance(reason, set_by)
+→ writes /shared/.maintenance.json (0666) with {active, reason, set_by, since}
+→ audit: admin_maintenance_set
+```
+
+**What users see (non-admins):**
+```
+╭─────────────────────────────────────────────────────╮
+│ MAINTENANCE  Scheduled maintenance 2026-06-01 10:00  │
+│ Set by daham at 2026-06-01 04:30:00 UTC             │
+╰─────────────────────────────────────────────────────╯
+? Select an option: ...
+```
+Users can still use the TUI — the banner is informational only.
+
+**Clearing:**
+```
+Admin Panel → Clear maintenance notice
+→ admin.clear_maintenance() → os.remove(/shared/.maintenance.json)
+→ audit: admin_maintenance_clear
+```
+
+**File:** `/shared/.maintenance.json`
+```json
+{
+  "active": true,
+  "reason": "Scheduled maintenance window",
+  "set_by": "daham",
+  "since": "2026-06-01T04:30:00+00:00"
+}
+```
+
+---
+
 ## 12. Audit System — Complete Reference
 
 ### 12.1 Architecture
@@ -903,6 +981,9 @@ Refresh rates: data every 2.0s (squeue + node stats + log tail), display at 4 FP
 | `admin_node_resume` | Admin resumes a node |
 | `admin_provision_user` | Admin provisions a new user |
 | `admin_offboard_user` | Admin offboards a user |
+| `admin_job_cancel` | Admin force-cancels a job during drain (detail: `force-drain:<node>`) |
+| `admin_maintenance_set` | Admin sets a maintenance notice |
+| `admin_maintenance_clear` | Admin clears the maintenance notice |
 
 ### 12.3 Audit event schema
 
@@ -1421,6 +1502,18 @@ identifiable in squeue/sacct/log listings. (Commit `b89a77b`)
 
 ---
 
+### Admin panel fixes (2026-06-01)
+
+| # | Problem | Root Cause | Fix | Commit |
+|---|---------|-----------|-----|--------|
+| M04-1 | Audit log displayed raw UTC ISO strings | `ts_str[:19]` sliced without timezone conversion | `_fmt_ts()` converts to GMT+5:30 via `datetime.astimezone(_LK)` | `09fd470` |
+| M04-2 | No way to set a user password at provisioning time | Flow only called adduser, no password step | Password prompt (masked + confirm) added; `set_user_password()` pipes to `sudo -n chpasswd` via stdin; `/usr/sbin/chpasswd` added to gpuadmins sudoers | `09fd470` |
+| M04-3 | Offboard failed with "sudo: A terminal is required to authenticate" | questionary/prompt_toolkit leaves PTY in raw/noecho mode; inherited stdin blocks sudo even with NOPASSWD | `_run()` always uses `stdin=DEVNULL`; all sudo calls use `-n`; scripts use full absolute paths | `09fd470` |
+| M04-4 | QOS panel showed raw misaligned text; no editing possible | `qos_table()` dumped raw sacctmgr output | `list_qos()` returns structured dicts; `_qos_menu()` Rich table + interactive edit (MaxWall/MaxGPU/Priority) via `sudo -n sacctmgr`; `/usr/bin/sacctmgr` added to sudoers | `09fd470` |
+| M04-5 | Draining a node with a running job left it DRAINING indefinitely | SLURM drain only prevents new jobs; running jobs continue until they finish | `get_jobs_on_node()` + `cancel_jobs_on_node()` added; drain flow shows running jobs and offers "Cancel now (force drain)"; `/usr/bin/scancel` added to gpuadmins sudoers | next commit |
+| M04-6 | Node stuck IDLE+DRAIN; new jobs pended with "Nodes required for job are DOWN..." | Drain not resumed after admin panel testing (test used placeholder name `node1` not real node `iit-MS-7E06`) | `scontrol update nodename=iit-MS-7E06 state=resume`; documented that drain reason is visible via `sinfo -R` | live fix |
+| M04-7 | No way to notify users of planned maintenance | No cluster-wide messaging mechanism | `set_maintenance(reason, set_by)` writes `/shared/.maintenance.json`; `get_maintenance()` reads it; `menu.py` shows a yellow Rich Panel banner at top of main menu on each login | next commit |
+
 ## 21. Active State & Pending Items
 
 ### 21.1 Current live state (2026-06-01)
@@ -1431,11 +1524,11 @@ identifiable in squeue/sacct/log listings. (Commit `b89a77b`)
 | slurmdbd + MariaDB | active |
 | iit-gpu-audit | active (running since 2026-05-31 17:17) |
 | iit-gpu-stats | active on GPU host |
-| RTX 5090 | ALLOCATED (job 118 running — finetune, user=public) |
+| RTX 5090 | IDLE (node resumed; job 120 running — train, user=public) |
 | NFS /shared | mounted on both nodes |
 | Per-user identity | ACTIVE (`GATEWAY_SHARED_USER=0` in `/opt/iit-gpu/deploy/site.env`) |
-| Test suite | 334 passing |
-| menu.py | 1 unstaged change in repo (uncommitted; identical to deployed `/opt/iit-gpu`) |
+| Test suite | 353 passing |
+| Admin panel fixes | committed 09fd470 + drain/maintenance features committed |
 
 ### 21.2 Repo vs deployed discrepancy
 
@@ -1455,7 +1548,6 @@ since it's already git-ignored per the .gitignore).
 | Add swap to login node | Medium | `sudo fallocate -l 8G /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile` + fstab entry. Prevents OOM on memory spikes. |
 | Build Apptainer .sif images | Low | `sudo apptainer build /shared/images/<name>.sif /opt/iit-gpu/envs/images/<name>.def` (20–40 min each) |
 | Set GATEWAY_SHARED_USER=0 in repo site.env | Low | Align repo with deployed state for documentation clarity |
-| Commit unstaged menu.py | Low | `git add iitgpu/menu.py && git commit` |
 | Provision real user accounts | When needed | `sudo addUser.sh` for each new user |
 | Enable ConstrainDevices | Optional | Needs per-job NVIDIA eBPF allowlist; risk of hiding GPU |
 | XFS project quotas on /shared | Optional | Prevents a single user from filling the 1.7 TB NVMe |
@@ -1485,6 +1577,7 @@ since it's already git-ignored per the .gitignore).
 | `/var/lib/iit-gpu/audit.jsonl` | Audit JSONL log |
 | `/etc/sudoers.d/iit-gpu-gateway` | Sudoers for gateway/admin operations |
 | `/etc/ssh/sshd_config.d/iit-gpu-gateway.conf` | ForceCommand + AllowTcpForwarding no |
+| `/shared/.maintenance.json` | Cluster maintenance notice (0666; read by all users on login) |
 
 ### 22.2 Hardware facts
 

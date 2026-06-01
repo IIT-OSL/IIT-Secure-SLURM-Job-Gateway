@@ -3,7 +3,7 @@
 
 Permission gatekeepers applied to every privileged subprocess call:
   • stdin=subprocess.DEVNULL — questionary/prompt_toolkit leaves the PTY in
-    raw mode after each prompt; inheriting that as sudo's stdin causes
+    raw mode after each prompt; inheriting that as sudo stdin causes
     "A terminal is required to authenticate" even when NOPASSWD rules match.
     Explicit DEVNULL ensures sudo never tries to read from the terminal.
   • sudo -n (non-interactive) — fails immediately with a clear error if a
@@ -36,9 +36,9 @@ def _run(cmd: list[str], timeout: int = 15,
          stdin_data: str | None = None) -> tuple[int, str, str]:
     """Run a subprocess with stdin always closed (DEVNULL) unless stdin_data is given.
 
-    This is intentional: questionary puts the PTY in raw mode and doesn't always
-    restore it before we call out to sudo. DEVNULL + sudo -n means the call either
-    succeeds via NOPASSWD or fails fast — it never hangs waiting for a password.
+    questionary puts the PTY in raw mode and doesn't always restore it before we
+    call out to sudo. DEVNULL + sudo -n means the call either succeeds via NOPASSWD
+    or fails fast — it never hangs waiting for a password.
     """
     try:
         r = subprocess.run(
@@ -56,13 +56,49 @@ def _run(cmd: list[str], timeout: int = 15,
 
 # ── Node control ─────────────────────────────────────────────────────────────────
 
-def drain_node(node: str, reason: str) -> tuple[bool, str]:
+def get_jobs_on_node(node: str) -> list[dict]:
+    """Return jobs currently allocated to a node as list of {id, user, name, state}."""
+    rc, out, _ = _run(["squeue", "--noheader",
+                        "--format=%i|%u|%j|%T", f"--nodelist={node}"])
+    if rc != 0 or not out.strip():
+        return []
+    jobs = []
+    for line in out.strip().splitlines():
+        parts = line.split("|")
+        if len(parts) == 4:
+            jobs.append({"id": parts[0].strip(), "user": parts[1].strip(),
+                         "name": parts[2].strip(), "state": parts[3].strip()})
+    return jobs
+
+
+def cancel_jobs_on_node(node: str) -> tuple[int, list[str]]:
+    """Cancel all jobs on a node. Returns (count_cancelled, list_of_ids)."""
+    jobs = get_jobs_on_node(node)
+    cancelled = []
+    for j in jobs:
+        rc, _, _ = _run(["sudo", "-n", "scancel", j["id"]])
+        if rc == 0:
+            cancelled.append(j["id"])
+            auditclient.log("admin_job_cancel", detail=f"force-drain:{node}",
+                            job_id=j["id"])
+    return len(cancelled), cancelled
+
+
+def drain_node(node: str, reason: str,
+               cancel_running: bool = False) -> tuple[bool, str]:
     if not node or not reason:
         return False, "node and reason are required"
+    cancelled_ids: list[str] = []
+    if cancel_running:
+        _, cancelled_ids = cancel_jobs_on_node(node)
     rc, _, err = _run(["sudo", "-n", "scontrol", "update",
                         f"nodename={node}", "state=drain", f"reason={reason}"])
     auditclient.log("admin_node_drain", detail=f"{node}:{reason}")
-    return (rc == 0), ("drained" if rc == 0 else (err.strip() or "drain failed"))
+    if rc != 0:
+        return False, err.strip() or "drain failed"
+    if cancelled_ids:
+        return True, f"draining — cancelled {len(cancelled_ids)} job(s): {', '.join(cancelled_ids)}"
+    return True, "draining (running jobs will finish before node reaches DRAINED)"
 
 
 def resume_node(node: str) -> tuple[bool, str]:
@@ -155,6 +191,59 @@ def read_audit(limit: int = 40, action_filter: str = "",
         if len(events) >= limit:
             break
     return events
+
+
+# ── Maintenance notice ────────────────────────────────────────────────────────────
+
+def _maintenance_path() -> str:
+    """Path to the cluster-wide maintenance notice file (NFS, world-readable)."""
+    cfg = load_config()
+    return f"{cfg.nfs_root}/.maintenance.json"
+
+
+def get_maintenance() -> dict | None:
+    """Return the active maintenance notice dict, or None if not set."""
+    import json
+    try:
+        data = json.loads(open(_maintenance_path()).read())
+        if data.get("active"):
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def set_maintenance(reason: str, set_by: str) -> tuple[bool, str]:
+    """Write a maintenance notice to shared storage (visible to all users on login)."""
+    import json, os
+    data = {
+        "active": True,
+        "reason": reason,
+        "set_by": set_by,
+        "since": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        p = _maintenance_path()
+        with open(p, "w") as f:
+            json.dump(data, f)
+        os.chmod(p, 0o666)
+        auditclient.log("admin_maintenance_set", detail=reason)
+        return True, f"Maintenance notice active: {reason}"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def clear_maintenance() -> tuple[bool, str]:
+    """Remove the maintenance notice."""
+    import os
+    try:
+        os.remove(_maintenance_path())
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return False, str(exc)
+    auditclient.log("admin_maintenance_clear", detail="")
+    return True, "Maintenance notice cleared."
 
 
 # ── QOS / partitions ──────────────────────────────────────────────────────────────
@@ -266,7 +355,7 @@ def _qos_menu(style) -> None:
             if val is None:
                 continue
             if questionary.confirm(
-                    f"Set [magenta]{qname}[/] MaxWall → "
+                    f"Set [magenta]{qname}[/] MaxWall to "
                     f"[magenta]{val.strip() or 'unlimited'}[/]?",
                     default=True, style=style).ask():
                 good, msg = set_qos_maxwall(qname, val.strip())
@@ -290,7 +379,7 @@ def _qos_menu(style) -> None:
                 except ValueError:
                     err("Enter a positive integer or leave blank."); continue
             if questionary.confirm(
-                    f"Set [magenta]{qname}[/] Max GPUs → "
+                    f"Set [magenta]{qname}[/] Max GPUs to "
                     f"[magenta]{gpu_val if gpu_val is not None else 'unlimited'}[/]?",
                     default=True, style=style).ask():
                 good, msg = set_qos_maxgpu(qname, gpu_val)
@@ -306,7 +395,8 @@ def _qos_menu(style) -> None:
             except ValueError:
                 err("Enter an integer."); continue
             if questionary.confirm(
-                    f"Set [magenta]{qname}[/] Priority → [magenta]{prio}[/]?",
+                    f"Set [magenta]{qname}[/] Priority to "
+                    f"[magenta]{prio}[/]?",
                     default=True, style=style).ask():
                 good, msg = set_qos_priority(qname, prio)
                 (ok if good else err)(msg)
@@ -327,13 +417,24 @@ def admin_menu() -> None:
 
     style = Style([("qmark", "fg:cyan bold"), ("pointer", "fg:cyan bold")])
     node_default = "iit-MS-7E06"
+
     while True:
         header("Admin Panel")
         choice = questionary.select(
             "Admin action:",
-            choices=["Drain node", "Resume node", "List users", "Provision user",
-                     "Offboard user", "Audit log", "QOS / limits",
-                     "Cluster usage (all users)", "Back"],
+            choices=[
+                "Drain node",
+                "Resume node",
+                "List users",
+                "Provision user",
+                "Offboard user",
+                "Audit log",
+                "QOS / limits",
+                "Cluster usage (all users)",
+                "Set maintenance notice",
+                "Clear maintenance notice",
+                "Back",
+            ],
             style=style,
         ).ask()
         if choice is None or choice == "Back":
@@ -341,8 +442,27 @@ def admin_menu() -> None:
 
         if choice == "Drain node":
             node = questionary.text("Node:", default=node_default, style=style).ask()
+            node = (node or node_default).strip()
             reason = questionary.text("Reason:", style=style).ask()
-            good, msg = drain_node(node or node_default, reason or "")
+            if not reason or not reason.strip():
+                err("A drain reason is required.")
+                questionary.press_any_key_to_continue("").ask()
+                continue
+            running = get_jobs_on_node(node)
+            cancel_running = False
+            if running:
+                info(f"  [yellow]{len(running)} job(s) currently on {node}:[/]")
+                for j in running:
+                    info(f"    job {j['id']}  user={j['user']}  "
+                         f"name={j['name']}  [{j['state']}]")
+                cancel_running = questionary.confirm(
+                    "Cancel these jobs now? "
+                    "(force drain — node becomes DRAINED immediately)",
+                    default=False, style=style,
+                ).ask()
+            else:
+                info(f"  [dim]No jobs running on {node}.[/]")
+            good, msg = drain_node(node, reason.strip(), cancel_running=cancel_running)
             (ok if good else err)(msg)
 
         elif choice == "Resume node":
@@ -417,5 +537,29 @@ def admin_menu() -> None:
                 t.add_row(r.user, f"{r.gpu_hours:.1f}",
                           f"{r.cpu_hours:.1f}", str(r.job_count))
             console.print(t)
+
+        elif choice == "Set maintenance notice":
+            current = get_maintenance()
+            if current:
+                info(f"  [yellow]Active notice:[/] {current.get('reason', '')}")
+            reason = questionary.text(
+                "Maintenance reason (shown to all users on login):",
+                style=style,
+            ).ask()
+            if reason and reason.strip():
+                import os
+                good, msg = set_maintenance(
+                    reason.strip(), set_by=os.environ.get("USER", "admin"))
+                (ok if good else err)(msg)
+
+        elif choice == "Clear maintenance notice":
+            current = get_maintenance()
+            if not current:
+                info("No active maintenance notice.")
+            elif questionary.confirm(
+                    "Clear the maintenance notice?",
+                    default=True, style=style).ask():
+                good, msg = clear_maintenance()
+                (ok if good else err)(msg)
 
         questionary.press_any_key_to_continue("").ask()
