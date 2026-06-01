@@ -250,4 +250,60 @@ pulls `nvidia-cuda-*-cu12 12.8.*` / `nvidia-cudnn-cu12 9.7.1` / `torch ...+cu128
 
 ---
 
+## 9. Incident 2026-06-01 — job 117 TRL API break + `--job-name` improvement
+
+With the `llm-finetune` env repaired (see [M02 §16](./M02-log.md)), job **117**
+got much further — it loaded the model weights (291 shards), pulled the Alpaca
+dataset, filtered + mapped 51,890 examples — then failed at trainer construction:
+
+```
+File "/shared/training-scripts/finetune_qlora.py", line 107, in <module>
+    trainer = SFTTrainer(
+TypeError: SFTTrainer.__init__() got an unexpected keyword argument 'dataset_text_field'
+```
+
+### 9.1 Root cause — TRL 1.x moved SFT knobs into `SFTConfig`
+
+The env installed **trl 1.5.1**. TRL ≥ 1.0 changed the `SFTTrainer` API:
+
+| Old (pre-1.0) `SFTTrainer` kwarg | New location in trl 1.5.1 |
+|----------------------------------|----------------------------|
+| `dataset_text_field='text'`      | field on `SFTConfig`        |
+| `max_seq_length=...`             | renamed → `max_length` on `SFTConfig` |
+| `tokenizer=...`                  | renamed → `processing_class=` on `SFTTrainer` |
+
+Verified against the installed package — `inspect.signature(SFTTrainer.__init__)`
+no longer lists `dataset_text_field`/`max_seq_length`/`tokenizer`; `SFTConfig`
+(a subclass of `transformers.TrainingArguments`) carries `dataset_text_field`,
+`max_length`, and `packing`.
+
+### 9.2 Fix — `/shared/training-scripts/finetune_qlora.py`
+
+- Build the config as **`SFTConfig`** instead of `TrainingArguments` (drop-in:
+  it subclasses `TrainingArguments`, so all existing args still apply).
+- Move `dataset_text_field='text'` and `max_length=args.max_seq` into it.
+- Pass `processing_class=tokenizer` to `SFTTrainer` (no more
+  `dataset_text_field` / `max_seq_length` / `tokenizer` kwargs there).
+
+Fixed in place at `/shared/training-scripts/` (the runtime location used by
+submitted jobs; this script is not part of the repo clone). Re-running the
+finetune now constructs the trainer and proceeds to `trainer.train()`.
+
+> Note: a separate non-fatal warning remains — *"warmup_ratio is deprecated …
+> use warmup_steps"* (transformers 5.x). It does not stop the run and was left
+> as-is.
+
+### 9.3 `--job-name` now carries the full run name
+
+`iitgpu/jobs.py::render_sbatch` set `#SBATCH --job-name={spec.job_name}`, so
+every finetune showed up in `squeue`/`sacct`/log listings as just `finetune` —
+indistinguishable across runs. It now uses the **full job-folder name**
+(`{job_name}_{timestamp}`, e.g. `finetune_20260601_045303`), derived from the
+job folder, so each submission is uniquely identifiable end to end. Tests
+`test_render_sbatch_job_name` and the e2e job-name assertion were updated to the
+new behavior. **Full suite passing.** Shipped via `git push` → `redeploy` to the
+canonical `/opt/iit-gpu` clone.
+
+---
+
 *End of M03.*

@@ -44,7 +44,7 @@ def test_demo_submit_and_queue(tmp_path, monkeypatch):
 
     assert Path(sbatch_path).exists()
     script = Path(sbatch_path).read_text()
-    assert "#SBATCH --job-name=e2e_test" in script
+    assert f"#SBATCH --job-name={Path(folder).name}" in script
     assert "#SBATCH --gres=gpu:1" in script
 
     success, job_id = submit_job(sbatch_path)

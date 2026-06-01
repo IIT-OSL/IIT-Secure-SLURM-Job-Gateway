@@ -79,7 +79,10 @@ def save_upload(src: str, folder: str) -> str:
 def render_sbatch(spec: JobSpec, folder: str) -> str:
     lines = [
         "#!/bin/bash",
-        f"#SBATCH --job-name={spec.job_name}",
+        # Use the full job-folder name (e.g. finetune_20260601_045303) as the
+        # SLURM job name so queue/sacct/log listings are unambiguous per run,
+        # instead of every finetune showing up as just "finetune".
+        f"#SBATCH --job-name={Path(folder).name}",
         f"#SBATCH --partition={spec.partition}",
         f"#SBATCH --gres=gpu:{spec.gpus}",
         f"#SBATCH --cpus-per-task={spec.cpus}",

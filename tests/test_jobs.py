@@ -42,8 +42,12 @@ def test_render_sbatch_shebang(tmp_path):
 
 
 def test_render_sbatch_job_name(tmp_path):
+    # The SLURM job name is the full job-folder name (job_name + timestamp),
+    # e.g. "mytest_20260601_045303", so each run is uniquely identifiable.
     folder = make_job_folder(str(tmp_path), _spec(job_name="mytest"))
-    assert "#SBATCH --job-name=mytest" in render_sbatch(_spec(job_name="mytest"), folder)
+    script = render_sbatch(_spec(job_name="mytest"), folder)
+    assert f"#SBATCH --job-name={Path(folder).name}" in script
+    assert Path(folder).name.startswith("mytest_")
 
 
 def test_render_sbatch_gres_gpu(tmp_path):
