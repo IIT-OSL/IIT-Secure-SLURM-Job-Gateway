@@ -41,20 +41,27 @@ def run_menu() -> None:
     _admin = _ia(_lc())
     while True:
         header("Main Menu")
-        # Show maintenance banner if one is active
+        # Show maintenance banner; lock out non-admins when active
+        _maint = None
         try:
             from iitgpu.admin import get_maintenance
             _maint = get_maintenance()
-            if _maint:
-                from iitgpu.ui import console
-                from rich.panel import Panel
-                _body = ("[bold yellow]MAINTENANCE[/]  "
-                         + _maint.get("reason", "") + "\n"
-                         + "[dim]Set by " + _maint.get("set_by", "?") + " at "
-                         + _maint.get("since", "")[:19] + " UTC[/]")
-                console.print(Panel(_body, border_style="yellow", expand=False))
         except Exception:
             pass
+        if _maint:
+            from iitgpu.ui import console
+            from rich.panel import Panel
+            _body = ("[bold yellow]MAINTENANCE[/]  "
+                     + _maint.get("reason", "") + "\n"
+                     + "[dim]Set by " + _maint.get("set_by", "?") + " at "
+                     + _maint.get("since", "")[:19] + " UTC[/]")
+            console.print(Panel(_body, border_style="yellow", expand=False))
+            if not _admin:
+                info("[dim]The cluster is currently unavailable. Please try again later.[/]")
+                questionary.select("Select an option:", choices=["Quit"],
+                                   style=_STYLE).ask()
+                info("Goodbye.")
+                return
         _choices = list(_ITEMS)
         if _admin:
             _choices.insert(len(_choices) - 1, "7. Admin         (cluster ops, users, audit)")
