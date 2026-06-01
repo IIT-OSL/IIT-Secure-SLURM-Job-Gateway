@@ -98,6 +98,8 @@ def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
     with patch("iitgpu.setup.questionary.select", return_value=sel), \
          patch("iitgpu.envbuilder._find_conda", return_value="/shared/miniforge3/bin/conda"), \
          patch("iitgpu.envbuilder._run_with_progress", side_effect=fake_run_with_progress), \
+         patch("iitgpu.envbuilder._run_pip_with_progress", return_value=(0, [])), \
+         patch("iitgpu.setup._verify_spec_packages", return_value=[]), \
          patch("iitgpu.setup.auditclient"), \
          patch("iitgpu.envs._save_venv_registry"), \
          patch("iitgpu.envs._load_venv_registry", return_value=[]):
@@ -115,6 +117,60 @@ def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
     assert env is not None, "installer must pass an env with TMPDIR set"
     assert env.get("TMPDIR", "").startswith(str(tmp_path)), (
         f"TMPDIR should be under nfs_root ({tmp_path}), got {env.get('TMPDIR')!r}"
+    )
+
+
+def test_parse_spec_pip_deps_extracts_pip_block():
+    """The spec parser returns every pip: item, splitting flag+value tokens."""
+    from iitgpu import setup as s
+    spec = s._PREBUILT_SPECS_DIR / "llm-finetune.yml"
+    assert spec.exists(), "llm-finetune.yml spec must exist"
+    deps = s._parse_spec_pip_deps(str(spec))
+    assert "torch==2.7.*" in deps
+    assert "transformers>=4.40" in deps
+    # "--extra-index-url URL" must be split into two separate pip args
+    assert "--extra-index-url" in deps
+    assert "https://download.pytorch.org/whl/cu128" in deps
+    # conda-only deps (python, the bare `pip` package) must NOT leak in
+    assert not any(d.startswith("python=") for d in deps)
+
+
+def test_install_prebuilt_refuses_to_register_incomplete_env(tmp_path, monkeypatch):
+    """If conda env create exits 0 but the pip stage left packages missing
+    (the llm-finetune 'No module named torch' failure), the installer must
+    detect it, refuse to register the env, and not report success.
+    """
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    (tmp_path / "envs").mkdir()
+
+    from iitgpu import setup as s
+    from iitgpu.config import load_config
+    cfg = load_config()
+
+    name = next(
+        n for n in s._PREBUILT_DESCRIPTIONS
+        if (s._PREBUILT_SPECS_DIR / f"{n}.yml").exists()
+    )
+    sel = MagicMock()
+    sel.ask.return_value = f"{name}  — {s._PREBUILT_DESCRIPTIONS[name]}"
+
+    saved = {"called": False}
+
+    def fake_save(*a, **k):
+        saved["called"] = True
+
+    with patch("iitgpu.setup.questionary.select", return_value=sel), \
+         patch("iitgpu.envbuilder._find_conda", return_value="/shared/miniforge3/bin/conda"), \
+         patch("iitgpu.envbuilder._run_with_progress", return_value=(0, [])), \
+         patch("iitgpu.envbuilder._run_pip_with_progress", return_value=(0, [])), \
+         patch("iitgpu.setup._verify_spec_packages", return_value=["torch", "transformers"]), \
+         patch("iitgpu.setup.auditclient"), \
+         patch("iitgpu.envs._save_venv_registry", side_effect=fake_save), \
+         patch("iitgpu.envs._load_venv_registry", return_value=[]):
+        s._run_install_prebuilt(cfg)
+
+    assert saved["called"] is False, (
+        "installer registered an env that failed package verification"
     )
 
 

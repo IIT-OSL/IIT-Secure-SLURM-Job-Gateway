@@ -5,6 +5,7 @@ import getpass
 import grp
 import os as _os
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -282,6 +283,80 @@ _PREBUILT_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+def _parse_spec_pip_deps(spec_file: str) -> list[str]:
+    """Extract pip install args from the ``pip:`` block of a conda env spec.
+
+    Returns each list item under ``- pip:`` as one or more pip args, e.g.
+    ``["--extra-index-url", "https://...", "torch==2.7.*", "torchvision", ...]``.
+    Flag lines such as ``--extra-index-url URL`` are split into separate tokens
+    so pip parses them correctly. Returns [] if the spec has no pip block.
+    """
+    try:
+        lines = Path(spec_file).read_text().splitlines()
+    except OSError:
+        return []
+    args: list[str] = []
+    in_pip = False
+    pip_indent = -1
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if stripped.replace(" ", "") == "-pip:":
+            in_pip = True
+            pip_indent = indent
+            continue
+        if in_pip:
+            # pip items are nested deeper than the `- pip:` key; a line at the
+            # same or shallower indent ends the block.
+            if indent <= pip_indent:
+                in_pip = False
+                continue
+            if stripped.startswith("- "):
+                args.extend(stripped[2:].strip().split())
+    return args
+
+
+def _verify_spec_packages(env_path: str, pip_deps: list[str]) -> list[str]:
+    """Return top-level pip packages from the spec not installed in the env.
+
+    Guards against the silent failure mode where ``conda env create`` exits 0
+    but the spec's pip stage was skipped, leaving a python-only env (no torch).
+    """
+    # Derive distribution names: drop flags (and the value they consume) and
+    # strip version pins / extras. "torch==2.7.*" -> "torch", "trl>=0.8" -> "trl".
+    names: list[str] = []
+    skip_next = False
+    _value_flags = {"--extra-index-url", "--index-url", "-f", "--find-links"}
+    for tok in pip_deps:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok.startswith("-"):
+            if tok in _value_flags:
+                skip_next = True
+            continue
+        name = re.split(r"[<>=!~\[ ]", tok, 1)[0].strip()
+        if name:
+            names.append(name)
+    if not names:
+        return []
+    pip_bin = str(Path(env_path) / "bin" / "pip")
+    try:
+        result = subprocess.run(
+            [pip_bin, "list", "--format=freeze"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return names  # cannot verify -> treat every package as suspect
+    installed = {
+        line.split("==")[0].strip().lower().replace("_", "-")
+        for line in result.stdout.splitlines() if line.strip()
+    }
+    return [n for n in names if n.lower().replace("_", "-") not in installed]
+
+
 def _run_install_prebuilt(cfg: Config) -> None:
     header("Install Prebuilt Environment")
     specs_dir = _PREBUILT_SPECS_DIR
@@ -318,7 +393,10 @@ def _run_install_prebuilt(cfg: Config) -> None:
         ).ask():
             return
 
-    from iitgpu.envbuilder import _find_conda, _run_with_progress, _CONDA_PHASES, _show_error_lines
+    from iitgpu.envbuilder import (
+        _find_conda, _run_with_progress, _run_pip_with_progress,
+        _CONDA_PHASES, _show_error_lines,
+    )
     conda_bin = _find_conda(cfg)
     if not conda_bin:
         err("conda not found — cannot install prebuilt environment")
@@ -351,6 +429,39 @@ def _run_install_prebuilt(cfg: Config) -> None:
         _show_error_lines(lines)
         auditclient.log("prebuilt_env_install_failed", detail=name)
         return
+
+    # `conda env create` runs the spec's pip: block, but if that pip stage
+    # fails or is silently skipped it can still exit 0 with a python-only env
+    # (this is how llm-finetune shipped with no torch — every job using it died
+    # with "ModuleNotFoundError: No module named 'torch'"). Guarantee the full
+    # install: explicitly (re)install the spec's pip deps — a fast no-op when
+    # conda already installed them, a repair when it didn't — then verify every
+    # top-level package is present before registering the env for use.
+    pip_deps = _parse_spec_pip_deps(spec_file)
+    if pip_deps:
+        pip_bin = str(Path(env_path) / "bin" / "pip")
+        info("Ensuring all pip packages from the spec are installed ...")
+        rc, lines = _run_pip_with_progress(
+            [pip_bin, "install"] + pip_deps,
+            f"Installing {name} pip packages",
+            env=proc_env,
+        )
+        if rc != 0:
+            err(f"pip install of spec packages failed for '{name}'")
+            _show_error_lines(lines)
+            auditclient.log("prebuilt_env_install_failed", detail=f"{name}:pip")
+            return
+
+        missing = _verify_spec_packages(env_path, pip_deps)
+        if missing:
+            err(f"Environment '{name}' is incomplete — missing: {', '.join(missing)}")
+            err("Refusing to register a broken env. Check network/index and reinstall.")
+            auditclient.log(
+                "prebuilt_env_install_failed",
+                detail=f"{name}:missing={','.join(missing)}",
+            )
+            return
+        ok(f"Verified all {len(pip_deps)} pip dependencies installed.")
 
     ok(f"Prebuilt environment '{name}' installed at {env_path}")
     auditclient.log("prebuilt_env_install_ok", detail=name)

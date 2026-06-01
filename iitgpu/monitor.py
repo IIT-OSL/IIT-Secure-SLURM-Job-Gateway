@@ -90,7 +90,14 @@ def manage_job() -> None:
     (ok if success else err)(msg)
 
 
-def tail_log(log_path: str, lines: int = 50) -> None:
+def tail_log(log_path: str, lines: int | None = None) -> None:
+    """Display a job log.
+
+    By default the FULL log is shown through a pager (less) so it can be
+    scrolled and searched with `/` — important for analyzing failures that
+    happen early in the run (e.g. an import traceback at the top, which a
+    bottom-only tail would hide). Pass an int to show only the last N lines.
+    """
     if not in_jail(log_path):
         err("Access denied: log path is outside allowed directories.")
         return
@@ -98,13 +105,26 @@ def tail_log(log_path: str, lines: int = 50) -> None:
     if not p.exists():
         warn(f"Log file not found: {log_path}")
         return
-    header(f"Log: {p.name}")
     try:
         text = p.read_text(errors="replace")
-        for line in text.splitlines()[-lines:]:
-            console.print(line)
     except OSError as exc:
         err(f"Cannot read log: {exc}")
+        return
+
+    all_lines = text.splitlines()
+    if lines is not None:
+        header(f"Log: {p.name}  (last {min(lines, len(all_lines))} of {len(all_lines)} lines)")
+        for line in all_lines[-lines:]:
+            console.print(line, markup=False, highlight=False)
+        return
+
+    # Full log via pager so the whole thing is scrollable + searchable.
+    header(f"Log: {p.name}  ({len(all_lines)} lines)  —  arrows/PgUp to scroll, '/' to search, 'q' to quit")
+    with console.pager(styles=False):
+        # markup/highlight off: log text (tracebacks, "[Errno 13]", etc.) must
+        # render literally and not be interpreted as Rich markup.
+        for line in all_lines:
+            console.print(line, markup=False, highlight=False)
 
 
 def browse_and_tail_log() -> None:

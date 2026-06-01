@@ -1133,4 +1133,90 @@ tool" without sacrificing the safety model.
 
 ---
 
+## 16. Incident 2026-06-01 — job 116 `ModuleNotFoundError: No module named 'torch'` + hardening
+
+**Reported:** a finetune/training job failed immediately; `slurm-116.err` showed:
+
+```
+Traceback (most recent call last):
+  File "/shared/training-scripts/finetune_qlora.py", line 15, in <module>
+    import os, argparse, torch
+ModuleNotFoundError: No module named 'torch'
+```
+
+### 16.1 Investigation
+
+- `sacct -j 116` → JobName `finetune`, User `public`, **State FAILED**,
+  WorkDir `/shared/jobs/public/finetune_20260531_173024`.
+- The generated `job.sbatch` was **correct**: it sourced `conda.sh` and ran
+  `conda activate /shared/envs/llm-finetune` before `python finetune_qlora.py`.
+  The gateway's env-activation logic was not at fault.
+- Direct inspection of the env told the real story:
+  `/shared/envs/llm-finetune/lib/python3.11/site-packages/` contained only
+  **`pip`, `setuptools`, `wheel`, `packaging`** (11 entries). No `torch`, no
+  `transformers`, no `peft/trl/bitsandbytes/accelerate/datasets`.
+
+### 16.2 Root cause
+
+The env was created from `envs/specs/llm-finetune.yml` via
+`conda env create -p /shared/envs/llm-finetune -f llm-finetune.yml`. That spec
+declares the whole ML stack under a `pip:` block, but **the pip stage never
+populated the env** — `conda env create` returned success while leaving a
+python-only environment. The prebuilt-env installer (`setup._run_install_prebuilt`)
+**trusted the conda exit code and never verified the packages**, so it registered
+a broken env. Every job that activated `llm-finetune` then died on `import torch`.
+
+### 16.3 Immediate remediation (env repaired)
+
+Installed the spec's full `pip:` block into the existing env (as owner `public`,
+pip cache/TMPDIR on `/shared`):
+
+```
+/shared/envs/llm-finetune/bin/pip install \
+  --extra-index-url https://download.pytorch.org/whl/cu128 \
+  torch==2.7.* torchvision torchaudio transformers>=4.40 peft>=0.11 \
+  trl>=0.8 bitsandbytes>=0.43 accelerate>=0.30 datasets>=2.19 \
+  safetensors scipy sentencepiece protobuf
+```
+
+Verified inside the env: **torch 2.7.1+cu128**, transformers 5.9.0, peft 0.19.1,
+trl 1.5.1 — all import cleanly (CUDA build 12.8, matching the RTX 5090 / sm_120
+requirement). `import torch` now succeeds; job 116's failure is resolved.
+
+### 16.4 Code hardening so it cannot recur
+
+**`iitgpu/setup.py` — `_run_install_prebuilt`** now guarantees a complete env:
+
+1. New `_parse_spec_pip_deps(spec_file)` extracts the spec's `pip:` block
+   (splitting `--extra-index-url URL` into separate tokens).
+2. After `conda env create`, it **explicitly (re)installs** those pip deps via
+   `envbuilder._run_pip_with_progress` — a fast no-op when conda already did the
+   work, a repair when it didn't.
+3. New `_verify_spec_packages(env_path, pip_deps)` checks every top-level package
+   is actually present (`pip list`). If any are **missing the env is NOT
+   registered** and the install reports failure (audit: `missing=...`), instead
+   of silently shipping a python-only shell.
+
+**`iitgpu/monitor.py` — `tail_log`** now opens the **full** log through a pager
+(`console.pager`, `less`) so it can be scrolled and **searched with `/`**, with
+Rich markup/highlight disabled so tracebacks and bracketed text (e.g.
+`[Errno 13]`) render literally. Previously it printed only the last 50 lines —
+which hid early failures like the import traceback at the top of this very job.
+A `lines=N` argument still gives the old bottom-N tail for callers that want it.
+
+### 16.5 Tests
+
+- Updated `test_install_prebuilt_uses_yes_not_removed_force` to mock the new
+  pip/verify steps.
+- Added `test_parse_spec_pip_deps_extracts_pip_block` and
+  `test_install_prebuilt_refuses_to_register_incomplete_env`.
+- **Full suite: 334 passed.**
+
+> **Lesson:** `conda env create` exiting 0 does **not** mean the `pip:` block
+> installed. Any env-build path must verify the resulting package set before
+> advertising the env as usable — a build step that can partially succeed needs
+> a post-condition check, not just an exit-code check.
+
+---
+
 *End of M02.*
