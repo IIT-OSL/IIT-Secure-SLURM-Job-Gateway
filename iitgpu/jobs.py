@@ -50,6 +50,7 @@ class JobSpec:
     container_image: str = ""  # path to .sif — when set, skips conda/venv
     array: str = ""            # SLURM --array spec, e.g. "0-9" or "1-100%4"
     dependency: str = ""       # SLURM --dependency, e.g. "afterok:12345"
+    data_path: str = ""        # path exported as DATA_PATH in the sbatch script
     mail_user: str = ""        # email for --mail-type=END,FAIL (if MTA present)
 
 
@@ -138,6 +139,10 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
     if spec.model_path:
         lines.append(f"export MODEL_PATH={spec.model_path}")
         lines.append(f"export HF_HOME={spec.model_path}")
+        lines.append("")
+
+    if spec.data_path:
+        lines.append(f"export DATA_PATH={spec.data_path}")
         lines.append("")
 
     lines.append(f"cd {folder}")

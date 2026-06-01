@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import getpass
+import grp
+import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import questionary
@@ -25,11 +28,11 @@ _STYLE = Style([
 ])
 
 _TASK_LABELS: dict[str, str] = {
-    "train":     "Train from scratch",
-    "finetune":  "Fine-tune a model",
-    "inference": "Run inference / generate output",
-    "test":      "Quick test  (30 min, reduced resources)",
-    "notebook":  "Notebook (JupyterLab)  — interactive GPU session",
+    "train":       "Train from scratch",
+    "finetune":    "Fine-tune a model",
+    "inference":   "Run inference / generate output",
+    "test":        "Quick test  (30 min, reduced resources)",
+    "notebook":    "Notebook (JupyterLab)  — interactive GPU session",
     "interactive": "Interactive shell on the GPU node  (srun --pty)",
 }
 
@@ -71,26 +74,164 @@ def _browse_script(start_dir: str) -> str | None:
         return None
 
 
-def run_wizard() -> None:
+def _browse_data_folder(start_dir: str) -> str | None:
+    """Jailed folder browser (directories only, for picking a data directory)."""
+    current = start_dir
+    while True:
+        entries = safe_listdir(current)
+        dirs = sorted(e for e in entries if Path(current, e).is_dir())
+        choices = (["[.. up]"] + [f"[dir] {d}" for d in dirs]
+                   + ["[select this folder]", "[cancel]"])
+        choice = questionary.select(
+            f"Browse ({current}):", choices=choices, style=_STYLE
+        ).ask()
+        if choice is None or choice == "[cancel]":
+            return None
+        if choice == "[select this folder]":
+            if in_jail(current):
+                return current
+            warn("Access denied.")
+            return None
+        if choice == "[.. up]":
+            parent = str(Path(current).parent)
+            if in_jail(parent):
+                current = parent
+            else:
+                warn("Already at root of allowed paths.")
+            continue
+        if choice.startswith("[dir] "):
+            candidate = str(Path(current) / choice[6:])
+            if in_jail(candidate):
+                current = candidate
+            else:
+                warn("Access denied.")
+            continue
+
+
+def _ensure_scripts_dir(cfg, user: str) -> str | None:
+    """Create /shared/<user>/scripts/ with 0o770 + gpuusers gid, return path."""
+    scripts_dir = Path(cfg.nfs_root) / user / "scripts"
+    dest = str(scripts_dir)
+    if not in_jail(dest):
+        warn("Scripts directory is outside the allowed jail.")
+        return None
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    scripts_dir.chmod(0o770)
+    try:
+        gid = grp.getgrnam(cfg.gpuusers_group).gr_gid
+        os.chown(dest, -1, gid)
+    except (KeyError, PermissionError, OSError):
+        pass
+    return dest
+
+
+def _inline_paste(cfg, user: str) -> tuple[str | None, str | None]:
+    """Collect pasted data, write to /shared/<user>/data/<ts>_inline.txt.
+
+    Returns (data_path, script_path_or_None).
+    script_path is non-None only if user agrees to use generated script as job.
+    """
+    info("Paste your data below. When finished, enter a line containing only EOF and press Enter.")
+    lines = []
+    try:
+        while True:
+            line = input()
+            if line == "EOF":
+                break
+            lines.append(line)
+    except EOFError:
+        pass
+
+    if not lines:
+        warn("No data pasted.")
+        return None, None
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    data_subdir = Path(cfg.nfs_root) / user / "data"
+    data_subdir.mkdir(parents=True, exist_ok=True)
+    data_dest = str(data_subdir / f"{ts}_inline.txt")
+
+    if not in_jail(data_dest):
+        err("Data destination is outside the allowed jail — refused.")
+        return None, None
+
+    Path(data_dest).write_text("\n".join(lines) + "\n")
+    Path(data_dest).chmod(0o644)
+    auditclient.log("data_inline_paste", detail=Path(data_dest).name)
+    ok(f"Saved {len(lines)} lines to {data_dest}")
+
+    script_path: str | None = None
+    if questionary.confirm(
+        "Create a Python script to load this data?", default=True, style=_STYLE
+    ).ask():
+        scripts_dir = _ensure_scripts_dir(cfg, user)
+        if scripts_dir:
+            script_dest = str(Path(scripts_dir) / f"{ts}_load_data.py")
+            if not in_jail(script_dest):
+                warn("Script destination is outside the allowed jail — skipping.")
+            else:
+                loader = (
+                    "#!/usr/bin/env python3\n"
+                    "# Auto-generated data loader — edit as needed\n"
+                    "# Data file: " + data_dest + "\n"
+                    "\n"
+                    "import os\n"
+                    "\n"
+                    "DATA_PATH = os.environ.get(\"DATA_PATH\", \"" + data_dest + "\")\n"
+                    "\n"
+                    "\n"
+                    "def load_data():\n"
+                    "    with open(DATA_PATH, \"r\") as f:\n"
+                    "        content = f.read()\n"
+                    "    lines = content.splitlines()\n"
+                    "    print(f\"Loaded {len(lines)} lines from {DATA_PATH}\")\n"
+                    "    print(\"First 5 lines:\")\n"
+                    "    for line in lines[:5]:\n"
+                    "        print(f\"  {line}\")\n"
+                    "    return content\n"
+                    "\n"
+                    "\n"
+                    "if __name__ == \"__main__\":\n"
+                    "    data = load_data()\n"
+                )
+                Path(script_dest).write_text(loader)
+                Path(script_dest).chmod(0o644)
+                auditclient.log("script_generated", detail=script_dest)
+                ok(f"Loader script saved to {script_dest}")
+                if questionary.confirm(
+                    "Use this generated script as your job script?",
+                    default=True, style=_STYLE,
+                ).ask():
+                    script_path = script_dest
+
+    return data_dest, script_path
+
+
+def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity ok for a wizard)
     cfg = load_config()
     jdir = jobs_dir(cfg)
-    header("Run a Job")
+    user = getpass.getuser()
+    header("New Job")
 
-    # ── Step 0: Optional template load ───────────────────────────────────────
-    _tdefaults: dict = {}
-    if questionary.confirm("Load from a saved template?", default=False, style=_STYLE).ask():
-        from iitgpu.templates import pick_template
-        tdata = pick_template(cfg)
-        if tdata:
-            _tdefaults = tdata
+    # ── Step 0: Optional template load (skip when prefilling from rerun) ─────
+    _tdefaults: dict = prefill or {}
+    if not _tdefaults:
+        if questionary.confirm(
+            "Load from a saved template?", default=False, style=_STYLE
+        ).ask():
+            from iitgpu.templates import pick_template
+            tdata = pick_template(cfg)
+            if tdata:
+                _tdefaults = tdata
+
+    _prefill_hint = "  [pre-filled from previous run]" if prefill else ""
 
     # ── Step 1: Task type ─────────────────────────────────────────────────────
-    # Pre-select task type from template if loaded
     _template_task_type = _tdefaults.get("task_type", "")
     _default_label = _TASK_LABELS.get(_template_task_type, list(_TASK_LABELS.values())[0])
 
     task_choice = questionary.select(
-        "What are you doing?",
+        "Step 1 — What are you doing?" + (_prefill_hint if _template_task_type else ""),
         choices=list(_TASK_LABELS.values()),
         default=_default_label,
         style=_STYLE,
@@ -100,7 +241,7 @@ def run_wizard() -> None:
     task_type = next(k for k, v in _TASK_LABELS.items() if v == task_choice)
     defaults = resource_defaults(task_type)
 
-    # ── Interactive GPU session (srun --pty) — runs a shell inside an allocation ──
+    # ── Interactive GPU session (srun --pty) early return ────────────────────
     if task_type == "interactive":
         from iitgpu.jobs import build_interactive_cmd
         spec = JobSpec(
@@ -113,34 +254,47 @@ def run_wizard() -> None:
         info("Requesting an interactive GPU allocation — you will land in a shell")
         info("ON the compute node. It ends when you type 'exit' or the time limit hits.")
         panel("Interactive command", " ".join(cmd))
-        if not questionary.confirm("Start interactive session now?", default=True, style=_STYLE).ask():
+        if not questionary.confirm(
+            "Start interactive session now?", default=True, style=_STYLE
+        ).ask():
             return
         if not auditclient.log_or_block("interactive_start", detail="srun_pty"):
             err("Audit logging failed. Refusing to start (safety policy).")
             return
         import subprocess
         try:
-            subprocess.run(cmd)   # interactive — inherits the TTY
+            subprocess.run(cmd)
         except (OSError, KeyboardInterrupt):
             pass
         auditclient.log("interactive_end")
         info("Interactive session ended.")
         return
 
-    # ── Step 2: Environment (conda env OR container image) ──────────────────
+    # ── Step 2: Environment ───────────────────────────────────────────────────
     from iitgpu.envs import list_all_envs
     from iitgpu.containers import list_images, validate_image
     envs = list_all_envs(cfg)
     chosen_env = None
     chosen_container: str = ""
 
+    _prefill_conda = _tdefaults.get("conda_env", "")
+    _prefill_container = _tdefaults.get("container_image", "")
+    if _prefill_conda:
+        _env_type_default = "Conda / venv environment"
+    elif _prefill_container:
+        _env_type_default = "Container image  (.sif via Apptainer)"
+    else:
+        _env_type_default = "Conda / venv environment"
+
     env_type = questionary.select(
-        "Environment type:",
+        "Step 2 — Environment type:"
+        + (_prefill_hint if (_prefill_conda or _prefill_container) else ""),
         choices=[
             "Conda / venv environment",
             "Container image  (.sif via Apptainer)",
             "[none / skip]",
         ],
+        default=_env_type_default,
         style=_STYLE,
     ).ask()
     if env_type is None:
@@ -148,15 +302,27 @@ def run_wizard() -> None:
 
     if env_type == "Conda / venv environment":
         if not envs:
-            warn("No environments registered. Run Setup → Environment first.")
+            warn("No environments registered. Run Settings → Build environment first.")
             if not questionary.confirm(
                 "Continue without an environment?", default=False, style=_STYLE
             ).ask():
                 return
         else:
             env_choices = [f"{e.name}  ({e.kind})" for e in envs] + ["[none / skip]"]
+            _env_sel_default = None
+            if _prefill_conda:
+                _env_sel_default = next(
+                    (f"{e.name}  ({e.kind})"
+                     for e in envs
+                     if e.path == _prefill_conda or e.name == _prefill_conda),
+                    None,
+                )
             env_sel = questionary.select(
-                "Which environment?", choices=env_choices, style=_STYLE
+                "Which environment?"
+                + (_prefill_hint if _env_sel_default else ""),
+                choices=env_choices,
+                default=_env_sel_default,
+                style=_STYLE,
             ).ask()
             if env_sel is None:
                 return
@@ -178,9 +344,22 @@ def run_wizard() -> None:
                 return
             chosen_container = manual.strip()
         else:
-            img_choices = [Path(i).name + "  " + i for i in images] + ["[enter path manually]", "[cancel]"]
+            img_choices = (
+                [Path(i).name + "  " + i for i in images]
+                + ["[enter path manually]", "[cancel]"]
+            )
+            _img_default = None
+            if _prefill_container:
+                _img_default = next(
+                    (Path(i).name + "  " + i for i in images if i == _prefill_container),
+                    None,
+                )
             img_sel = questionary.select(
-                "Which container image?", choices=img_choices, style=_STYLE
+                "Which container image?"
+                + (_prefill_hint if _img_default else ""),
+                choices=img_choices,
+                default=_img_default,
+                style=_STYLE,
             ).ask()
             if img_sel is None or img_sel == "[cancel]":
                 return
@@ -193,17 +372,127 @@ def run_wizard() -> None:
                 chosen_container = img_sel.split("  ", 1)[1].strip()
 
         if chosen_container and not validate_image(chosen_container):
-            warn("Image path is outside the allowed jail or is not a .sif file — rejected.")
+            warn("Image path is outside the allowed jail or not a .sif — rejected.")
             return
         auditclient.log("container_selected", detail=Path(chosen_container).name)
 
-    # ── Step 3: Script / Notebook config ─────────────────────────────────────
+    # ── Step 3: Your data (skip for notebook) ────────────────────────────────
+    data_path: str = ""
+    script_path: str | None = None
     job_name = task_type
 
+    if task_type != "notebook":
+        _prefill_dp = _tdefaults.get("data_path", "")
+        data_choices = [
+            "a) Pick an existing folder",
+            "b) Upload from my computer  (scp/rsync instructions)",
+            "c) Download from a URL",
+            "d) Paste data inline",
+            "e) Skip (no data needed)",
+        ]
+        _data_default = "a) Pick an existing folder" if _prefill_dp else None
+
+        data_choice = questionary.select(
+            "Step 3 — Your data:"
+            + (_prefill_hint if _prefill_dp else ""),
+            choices=data_choices,
+            default=_data_default,
+            style=_STYLE,
+        ).ask()
+        if data_choice is None:
+            return
+
+        if data_choice.startswith("a)"):
+            _start = str(Path(cfg.nfs_root) / user)
+            if not Path(_start).exists():
+                _start = cfg.nfs_root
+            if _prefill_dp and Path(_prefill_dp).exists() and in_jail(_prefill_dp):
+                _start = (
+                    _prefill_dp if Path(_prefill_dp).is_dir()
+                    else str(Path(_prefill_dp).parent)
+                )
+            _picked = _browse_data_folder(_start)
+            if _picked:
+                data_path = _picked
+
+        elif data_choice.startswith("b)"):
+            from iitgpu.upload import run_upload
+            run_upload()
+
+        elif data_choice.startswith("c)"):
+            # _download_from_url(folder_path) writes files into a folder and returns None.
+            # Build a per-user download staging folder, then pass it as the target.
+            _dl_folder = str(Path(cfg.nfs_root) / user / "data" / "downloads")
+            if in_jail(_dl_folder):
+                Path(_dl_folder).mkdir(parents=True, exist_ok=True)
+                from iitgpu.upload import _download_from_url
+                _download_from_url(_dl_folder)
+                data_path = _dl_folder
+            else:
+                from iitgpu.upload import run_upload
+                run_upload()
+
+        elif data_choice.startswith("d)"):
+            _dp, _sp = _inline_paste(cfg, user)
+            if _dp:
+                data_path = _dp
+            if _sp:
+                script_path = _sp  # skip Step 5 browser
+
+    # ── Step 4: Your model (finetune / inference only) ────────────────────────
+    model_path: str = _tdefaults.get("model_path", "")
+
+    if task_type in ("finetune", "inference"):
+        model_choices = [
+            "a) Pick a downloaded model from registry",
+            "b) Download from HuggingFace now",
+            "c) Enter a path manually",
+            "d) Skip",
+        ]
+        model_choice = questionary.select(
+            "Step 4 — Your model:", choices=model_choices, style=_STYLE
+        ).ask()
+        if model_choice is None:
+            return
+
+        if model_choice.startswith("a)"):
+            try:
+                from iitgpu.models import pick_model
+                _picked_model = pick_model(cfg)
+                if _picked_model is not None:
+                    model_path = _picked_model.path
+            except (ImportError, AttributeError):
+                from iitgpu.models import model_menu
+                model_menu(cfg)
+
+        elif model_choice.startswith("b)"):
+            # download_hf(cfg, repo_id) requires a repo_id; prompt first.
+            _repo_id = questionary.text(
+                "HuggingFace repo ID (e.g. mistralai/Mistral-7B-v0.1):",
+                style=_STYLE,
+            ).ask()
+            if _repo_id and _repo_id.strip():
+                try:
+                    from iitgpu.models import download_hf
+                    _ok, _dest = download_hf(cfg, _repo_id.strip())
+                    if _ok and _dest:
+                        model_path = _dest
+                except (ImportError, AttributeError):
+                    from iitgpu.models import model_menu
+                    model_menu(cfg)
+
+        elif model_choice.startswith("c)"):
+            _manual_mp = questionary.text("Full model path:", style=_STYLE).ask()
+            if _manual_mp and _manual_mp.strip():
+                if in_jail(_manual_mp.strip()):
+                    model_path = _manual_mp.strip()
+                else:
+                    warn("Path is outside the allowed jail — rejected.")
+
+    # ── Step 5: Notebook config OR Script ─────────────────────────────────────
     if task_type == "notebook":
-        # Notebook jobs launch JupyterLab — no script path needed
         port_str = questionary.text(
-            "JupyterLab port (on the GPU node):", default="8888", style=_STYLE
+            "Step 5 — JupyterLab port (on the GPU node):", default="8888", style=_STYLE
         ).ask()
         if port_str is None:
             return
@@ -219,14 +508,14 @@ def run_wizard() -> None:
             cpus=defaults.cpus,
             mem_gb=defaults.mem_gb,
             time_limit=defaults.time_limit,
-            run_command="",   # not used for notebooks
+            run_command="",
             task_type=task_type,
             conda_env=chosen_env.path if chosen_env and chosen_env.kind == "conda" else "",
             venv_path=chosen_env.path if chosen_env and chosen_env.kind == "venv" else "",
             container_image=chosen_container,
         )
         folder = make_job_folder(jdir, spec)
-        from iitgpu.jobs import render_notebook_sbatch, write_notebook_sbatch
+        from iitgpu.jobs import render_notebook_sbatch
         script_text = render_notebook_sbatch(
             spec, folder, port=nb_port,
             gateway_host=cfg.gateway_host, gateway_port=int(cfg.gateway_port),
@@ -255,25 +544,33 @@ def run_wizard() -> None:
         success, result = submit_job(sbatch_path)
         if success:
             ok(f"Notebook job submitted! ID: {result}")
-            ok(f"SSH tunnel: ssh -p {cfg.gateway_port} "
-               f"-L {nb_port}:localhost:{nb_port} {getpass.getuser()}@{cfg.gateway_host}")
+            ok(
+                f"SSH tunnel: ssh -p {cfg.gateway_port} "
+                f"-L {nb_port}:localhost:{nb_port} {user}@{cfg.gateway_host}"
+            )
             auditclient.log("notebook_submitted_ok", detail=job_name, job_id=result)
         else:
             err(f"Submission failed: {result}")
             auditclient.log("notebook_submit_failed", detail=result)
         return
 
-    # ── Step 3 (non-notebook): Script ─────────────────────────────────────────
-    start = str(Path(cfg.nfs_root) / getpass.getuser())
-    if not Path(start).exists():
-        start = cfg.nfs_root
-    script_path = _browse_script(start)
+    # Non-notebook: show script browser if not already set from inline paste
     if script_path is None:
-        return
+        _start = str(Path(cfg.nfs_root) / user)
+        if not Path(_start).exists():
+            _start = cfg.nfs_root
+        _prefill_sp = _tdefaults.get("script_path", "")
+        if _prefill_sp and Path(_prefill_sp).exists() and in_jail(_prefill_sp):
+            _start = str(Path(_prefill_sp).parent)
 
-    # ── Step 3.5: Training configuration (train_cifar10.py) ──────────────────
+        info("Step 5 — Select your job script (.py or .sh):")
+        script_path = _browse_script(_start)
+        if script_path is None:
+            return
+
+    # ── Step 5b: Training config (train_cifar10.py special-case) ─────────────
     training_flags = ""
-    if Path(script_path).name == "train_cifar10.py":
+    if script_path and Path(script_path).name == "train_cifar10.py":
         model_sel = questionary.select(
             "Model:",
             choices=[
@@ -287,9 +584,7 @@ def run_wizard() -> None:
         if "WideResNet" in model_sel:
             training_flags += " --model wideres"
 
-        epochs_str = questionary.text(
-            "Epochs:", default="50", style=_STYLE
-        ).ask()
+        epochs_str = questionary.text("Epochs:", default="50", style=_STYLE).ask()
         if epochs_str is None:
             return
         try:
@@ -299,50 +594,74 @@ def run_wizard() -> None:
         except ValueError:
             pass
 
-    # ── Step 4: Arguments ─────────────────────────────────────────────────────
+    # ── Step 6: Arguments ─────────────────────────────────────────────────────
+    from iitgpu.validate import clean_array_spec, clean_dependency
+    _prefill_args = _tdefaults.get("extra_args", "")
     raw_args = questionary.text(
-        "Extra arguments (blank = none):", style=_STYLE
+        "Step 6 — Extra arguments (blank = none):"
+        + (_prefill_hint if _prefill_args else ""),
+        default=_prefill_args,
+        style=_STYLE,
     ).ask()
     if raw_args is None:
         return
     args = clean_run_command(raw_args) if raw_args.strip() else ""
 
-    # ── Step 5: Job array (optional) ──────────────────────────────────────────
-    from iitgpu.validate import clean_array_spec, clean_dependency
+    # ── Job array (optional) ──────────────────────────────────────────────────
     array_spec = ""
-    if questionary.confirm("Run as a job array (parameter sweep)?", default=False, style=_STYLE).ask():
-        raw = questionary.text("Array spec (e.g. 0-9 or 1-100%4):", style=_STYLE).ask()
+    _prefill_array = _tdefaults.get("array", "")
+    if questionary.confirm(
+        "Run as a job array (parameter sweep)?",
+        default=bool(_prefill_array), style=_STYLE,
+    ).ask():
+        raw = questionary.text(
+            "Array spec (e.g. 0-9 or 1-100%4):",
+            default=_prefill_array,
+            style=_STYLE,
+        ).ask()
         cleaned = clean_array_spec(raw or "")
         if cleaned:
             array_spec = cleaned
-            info(f"Array tasks expose $SLURM_ARRAY_TASK_ID; use it to index your sweep.")
+            info("Array tasks expose $SLURM_ARRAY_TASK_ID; use it to index your sweep.")
         elif raw:
             warn("Invalid array spec — ignoring.")
 
-    # ── Step 6: Dependency (optional) ─────────────────────────────────────────
+    # ── Dependency (optional) ─────────────────────────────────────────────────
     dependency = ""
-    if questionary.confirm("Wait for another job to finish first?", default=False, style=_STYLE).ask():
+    _prefill_dep = _tdefaults.get("dependency", "")
+    if questionary.confirm(
+        "Wait for another job to finish first?",
+        default=bool(_prefill_dep), style=_STYLE,
+    ).ask():
         from iitgpu.slurm import queue as _q
         myjobs = _q()
         if myjobs:
             choices = [f"{e.job_id}  {e.name}  [{e.state}]" for e in myjobs] + ["[enter ID manually]"]
-            sel = questionary.select("Run after which job (on success)?", choices=choices, style=_STYLE).ask()
-            parent = (sel.split()[0] if sel and sel != "[enter ID manually]" else
-                      (questionary.text("Parent job ID:", style=_STYLE).ask() or ""))
+            sel = questionary.select(
+                "Run after which job (on success)?", choices=choices, style=_STYLE
+            ).ask()
+            parent = (
+                sel.split()[0] if sel and sel != "[enter ID manually]"
+                else (questionary.text("Parent job ID:", style=_STYLE).ask() or "")
+            )
         else:
             parent = questionary.text("Parent job ID:", style=_STYLE).ask() or ""
-        dep = clean_dependency(f"afterok:{parent.strip()}") if parent.strip().isdigit() else None
+        dep = (
+            clean_dependency(f"afterok:{parent.strip()}")
+            if parent.strip().isdigit() else None
+        )
         if dep:
             dependency = dep
         elif parent:
             warn("Invalid parent job ID — ignoring dependency.")
 
     # ── Build job spec ────────────────────────────────────────────────────────
-
-    if script_path.endswith(".py"):
+    if script_path and script_path.endswith(".py"):
         run_cmd = f"python {script_path}"
-    else:
+    elif script_path:
         run_cmd = f"bash {script_path}"
+    else:
+        run_cmd = ""
     if training_flags:
         run_cmd += training_flags
     if args:
@@ -362,10 +681,27 @@ def run_wizard() -> None:
         container_image=chosen_container,
         array=array_spec,
         dependency=dependency,
+        model_path=model_path,
+        data_path=data_path,
     )
 
     folder = make_job_folder(jdir, spec)
     script_text = render_sbatch(spec, folder)
+
+    # ── Preview summary ───────────────────────────────────────────────────────
+    _env_display = "none"
+    if chosen_env:
+        _env_display = f"{chosen_env.name}  ({chosen_env.kind})"
+    elif chosen_container:
+        _env_display = f"container: {Path(chosen_container).name}"
+
+    summary_lines = (
+        f"  Data path  : {data_path or 'not set'}\n"
+        f"  Model path : {model_path or 'not set'}\n"
+        f"  Environment: {_env_display}\n"
+        f"  Script     : {script_path or '(none)'}"
+    )
+    panel("Job Summary", summary_lines)
     panel("Generated sbatch script", script_text)
 
     # ── Action ────────────────────────────────────────────────────────────────
@@ -407,7 +743,9 @@ def run_wizard() -> None:
     if success:
         ok(f"Job submitted! ID: {result}")
         auditclient.log("job_submitted_ok", detail=job_name, job_id=result)
-        if questionary.confirm("Notify me when it finishes?", default=False, style=_STYLE).ask():
+        if questionary.confirm(
+            "Notify me when it finishes?", default=False, style=_STYLE
+        ).ask():
             from iitgpu.notify import poll_until_done, mta_present
             if mta_present():
                 info("An MTA is present — add an email next time for SLURM mail. Polling now…")

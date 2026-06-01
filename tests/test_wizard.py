@@ -46,3 +46,234 @@ def test_shutil_is_module_global_in_wizard():
 def test_wizard_module_compiles_and_imports():
     # Importing the module already ran above; assert the entry point exists.
     assert callable(wizard.run_wizard)
+
+
+# ─── New tests for TUI refactor (data path, inline paste, rerun) ─────────────
+
+import os
+import pytest
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+
+def test_inline_paste_creates_file_under_nfs_root(tmp_path, monkeypatch):
+    """Inline paste writes to /shared/<user>/data/<ts>_inline.txt inside the jail."""
+    import iitgpu.wizard as wiz
+    from iitgpu.config import load_config
+
+    # Point NFS_ROOT at tmp_path so in_jail() accepts the destination
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+
+    cfg = load_config()
+    user = "testuser"
+
+    # Simulate user typing two lines then EOF
+    inputs = iter(["line one", "line two", "EOF"])
+    monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+    # Mock questionary.confirm to return True (create script) and False (don't use as job)
+    confirm_responses = iter([True, False])
+    monkeypatch.setattr("questionary.confirm", lambda *a, **kw: MagicMock(ask=lambda: next(confirm_responses)))
+
+    # Mock auditclient.log
+    logged = []
+    monkeypatch.setattr("iitgpu.auditclient.log", lambda action, **kw: logged.append(action))
+
+    data_dest, _ = wiz._inline_paste(cfg, user)
+
+    assert data_dest is not None
+    created = Path(data_dest)
+    assert created.exists(), f"Expected file at {data_dest}"
+    content = created.read_text()
+    assert "line one" in content
+    assert "line two" in content
+
+    # Must be inside the jail
+    from iitgpu.validate import in_jail
+    assert in_jail(data_dest), f"{data_dest} not in jail (NFS_ROOT={tmp_path})"
+
+    assert "data_inline_paste" in logged
+
+
+def test_inline_paste_destination_is_jailed(tmp_path, monkeypatch):
+    """If the destination resolves outside the jail, _inline_paste refuses."""
+    import iitgpu.wizard as wiz
+    from iitgpu.config import load_config
+    import dataclasses
+
+    # NFS_ROOT env = /nonexistent so nothing under tmp_path is in the jail
+    monkeypatch.setenv("NFS_ROOT", "/nonexistent_nfs_root_xyz")
+    monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+
+    cfg = load_config()
+    # cfg.nfs_root now = /nonexistent_nfs_root_xyz (from env), but we override it
+    # to tmp_path so the file gets written there — which is NOT in_jail
+    cfg_bad = dataclasses.replace(cfg, nfs_root=str(tmp_path / "outside"))
+
+    inputs = iter(["some data", "EOF"])
+    monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+    data_dest, script_path = wiz._inline_paste(cfg_bad, "testuser")
+    # Should return (None, None) because destination is not in_jail
+    assert data_dest is None
+    assert script_path is None
+
+
+def test_generated_loader_script_is_valid_python(tmp_path, monkeypatch):
+    """The auto-generated loader script must compile without errors."""
+    import iitgpu.wizard as wiz
+    from iitgpu.config import load_config
+
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+
+    cfg = load_config()
+    user = "testuser"
+
+    inputs = iter(["alpha", "beta", "EOF"])
+    monkeypatch.setattr("builtins.input", lambda: next(inputs))
+
+    # confirm: create script = True, use as job script = False
+    confirm_responses = iter([True, False])
+    monkeypatch.setattr("questionary.confirm", lambda *a, **kw: MagicMock(ask=lambda: next(confirm_responses)))
+    monkeypatch.setattr("iitgpu.auditclient.log", lambda *a, **kw: None)
+
+    data_dest, script_path = wiz._inline_paste(cfg, user)
+
+    # Find the generated script by looking in the scripts dir
+    scripts_dir = tmp_path / user / "scripts"
+    scripts = list(scripts_dir.glob("*_load_data.py")) if scripts_dir.exists() else []
+    assert scripts, "No loader script was generated"
+    script_file = scripts[0]
+
+    source = script_file.read_text()
+    assert "DATA_PATH" in source
+
+    # Must compile without SyntaxError
+    compile(source, str(script_file), "exec")
+
+    # Must be in jail
+    from iitgpu.validate import in_jail
+    assert in_jail(str(script_file))
+
+
+def test_data_path_exported_in_sbatch_when_set(tmp_path):
+    """render_sbatch() includes 'export DATA_PATH=...' when data_path is set."""
+    from iitgpu.jobs import JobSpec, render_sbatch
+
+    spec = JobSpec(
+        job_name="test_job",
+        partition="gpu",
+        gpus=1,
+        cpus=4,
+        mem_gb=16,
+        time_limit="01:00:00",
+        run_command="python /shared/testuser/scripts/train.py",
+        task_type="train",
+        data_path="/shared/testuser/data/20260601_120000_inline.txt",
+    )
+    script = render_sbatch(spec, str(tmp_path))
+
+    assert "export DATA_PATH=" in script
+    assert "/shared/testuser/data/20260601_120000_inline.txt" in script
+
+    # Export must appear before the run_command line
+    export_idx = script.index("export DATA_PATH=")
+    run_idx = script.index("python /shared/testuser/scripts/train.py")
+    assert export_idx < run_idx, "DATA_PATH export must appear before the run command"
+
+
+def test_data_path_not_in_sbatch_when_not_set(tmp_path):
+    """render_sbatch() omits 'export DATA_PATH' when data_path is empty."""
+    from iitgpu.jobs import JobSpec, render_sbatch
+
+    spec = JobSpec(
+        job_name="test_job",
+        partition="gpu",
+        gpus=1,
+        cpus=4,
+        mem_gb=16,
+        time_limit="01:00:00",
+        run_command="python /shared/testuser/scripts/train.py",
+        task_type="train",
+        data_path="",  # explicitly empty
+    )
+    script = render_sbatch(spec, str(tmp_path))
+    assert "export DATA_PATH" not in script
+
+
+def test_rerun_parses_sbatch_fields(tmp_path):
+    """_parse_sbatch correctly extracts all common SBATCH fields."""
+    from iitgpu.monitor import _parse_sbatch
+
+    sbatch = """\
+#!/bin/bash
+#SBATCH --job-name=train_20260601_120000
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=60G
+#SBATCH --time=08:00:00
+#SBATCH --output=/shared/jobs/testuser/train_20260601_120000/slurm-%j.out
+#SBATCH --error=/shared/jobs/testuser/train_20260601_120000/slurm-%j.err
+#SBATCH --chdir=/shared/jobs/testuser/train_20260601_120000
+
+_conda_sh="${CONDA_PREFIX_SHARED:-/shared/miniforge3}/etc/profile.d/conda.sh"
+[ -f "$_conda_sh" ] && source "$_conda_sh"
+conda activate /shared/envs/pytorch-cifar
+
+cd /shared/jobs/testuser/train_20260601_120000
+python /shared/testuser/scripts/train.py --epochs 10
+"""
+    result = _parse_sbatch(sbatch)
+
+    assert result.get("partition") == "gpu"
+    assert result.get("gpus") == 1
+    assert result.get("cpus") == 16
+    assert result.get("mem_gb") == 60
+    assert result.get("time_limit") == "08:00:00"
+    assert result.get("conda_env") == "/shared/envs/pytorch-cifar"
+    assert result.get("script_path") == "/shared/testuser/scripts/train.py"
+
+
+def test_rerun_parses_container_image_from_sbatch(tmp_path):
+    """_parse_sbatch extracts the container image path and leaves conda_env empty."""
+    from iitgpu.monitor import _parse_sbatch
+
+    sbatch = """\
+#!/bin/bash
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+
+cd /shared/jobs/testuser/inference_20260601_130000
+apptainer exec --nv --bind /shared /shared/images/llm-finetune.sif bash -lc 'python /shared/testuser/scripts/infer.py'
+"""
+    result = _parse_sbatch(sbatch)
+
+    assert result.get("container_image") == "/shared/images/llm-finetune.sif"
+    assert result.get("conda_env", "") == ""
+
+
+def test_wizard_accepts_prefill_without_error(monkeypatch):
+    """run_wizard(prefill=...) must not raise when all prompts are mocked."""
+    import iitgpu.wizard as wiz
+
+    # Mock all questionary prompts to bail out immediately
+    monkeypatch.setattr(
+        "questionary.confirm",
+        lambda *a, **kw: MagicMock(ask=lambda: False),
+    )
+    monkeypatch.setattr(
+        "questionary.select",
+        lambda *a, **kw: MagicMock(ask=lambda: None),
+    )
+    monkeypatch.setattr(
+        "questionary.text",
+        lambda *a, **kw: MagicMock(ask=lambda: ""),
+    )
+
+    # Should return cleanly (wizard exits when select returns None)
+    wiz.run_wizard(prefill={"task_type": "train", "conda_env": "/shared/envs/x"})

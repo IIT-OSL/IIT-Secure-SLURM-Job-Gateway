@@ -267,3 +267,122 @@ def show_history() -> None:
         sc = "green" if e.state == "COMPLETED" else "red" if e.state in ("FAILED","TIMEOUT") else "yellow"
         table.add_row(e.job_id, e.user, e.name, f"[{sc}]{e.state}[/]", e.time_used)
     console.print(table)
+def _parse_sbatch(sbatch_text: str) -> dict:
+    """Parse key fields from an sbatch script into a dict for wizard prefill."""
+    import re
+    result: dict = {}
+
+    # SBATCH directives
+    for line in sbatch_text.splitlines():
+        m = re.match(r"#SBATCH\s+--partition=(.+)", line)
+        if m:
+            result["partition"] = m.group(1).strip()
+        m = re.match(r"#SBATCH\s+--gres=gpu:(\d+)", line)
+        if m:
+            result["gpus"] = int(m.group(1))
+        m = re.match(r"#SBATCH\s+--cpus-per-task=(\d+)", line)
+        if m:
+            result["cpus"] = int(m.group(1))
+        m = re.match(r"#SBATCH\s+--mem=(\d+)G", line)
+        if m:
+            result["mem_gb"] = int(m.group(1))
+        m = re.match(r"#SBATCH\s+--time=(.+)", line)
+        if m:
+            result["time_limit"] = m.group(1).strip()
+        m = re.match(r"#SBATCH\s+--array=(.+)", line)
+        if m:
+            result["array"] = m.group(1).strip()
+        m = re.match(r"#SBATCH\s+--dependency=(.+)", line)
+        if m:
+            result["dependency"] = m.group(1).strip()
+
+    # conda activate <path>
+    for line in sbatch_text.splitlines():
+        m = re.match(r"\s*conda\s+activate\s+(\S+)", line)
+        if m:
+            result["conda_env"] = m.group(1).strip()
+            break
+
+    # apptainer exec ... <image.sif>
+    for line in sbatch_text.splitlines():
+        m = re.search(r"apptainer\s+exec\s+.*?(\S+\.sif)", line)
+        if m:
+            result["container_image"] = m.group(1).strip()
+            break
+
+    # export DATA_PATH=<path>
+    for line in sbatch_text.splitlines():
+        m = re.match(r"\s*export\s+DATA_PATH=(.+)", line)
+        if m:
+            result["data_path"] = m.group(1).strip()
+            break
+
+    # run_command: last non-comment, non-blank, non-export, non-source, non-cd line
+    run_cmd = ""
+    for line in sbatch_text.splitlines():
+        stripped = line.strip()
+        if (stripped
+                and not stripped.startswith("#")
+                and not stripped.startswith("export ")
+                and not stripped.startswith("source ")
+                and not stripped.startswith("cd ")
+                and not stripped.startswith("conda ")
+                and not stripped.startswith("module ")
+                and not stripped.startswith("_conda_sh")
+                and not stripped.startswith("[")
+                and not stripped.startswith("echo ")
+                and not stripped.startswith("JUPYTER")
+                and not stripped.startswith("apptainer ")):
+            run_cmd = stripped
+    if run_cmd:
+        result["run_command"] = run_cmd
+        # Extract script path from run_command
+        m = re.match(r"(?:python|python3|bash)\s+(\S+)", run_cmd)
+        if m:
+            result["script_path"] = m.group(1)
+        # Remaining args after the script path
+        parts = run_cmd.split(None, 2)
+        if len(parts) >= 3:
+            result["extra_args"] = parts[2]
+
+    return result
+
+
+def rerun_job() -> None:
+    """Pick a previous job folder, parse its sbatch, and relaunch via wizard."""
+    from iitgpu.config import load_config, jobs_dir
+    cfg = load_config()
+    user_dir = str(Path(jobs_dir(cfg)) / getpass.getuser())
+    folders = safe_listdir(user_dir)
+    if not folders:
+        info("No job folders found.")
+        return
+    choice = questionary.select(
+        "Rerun which job?",
+        choices=sorted(folders, reverse=True) + ["[back]"],
+        style=_STYLE,
+    ).ask()
+    if choice is None or choice == "[back]":
+        return
+
+    job_folder = str(Path(user_dir) / choice)
+    if not in_jail(job_folder):
+        err("Access denied.")
+        return
+
+    sbatch_file = Path(job_folder) / "job.sbatch"
+    if not sbatch_file.exists():
+        warn(f"No job.sbatch found in {choice}")
+        return
+
+    try:
+        sbatch_text = sbatch_file.read_text(errors="replace")
+    except OSError as exc:
+        err(f"Cannot read sbatch: {exc}")
+        return
+
+    prefill = _parse_sbatch(sbatch_text)
+    auditclient.log("job_rerun", detail=choice)
+
+    from iitgpu.wizard import run_wizard
+    run_wizard(prefill=prefill)
