@@ -144,3 +144,80 @@ def test_make_job_folder_chown_failure_does_not_raise(tmp_path):
 
     assert Path(folder).is_dir(), "folder must be created even if chown fails"
     assert stat.S_IMODE(Path(folder).stat().st_mode) == 0o770
+
+
+# ── Gateway ForceCommand wrapper ──────────────────────────────────────────────
+
+GATEWAY_SCRIPT = REPO_ROOT / "deploy" / "iit-gpu-gateway"
+SSHD_CONF      = REPO_ROOT / "deploy" / "sshd-gateway.conf"
+INSTALL_SH     = REPO_ROOT / "deploy" / "install.sh"
+
+
+def test_gateway_wrapper_exists():
+    assert GATEWAY_SCRIPT.exists(), "deploy/iit-gpu-gateway is missing"
+
+
+def test_gateway_wrapper_is_bash_script():
+    text = GATEWAY_SCRIPT.read_text()
+    assert text.startswith("#!/bin/bash"), "gateway wrapper must start with #!/bin/bash"
+
+
+def test_gateway_wrapper_routes_scp():
+    text = GATEWAY_SCRIPT.read_text()
+    assert "scp" in text
+    assert "SSH_ORIGINAL_COMMAND" in text
+
+
+def test_gateway_wrapper_routes_rsync():
+    text = GATEWAY_SCRIPT.read_text()
+    assert "rsync" in text
+
+
+def test_gateway_wrapper_has_jail_check():
+    text = GATEWAY_SCRIPT.read_text()
+    assert "NFS_ROOT" in text, "gateway wrapper must jail-check the transfer path"
+
+
+def test_gateway_wrapper_falls_through_to_manager():
+    text = GATEWAY_SCRIPT.read_text()
+    assert "iit-gpu-manager" in text, "wrapper must exec iit-gpu-manager for interactive sessions"
+
+
+def test_gateway_wrapper_rejects_shell_metacharacters():
+    text = GATEWAY_SCRIPT.read_text()
+    for meta in [r"\;", r"\`", "&&", "||", r"$("]:
+        assert meta in text, f"gateway wrapper must guard against metacharacter: {meta!r}"
+
+
+def test_gateway_wrapper_rejects_path_traversal():
+    text = GATEWAY_SCRIPT.read_text()
+    assert ".." in text, "gateway wrapper must guard against path traversal (..)"
+
+
+def test_gateway_wrapper_has_nfs_root_placeholder():
+    text = GATEWAY_SCRIPT.read_text()
+    assert "__NFS_ROOT__" in text, (
+        "deploy/iit-gpu-gateway must contain __NFS_ROOT__ placeholder "
+        "so install.sh substitutes the real path at install time"
+    )
+
+
+def test_sshd_conf_uses_gateway_wrapper_not_manager_directly():
+    text = SSHD_CONF.read_text()
+    assert "ForceCommand /usr/local/bin/iit-gpu-gateway" in text, (
+        "sshd-gateway.conf must use iit-gpu-gateway as ForceCommand"
+    )
+    assert "ForceCommand /usr/local/bin/iit-gpu-manager" not in text, (
+        "ForceCommand must point to the gateway wrapper, not directly to iit-gpu-manager"
+    )
+
+
+def test_install_sh_installs_gateway_wrapper():
+    text = INSTALL_SH.read_text()
+    assert "iit-gpu-gateway" in text, "install.sh must install the gateway wrapper"
+
+
+def test_install_sh_substitutes_nfs_root_in_wrapper():
+    text = INSTALL_SH.read_text()
+    assert "__NFS_ROOT__" in text, "install.sh must substitute __NFS_ROOT__ in the wrapper"
+    assert "sed" in text, "install.sh must use sed to substitute NFS_ROOT"

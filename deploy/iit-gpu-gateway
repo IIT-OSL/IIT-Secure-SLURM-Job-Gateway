@@ -1,0 +1,67 @@
+#!/bin/bash
+# /usr/local/bin/iit-gpu-gateway  — ForceCommand entry point for gpuusers.
+#
+# File-transfer sub-commands (scp -t, scp -f, rsync --server) are forwarded
+# to NFS_ROOT after a path-jail check so that
+#   scp  -P 2225 -r  "/local/data/"  user@host:"/shared/folder/"
+#   rsync -avz --progress -e "ssh -p 2225" "/local/data/"  user@host:"/shared/folder/"
+# work from Windows/Mac/Linux without the TUI corrupting the protocol.
+# Every other connection starts the interactive GPU manager.
+#
+# NFS_ROOT below is baked in at install time by deploy/install.sh.
+NFS_ROOT="__NFS_ROOT__"
+
+_ORIG="${SSH_ORIGINAL_COMMAND:-}"
+
+# ── Guard: reject shell-injection metacharacters before any passthrough ───────
+case "$_ORIG" in
+    *\;*|*\`*|*'$('*|*'&&'*|*'||'*|*'>'*|*'<'*)
+        printf 'iit-gpu: shell metacharacters are not permitted in transfer commands.\n' >&2
+        exit 1
+        ;;
+esac
+
+# ── Guard: reject path traversal ─────────────────────────────────────────────
+case "$_ORIG" in
+    */../*|*'/..'|*' ..'*)
+        printf 'iit-gpu: path traversal (..) not permitted.\n' >&2
+        exit 1
+        ;;
+esac
+
+# ── Path jail check ───────────────────────────────────────────────────────────
+# The remote path is always the last whitespace-separated token in both the
+# scp server command ("scp -t /path") and rsync server command
+# ("rsync --server ... . /path"). Strip optional surrounding quotes and a
+# trailing slash, then verify the path is under NFS_ROOT.
+_path_ok() {
+    local raw="${_ORIG##* }"        # last token
+    raw="${raw%/}"                   # strip trailing slash
+    raw="${raw#\"}" raw="${raw%\"}"  # strip double-quotes
+    raw="${raw#\'}" raw="${raw%\'}"  # strip single-quotes
+    # rsync uses "." as the remote path in relative mode — allow it
+    [[ "$raw" == "." || "$raw" == "${NFS_ROOT}" || "$raw" == "${NFS_ROOT}/"* ]]
+}
+
+# ── Route ─────────────────────────────────────────────────────────────────────
+case "$_ORIG" in
+    scp\ *-t\ *|scp\ *-f\ *)
+        _path_ok || {
+            printf 'iit-gpu: scp path is outside shared storage (%s) — denied.\n' \
+                "${NFS_ROOT}" >&2
+            exit 1
+        }
+        exec /bin/bash -c "$_ORIG"
+        ;;
+    rsync\ --server\ *)
+        _path_ok || {
+            printf 'iit-gpu: rsync path is outside shared storage (%s) — denied.\n' \
+                "${NFS_ROOT}" >&2
+            exit 1
+        }
+        exec /bin/bash -c "$_ORIG"
+        ;;
+esac
+
+# Interactive SSH or unrecognised sub-command → start the TUI.
+exec /usr/local/bin/iit-gpu-manager

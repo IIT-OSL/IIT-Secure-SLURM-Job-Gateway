@@ -50,7 +50,7 @@ sudo visudo -c -f $SUDO >/dev/null 2>&1 && ok "sudoers syntax valid" || no "sudo
 
 sec "L7 — Forced TUI / sshd"
 SSHCONF=$(sudo sshd -T 2>/dev/null | grep -i 'forcecommand' || true)
-sudo grep -rq 'ForceCommand /usr/local/bin/iit-gpu-manager' /etc/ssh/ 2>/dev/null && ok "ForceCommand TUI configured for gpuusers" || wn "ForceCommand not found in /etc/ssh"
+sudo grep -rq 'ForceCommand /usr/local/bin/iit-gpu-gateway' /etc/ssh/ 2>/dev/null && ok "ForceCommand gateway wrapper configured for gpuusers" || wn "ForceCommand not found in /etc/ssh"
 
 sec "L8 — Tool: deployed code + unit suite"
 [ -f /opt/iit-gpu/iitgpu/slurm.py ] && ok "/opt/iit-gpu deployed" || no "/opt/iit-gpu missing"
