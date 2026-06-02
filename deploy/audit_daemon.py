@@ -33,12 +33,14 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 _log = logging.getLogger("audit_daemon")
 
-SOCKET_PATH = os.environ.get("AUDIT_SOCKET", "/run/iit-gpu/audit.sock")
-SPOOL_DIR   = Path(os.environ.get("AUDIT_SPOOL",  "/run/iit-gpu/spool"))
-STATE_DIR   = Path(os.environ.get("AUDIT_STATE",  "/var/lib/iit-gpu"))
-DB_PATH     = STATE_DIR / "audit.db"
-USERS_DB    = STATE_DIR / "users.db"
-JSONL_PATH  = STATE_DIR / "audit.jsonl"
+SOCKET_PATH    = os.environ.get("AUDIT_SOCKET",    "/run/iit-gpu/audit.sock")
+SPOOL_DIR      = Path(os.environ.get("AUDIT_SPOOL",  "/run/iit-gpu/spool"))
+STATE_DIR      = Path(os.environ.get("AUDIT_STATE",  "/var/lib/iit-gpu"))
+DB_PATH        = STATE_DIR / "audit.db"
+USERS_DB       = STATE_DIR / "users.db"
+JSONL_PATH     = STATE_DIR / "audit.jsonl"
+# Per-user hourly job_submit cap; 0 disables rate limiting.
+JOB_RATE_LIMIT = int(os.environ.get("JOB_RATE_LIMIT", "20"))
 
 _running = True
 _MAX_MSG  = 1_048_576   # 1 MiB hard cap on any single message
@@ -227,6 +229,18 @@ def _send_response(sock: socket.socket, ok: bool,
 
 # ─── verb handlers ────────────────────────────────────────────────────────────
 
+def _count_recent_submissions(conn: sqlite3.Connection,
+                               user: str, window_seconds: int = 3600) -> int:
+    """Count job_submit events for user in the last window_seconds."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE user=? AND action='job_submit' AND ts>=?",
+        (user, cutoff),
+    ).fetchone()
+    return row[0] if row else 0
+
+
 def _h_audit_log(payload: dict, peer_username: str | None,
                  audit_conn: sqlite3.Connection):
     event = dict(payload)
@@ -235,6 +249,17 @@ def _h_audit_log(payload: dict, peer_username: str | None,
         event["identity"] = "peercred"
     else:
         event.setdefault("identity", "spooled")
+
+    # Rate-limit job_submit events from live socket connections.
+    if (event.get("action") == "job_submit"
+            and peer_username is not None
+            and JOB_RATE_LIMIT > 0):
+        count = _count_recent_submissions(audit_conn, peer_username)
+        if count >= JOB_RATE_LIMIT:
+            _log.warning("rate limit: user=%s blocked (count=%d limit=%d)",
+                         peer_username, count, JOB_RATE_LIMIT)
+            return False, None, f"rate limit: {count} job_submit events in last hour"
+
     _insert(audit_conn, event)
     _append_jsonl(event)
     _log.info("user=%s action=%s job=%s",

@@ -162,7 +162,8 @@ def test_log_or_block_spools_when_socket_missing(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"),
                     reason="Unix sockets not available")
-def test_log_or_block_returns_false_when_both_fail(tmp_path, monkeypatch):
+def test_log_or_block_fails_open_when_infrastructure_down(tmp_path, monkeypatch):
+    """log_or_block must not block a job when the daemon is unreachable — fail-open."""
     monkeypatch.setenv("AUDIT_SOCKET", str(tmp_path / "bad.sock"))
     blocker = tmp_path / "not_a_dir"
     blocker.write_text("x")
@@ -172,7 +173,7 @@ def test_log_or_block_returns_false_when_both_fail(tmp_path, monkeypatch):
     importlib.reload(ac)
 
     result = ac.log_or_block("job_submit", detail="blocked")
-    assert result is False
+    assert result is True  # infrastructure failure must never block a job
 
 
 # ─── daemon_request protocol ──────────────────────────────────────────────────
@@ -248,3 +249,95 @@ def test_daemon_request_returns_error_on_no_daemon(tmp_path, monkeypatch):
     resp = ac.daemon_request("users.list", {})
     assert resp["ok"] is False
     assert "error" in resp
+
+
+# ─── log_or_block ─────────────────────────────────────────────────────────────
+
+def _start_response_server(sock_path: str, response: dict,
+                            stop: threading.Event) -> threading.Thread:
+    """STREAM server that responds with a fixed dict."""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(sock_path)
+    server.listen(4)
+    server.settimeout(0.2)
+
+    def _run():
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+            try:
+                conn.settimeout(2.0)
+                raw_len = _recv_all(conn, 4)
+                if not raw_len:
+                    continue
+                length = struct.unpack(">I", raw_len)[0]
+                _recv_all(conn, length)  # discard request body
+                resp = json.dumps(response).encode()
+                conn.sendall(struct.pack(">I", len(resp)) + resp)
+            except Exception:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+        server.close()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"),
+                    reason="Unix sockets not available")
+def test_log_or_block_returns_true_when_daemon_accepts(tmp_path, monkeypatch):
+    sock_path = str(tmp_path / "ok.sock")
+    monkeypatch.setenv("AUDIT_SOCKET", sock_path)
+
+    stop = threading.Event()
+    _start_response_server(sock_path, {"ok": True}, stop)
+    time.sleep(0.05)
+
+    import iitgpu.auditclient as ac
+    importlib.reload(ac)
+
+    result = ac.log_or_block("job_submit", detail="train.py")
+    stop.set()
+    assert result is True
+
+
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"),
+                    reason="Unix sockets not available")
+def test_log_or_block_returns_false_when_daemon_rate_limits(tmp_path, monkeypatch):
+    sock_path = str(tmp_path / "block.sock")
+    monkeypatch.setenv("AUDIT_SOCKET", sock_path)
+
+    stop = threading.Event()
+    _start_response_server(sock_path,
+                           {"ok": False, "error": "rate limit: 20 job_submit events in last hour"},
+                           stop)
+    time.sleep(0.05)
+
+    import iitgpu.auditclient as ac
+    importlib.reload(ac)
+
+    result = ac.log_or_block("job_submit", detail="train.py")
+    stop.set()
+    assert result is False
+
+
+def test_log_or_block_returns_true_when_daemon_unreachable(tmp_path, monkeypatch):
+    """Daemon down = fail-open: spool the event and return True."""
+    monkeypatch.setenv("AUDIT_SOCKET", str(tmp_path / "no.sock"))
+    monkeypatch.setenv("AUDIT_SPOOL",  str(tmp_path / "spool"))
+
+    import iitgpu.auditclient as ac
+    importlib.reload(ac)
+
+    result = ac.log_or_block("job_submit", detail="train.py")
+    assert result is True
+    spool_dir = tmp_path / "spool"
+    assert spool_dir.exists()
+    assert any(spool_dir.iterdir()), "event should be spooled when daemon unreachable"

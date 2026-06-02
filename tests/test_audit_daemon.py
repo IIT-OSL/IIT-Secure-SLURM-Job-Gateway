@@ -401,3 +401,104 @@ def test_admin_read_user_log_emits_audit_event(tmp_path, monkeypatch):
     ).fetchone()
     assert row is not None, "admin_read_user_log event not recorded"
     assert row[1] == "testuser"
+
+
+# ─── Rate limiting ────────────────────────────────────────────────────────────
+
+def _insert_job_submits(conn, user: str, count: int, ts_recent: str) -> None:
+    """Insert count job_submit events for user with ts_recent timestamp."""
+    for _ in range(count):
+        conn.execute(
+            "INSERT INTO events (ts,user,session,action,detail,job_id,remote) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (ts_recent, user, "s", "job_submit", "", "", ""))
+    conn.commit()
+
+
+def test_rate_limit_blocks_when_exceeded(tmp_path, monkeypatch):
+    ad   = _load_daemon(tmp_path)
+    conn = _dummy_audit_conn(ad, tmp_path)
+    monkeypatch.setattr(ad, "JOB_RATE_LIMIT", 5)
+
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    _insert_job_submits(conn, "alice", 5, ts)  # already at limit
+
+    ok, _, err = ad._h_audit_log(
+        {"action": "job_submit"}, peer_username="alice", audit_conn=conn)
+    assert not ok
+    assert "rate limit" in err
+
+
+def test_rate_limit_allows_when_under_limit(tmp_path, monkeypatch):
+    ad   = _load_daemon(tmp_path)
+    conn = _dummy_audit_conn(ad, tmp_path)
+    monkeypatch.setattr(ad, "JOB_RATE_LIMIT", 5)
+
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    _insert_job_submits(conn, "alice", 4, ts)  # one slot left
+
+    ok, _, err = ad._h_audit_log(
+        {"action": "job_submit"}, peer_username="alice", audit_conn=conn)
+    assert ok, err
+
+
+def test_rate_limit_disabled_when_zero(tmp_path, monkeypatch):
+    ad   = _load_daemon(tmp_path)
+    conn = _dummy_audit_conn(ad, tmp_path)
+    monkeypatch.setattr(ad, "JOB_RATE_LIMIT", 0)
+
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    _insert_job_submits(conn, "alice", 999, ts)
+
+    ok, _, err = ad._h_audit_log(
+        {"action": "job_submit"}, peer_username="alice", audit_conn=conn)
+    assert ok, "rate limiting disabled (limit=0) must always allow"
+
+
+def test_rate_limit_only_applies_to_job_submit(tmp_path, monkeypatch):
+    ad   = _load_daemon(tmp_path)
+    conn = _dummy_audit_conn(ad, tmp_path)
+    monkeypatch.setattr(ad, "JOB_RATE_LIMIT", 1)
+
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    _insert_job_submits(conn, "alice", 99, ts)
+
+    # A non-job_submit action must never be blocked by rate limit
+    ok, _, err = ad._h_audit_log(
+        {"action": "file_download"}, peer_username="alice", audit_conn=conn)
+    assert ok, "rate limit must not block non-job_submit actions"
+
+
+def test_rate_limit_ignores_old_submissions(tmp_path, monkeypatch):
+    ad   = _load_daemon(tmp_path)
+    conn = _dummy_audit_conn(ad, tmp_path)
+    monkeypatch.setattr(ad, "JOB_RATE_LIMIT", 5)
+
+    # Insert 10 events from >1 hour ago
+    from datetime import datetime, timezone, timedelta
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    _insert_job_submits(conn, "alice", 10, old_ts)
+
+    ok, _, err = ad._h_audit_log(
+        {"action": "job_submit"}, peer_username="alice", audit_conn=conn)
+    assert ok, "old submissions outside the 1-hour window must not count"
+
+
+def test_rate_limit_not_applied_to_spooled_events(tmp_path, monkeypatch):
+    """peer_username=None means spooled; rate limit must not apply."""
+    ad   = _load_daemon(tmp_path)
+    conn = _dummy_audit_conn(ad, tmp_path)
+    monkeypatch.setattr(ad, "JOB_RATE_LIMIT", 1)
+
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat()
+    _insert_job_submits(conn, "alice", 99, ts)
+
+    ok, _, err = ad._h_audit_log(
+        {"action": "job_submit", "user": "alice"},
+        peer_username=None, audit_conn=conn)
+    assert ok, "spooled events (peer_username=None) must bypass rate limit"

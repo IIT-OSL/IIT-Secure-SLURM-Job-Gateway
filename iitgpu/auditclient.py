@@ -109,9 +109,23 @@ def log(action: str, detail: str = "", job_id: str = "",
 
 def log_or_block(action: str, detail: str = "", job_id: str = "",
                  meta: dict | None = None) -> bool:
-    """Log the event; spool if socket unavailable.
-    Returns False only if BOTH socket send and spool write fail."""
-    return log(action, detail, job_id, meta)
+    """Log the event and check whether the daemon blocks it.
+
+    Returns False if the daemon explicitly blocks the action (e.g. rate limit
+    exceeded) or if the event cannot be delivered at all.  Always returns True
+    when the daemon accepts the event.  Falls back to spool-and-True when the
+    daemon is unreachable (fail-open for non-blocking events).
+    """
+    event = _build_event(action, detail, job_id, meta)
+    resp  = daemon_request("audit.log", event)
+    if resp.get("ok"):
+        return True
+    # Daemon explicitly blocked — do not spool, do not allow.
+    if resp.get("error", "").startswith("rate limit"):
+        return False
+    # Daemon unreachable: spool the event and allow (fail-open).
+    _spool(event)
+    return True
 
 
 def daemon_request(verb: str, payload: dict) -> dict:
