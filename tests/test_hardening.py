@@ -221,3 +221,29 @@ def test_install_sh_substitutes_nfs_root_in_wrapper():
     text = INSTALL_SH.read_text()
     assert "__NFS_ROOT__" in text, "install.sh must substitute __NFS_ROOT__ in the wrapper"
     assert "sed" in text, "install.sh must use sed to substitute NFS_ROOT"
+
+
+def test_gateway_wrapper_routes_sftp_server():
+    """Modern scp (OpenSSH 9+, Windows/Mac default) uses sftp-server internally.
+    SSH_ORIGINAL_COMMAND will be '/usr/lib/openssh/sftp-server', not 'scp -t'.
+    The wrapper must pass this through or scp always fails with 'message too long'."""
+    text = GATEWAY_SCRIPT.read_text()
+    assert "sftp-server" in text, (
+        "gateway wrapper must handle sftp-server (modern scp on Windows/Mac uses "
+        "SFTP protocol internally, not legacy scp -t)"
+    )
+
+
+def test_gateway_wrapper_uses_eval_exec_not_bash_c():
+    """eval exec runs the transfer binary in-process without spawning a new bash,
+    preventing any ~/.bashrc sourcing that could corrupt the SCP protocol."""
+    text = GATEWAY_SCRIPT.read_text()
+    assert "eval exec" in text, (
+        "wrapper must use 'eval exec' not 'exec /bin/bash -c' to avoid "
+        "spawning a new bash that could source ~/.bashrc"
+    )
+    code_lines = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+    assert "exec /bin/bash -c" not in "\n".join(code_lines), (
+        "'exec /bin/bash -c' spawns a new bash that may source ~/.bashrc "
+        "and corrupt the transfer protocol"
+    )

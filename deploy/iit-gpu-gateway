@@ -1,14 +1,16 @@
 #!/bin/bash
 # /usr/local/bin/iit-gpu-gateway  — ForceCommand entry point for gpuusers.
 #
-# File-transfer sub-commands (scp -t, scp -f, rsync --server) are forwarded
-# to NFS_ROOT after a path-jail check so that
-#   scp  -P 2225 -r  "/local/data/"  user@host:"/shared/folder/"
-#   rsync -avz --progress -e "ssh -p 2225" "/local/data/"  user@host:"/shared/folder/"
-# work from Windows/Mac/Linux without the TUI corrupting the protocol.
-# Every other connection starts the interactive GPU manager.
+# Forwards file-transfer sub-commands, runs the TUI for everything else:
+#   scp  -P PORT -r "/local/" user@host:"/shared/folder/"   (legacy scp protocol)
+#   rsync -e "ssh -p PORT" "/local/" user@host:"/shared/"   (rsync)
+#   scp  -P PORT -r "/local/" user@host:"/shared/folder/"   (modern scp — uses SFTP internally)
 #
-# NFS_ROOT below is baked in at install time by deploy/install.sh.
+# Modern OpenSSH scp (9.0+, default on Windows/Mac) uses sftp-server rather
+# than the old "scp -t" protocol. SSH_ORIGINAL_COMMAND will be
+# "/usr/lib/openssh/sftp-server" in that case, not "scp -t /path".
+#
+# NFS_ROOT is baked in at install time by deploy/install.sh.
 NFS_ROOT="__NFS_ROOT__"
 
 _ORIG="${SSH_ORIGINAL_COMMAND:-}"
@@ -16,50 +18,44 @@ _ORIG="${SSH_ORIGINAL_COMMAND:-}"
 # ── Guard: reject shell-injection metacharacters before any passthrough ───────
 case "$_ORIG" in
     *\;*|*\`*|*'$('*|*'&&'*|*'||'*|*'>'*|*'<'*)
-        printf 'iit-gpu: shell metacharacters are not permitted in transfer commands.\n' >&2
-        exit 1
-        ;;
+        printf 'iit-gpu: shell metacharacters not permitted in transfer commands.\n' >&2
+        exit 1 ;;
 esac
 
 # ── Guard: reject path traversal ─────────────────────────────────────────────
 case "$_ORIG" in
     */../*|*'/..'|*' ..'*)
         printf 'iit-gpu: path traversal (..) not permitted.\n' >&2
-        exit 1
-        ;;
+        exit 1 ;;
 esac
 
-# ── Path jail check ───────────────────────────────────────────────────────────
-# The remote path is always the last whitespace-separated token in both the
-# scp server command ("scp -t /path") and rsync server command
-# ("rsync --server ... . /path"). Strip optional surrounding quotes and a
-# trailing slash, then verify the path is under NFS_ROOT.
+# ── Path jail check (scp/rsync — path is last token) ─────────────────────────
 _path_ok() {
-    local raw="${_ORIG##* }"        # last token
-    raw="${raw%/}"                   # strip trailing slash
-    raw="${raw#\"}" raw="${raw%\"}"  # strip double-quotes
-    raw="${raw#\'}" raw="${raw%\'}"  # strip single-quotes
-    # rsync uses "." as the remote path in relative mode — allow it
+    local raw="${_ORIG##* }"
+    raw="${raw%/}"
+    raw="${raw#\"}" raw="${raw%\"}"
+    raw="${raw#\'}" raw="${raw%\'}"
     [[ "$raw" == "." || "$raw" == "${NFS_ROOT}" || "$raw" == "${NFS_ROOT}/"* ]]
 }
 
 # ── Route ─────────────────────────────────────────────────────────────────────
+# Use "eval exec" rather than "exec /bin/bash -c" so that the transfer binary
+# replaces this process directly — no new bash subprocess, no .bashrc sourcing.
 case "$_ORIG" in
     scp\ *-t\ *|scp\ *-f\ *)
-        _path_ok || {
-            printf 'iit-gpu: scp path is outside shared storage (%s) — denied.\n' \
-                "${NFS_ROOT}" >&2
-            exit 1
-        }
-        exec /bin/bash -c "$_ORIG"
+        _path_ok || { printf 'iit-gpu: scp path outside %s — denied.\n' "${NFS_ROOT}" >&2; exit 1; }
+        eval exec "$_ORIG"
         ;;
     rsync\ --server\ *)
-        _path_ok || {
-            printf 'iit-gpu: rsync path is outside shared storage (%s) — denied.\n' \
-                "${NFS_ROOT}" >&2
-            exit 1
-        }
-        exec /bin/bash -c "$_ORIG"
+        _path_ok || { printf 'iit-gpu: rsync path outside %s — denied.\n' "${NFS_ROOT}" >&2; exit 1; }
+        eval exec "$_ORIG"
+        ;;
+    *sftp-server*)
+        # Modern scp (OpenSSH 9+, default on Windows and macOS) uses the SFTP
+        # subsystem internally. SSH_ORIGINAL_COMMAND is the sftp-server binary
+        # path, not "scp -t /path". sftp-server runs as the authenticated user
+        # so filesystem permissions are the security boundary.
+        eval exec "$_ORIG"
         ;;
 esac
 
