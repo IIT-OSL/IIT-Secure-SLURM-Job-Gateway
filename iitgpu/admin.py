@@ -683,15 +683,20 @@ def admin_menu() -> None:
             _view_audit_log(style)
 
         elif choice == "All-user job history":
-            from iitgpu.monitor import filtered_history
-            from iitgpu.slurm import filtered_history as _fh
+            from iitgpu.config import jobs_dir
+            from iitgpu.slurm import filtered_history
+            cfg = load_config()
             t = Table(show_header=True, header_style="bold cyan")
             for c in ("Job ID", "User", "Name", "State", "Elapsed", "Partition"):
                 t.add_column(c)
-            for entry in (_fh(all_users=True) if hasattr(_fh, "__call__") else []):
+            rows = filtered_history(jobs_dir(cfg), all_users=True, days=30)
+            if not rows:
+                info("No job history found.")
+            for entry in rows:
                 t.add_row(entry.job_id, entry.user, entry.name, entry.state,
                           entry.elapsed, entry.partition)
             console.print(t)
+            questionary.press_any_key_to_continue("").ask()
 
         elif choice == "Cluster usage (all users)":
             from iitgpu.accounting import usage_by_user

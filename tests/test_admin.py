@@ -251,6 +251,17 @@ def test_set_qos_priority():
     assert ok
 
 
+# ── All-user job history ──────────────────────────────────────────────────────
+
+def test_filtered_history_accepts_all_users_flag():
+    """filtered_history must accept (search_root, all_users=True) without TypeError."""
+    from iitgpu.slurm import filtered_history, QueueEntry
+    fake = [QueueEntry("10", "alice", "COMPLETED", "gpu", "1:00", 1)]
+    with patch("iitgpu.slurm._sacct_history_user", return_value=fake):
+        rows = filtered_history("/shared/jobs", all_users=True, days=30)
+    assert any(r.job_id == "10" for r in rows)
+
+
 # ── list_gpuusers ─────────────────────────────────────────────────────────────
 
 def test_list_gpuusers_returns_sorted():
