@@ -270,3 +270,50 @@ def test_list_gpuusers_returns_sorted():
          patch("pwd.getpwall", return_value=[]):
         users = admin.list_gpuusers()
     assert users == ["alice", "bob"]
+
+
+# ── Disk usage ────────────────────────────────────────────────────────────────
+
+def test_disk_usage_by_user_sums_per_user(tmp_path):
+    alice = tmp_path / "alice" / "job1"
+    alice.mkdir(parents=True)
+    (alice / "out.log").write_bytes(b"x" * 1024)
+    (alice / "err.log").write_bytes(b"y" * 512)
+
+    bob = tmp_path / "bob" / "job1"
+    bob.mkdir(parents=True)
+    (bob / "out.log").write_bytes(b"z" * 2048)
+
+    rows = admin.disk_usage_by_user(str(tmp_path))
+    by_user = {r["user"]: r for r in rows}
+
+    assert by_user["alice"]["bytes"] == 1536
+    assert by_user["bob"]["bytes"] == 2048
+
+
+def test_disk_usage_by_user_sorted_descending(tmp_path):
+    for user, size in [("alice", 100), ("charlie", 5000), ("bob", 300)]:
+        d = tmp_path / user / "j"
+        d.mkdir(parents=True)
+        (d / "f").write_bytes(b"x" * size)
+
+    rows = admin.disk_usage_by_user(str(tmp_path))
+    assert rows[0]["user"] == "charlie"
+    assert rows[-1]["user"] == "alice"
+
+
+def test_disk_usage_by_user_empty_dir(tmp_path):
+    assert admin.disk_usage_by_user(str(tmp_path)) == []
+
+
+def test_disk_usage_by_user_nonexistent_root(tmp_path):
+    assert admin.disk_usage_by_user(str(tmp_path / "no_such_dir")) == []
+
+
+def test_disk_usage_human_readable_units(tmp_path):
+    d = tmp_path / "alice" / "j"
+    d.mkdir(parents=True)
+    (d / "f").write_bytes(b"x" * (2 * 1024 * 1024))  # 2 MB
+
+    rows = admin.disk_usage_by_user(str(tmp_path))
+    assert rows[0]["human"] == "2.0 MB"

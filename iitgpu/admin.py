@@ -593,6 +593,55 @@ def _view_service_health(style) -> None:
     questionary.press_any_key_to_continue("").ask()
 
 
+def disk_usage_by_user(jobs_root: str) -> list[dict]:
+    """Return per-user disk usage under jobs_root, sorted by bytes descending.
+
+    Each entry: {"user": str, "bytes": int, "human": str}
+    """
+    import shutil as _shutil
+
+    def _fmt(n: int) -> str:
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024:
+                return f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} PB"
+
+    root = Path(jobs_root)
+    if not root.is_dir():
+        return []
+    rows = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        total = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+        rows.append({"user": entry.name, "bytes": total, "human": _fmt(total)})
+    rows.sort(key=lambda r: r["bytes"], reverse=True)
+    return rows
+
+
+def _view_disk_usage(style) -> None:
+    import questionary
+    from rich.table import Table
+    from iitgpu.ui import console, header, info
+
+    header("Disk Usage by User  (/shared/jobs)")
+    cfg   = load_config()
+    root  = Path(cfg.nfs_root) / cfg.jobs_subdir
+    rows  = disk_usage_by_user(str(root))
+    if not rows:
+        info("No job directories found.")
+        questionary.press_any_key_to_continue("").ask()
+        return
+    t = Table(show_header=True, header_style="bold cyan")
+    t.add_column("User", style="magenta")
+    t.add_column("Used", justify="right")
+    for r in rows:
+        t.add_row(r["user"], r["human"])
+    console.print(t)
+    questionary.press_any_key_to_continue("").ask()
+
+
 # ── Main admin menu ───────────────────────────────────────────────────────────────
 
 def admin_menu() -> None:
@@ -622,6 +671,7 @@ def admin_menu() -> None:
                 "Audit log",
                 "All-user job history",
                 "Cluster usage (all users)",
+                "Disk usage by user",
                 "Any user's job output",
                 "Mail delivery log",
                 "Service health",
@@ -707,6 +757,10 @@ def admin_menu() -> None:
                 t.add_row(r.user, f"{r.gpu_hours:.1f}",
                           f"{r.cpu_hours:.1f}", str(r.job_count))
             console.print(t)
+
+        elif choice == "Disk usage by user":
+            _view_disk_usage(style)
+            continue
 
         elif choice == "Any user's job output":
             _view_job_output(style)
