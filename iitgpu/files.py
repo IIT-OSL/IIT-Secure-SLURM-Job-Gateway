@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from iitgpu.validate import in_jail, safe_listdir
+from iitgpu import auditclient
 
 
 @dataclass
@@ -42,6 +43,8 @@ def make_dir(parent: str, name: str) -> tuple[bool, str]:
         return False, "Access denied: outside allowed directories."
     try:
         Path(target).mkdir(parents=True, exist_ok=False)
+        auditclient.log("file_mkdir", detail=target,
+                        meta={"path": target})
         return True, target
     except FileExistsError:
         return False, "Already exists."
@@ -58,6 +61,8 @@ def delete_path(path: str) -> tuple[bool, str]:
             shutil.rmtree(p)
         else:
             p.unlink()
+        auditclient.log("file_delete", detail=str(p),
+                        meta={"path": str(p)})
         return True, f"Deleted {p.name}"
     except OSError as exc:
         return False, str(exc)
@@ -73,6 +78,8 @@ def rename_path(path: str, new_name: str) -> tuple[bool, str]:
         return False, "Access denied (destination)."
     try:
         Path(path).rename(dest)
+        auditclient.log("file_rename", detail=path,
+                        meta={"src": path, "dest": dest})
         return True, dest
     except OSError as exc:
         return False, str(exc)
@@ -89,6 +96,8 @@ def copy_path(src: str, dest_dir: str) -> tuple[bool, str]:
             shutil.copytree(src, dest)
         else:
             shutil.copy2(src, dest)
+        auditclient.log("file_copy", detail=src,
+                        meta={"src": src, "dest": dest})
         return True, dest
     except OSError as exc:
         return False, str(exc)

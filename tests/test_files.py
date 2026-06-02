@@ -106,6 +106,50 @@ def test_fmt_size():
     assert "GB" in fmt_size(5 * 1024**3)
 
 
+def test_make_dir_emits_audit(jailed):
+    from unittest.mock import MagicMock, patch
+    from iitgpu.files import make_dir
+    with patch("iitgpu.auditclient.log") as mock_log:
+        ok, _ = make_dir(str(jailed), "auditdir")
+    assert ok
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][0] == "file_mkdir"
+
+
+def test_delete_path_emits_audit(jailed):
+    from unittest.mock import MagicMock, patch
+    f = jailed / "del_audit.txt"; f.write_text("x")
+    from iitgpu.files import delete_path
+    with patch("iitgpu.auditclient.log") as mock_log:
+        ok, _ = delete_path(str(f))
+    assert ok
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][0] == "file_delete"
+
+
+def test_rename_path_emits_audit(jailed):
+    from unittest.mock import patch
+    f = jailed / "rename_audit.txt"; f.write_text("x")
+    from iitgpu.files import rename_path
+    with patch("iitgpu.auditclient.log") as mock_log:
+        ok, _ = rename_path(str(f), "renamed_audit.txt")
+    assert ok
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][0] == "file_rename"
+
+
+def test_copy_path_emits_audit(jailed):
+    from unittest.mock import patch
+    f = jailed / "copy_audit.txt"; f.write_text("data")
+    d = jailed / "copy_dst"; d.mkdir()
+    from iitgpu.files import copy_path
+    with patch("iitgpu.auditclient.log") as mock_log:
+        ok, _ = copy_path(str(f), str(d))
+    assert ok
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][0] == "file_copy"
+
+
 def test_delete_image_rejects_non_sif():
     from iitgpu.containers import delete_image
     with patch("iitgpu.containers.in_jail", return_value=True):
