@@ -146,7 +146,8 @@ def download_hf(cfg: Config, repo_id: str) -> tuple[bool, str]:
         size_mb=size,
     )
     register_model(cfg, entry)
-    auditclient.log("model_download_ok", detail=f"hf:{repo_id} path={dest}")
+    auditclient.log("model_download_ok", detail=f"hf:{repo_id}",
+                    meta={"path": dest, "size_mb": size})
     return True, dest
 
 
@@ -175,7 +176,8 @@ def download_url(cfg: Config, url: str, name: str) -> tuple[bool, str]:
         size_mb=size,
     )
     register_model(cfg, entry)
-    auditclient.log("model_download_ok", detail=f"url:{url} path={dest}")
+    auditclient.log("model_download_ok", detail=f"url:{url}",
+                    meta={"path": dest, "size_mb": size})
     return True, dest
 
 
