@@ -277,3 +277,65 @@ def test_wizard_accepts_prefill_without_error(monkeypatch):
 
     # Should return cleanly (wizard exits when select returns None)
     wiz.run_wizard(prefill={"task_type": "train", "conda_env": "/shared/envs/x"})
+
+
+# ── Email auto-wire ────────────────────────────────────────────────────────────
+
+def test_mail_user_set_from_users_db_when_mta_present(tmp_path):
+    """When MTA is available and users.db has an email, mail_user is auto-populated."""
+    from iitgpu.jobs import JobSpec, make_job_folder, render_sbatch
+
+    spec = JobSpec(job_name="j", partition="gpu", gpus=1, cpus=4, mem_gb=8,
+                   time_limit="01:00:00", run_command="python x.py")
+
+    with patch("iitgpu.notify.mta_present", return_value=True), \
+         patch("iitgpu.daemonclient.email_for", return_value="alice@uni.edu"):
+        from iitgpu.notify import mta_present
+        from iitgpu import daemonclient
+        if mta_present():
+            email = daemonclient.email_for("alice")
+            if email:
+                spec.mail_user = email
+
+    folder = make_job_folder(str(tmp_path), spec)
+    sbatch = render_sbatch(spec, folder)
+    assert "#SBATCH --mail-user=alice@uni.edu" in sbatch
+    assert "#SBATCH --mail-type=END,FAIL" in sbatch
+
+
+def test_mail_user_not_set_when_mta_absent(tmp_path):
+    """When no MTA is present, mail_user stays empty even if users.db has an email."""
+    from iitgpu.jobs import JobSpec, make_job_folder, render_sbatch
+
+    spec = JobSpec(job_name="j", partition="gpu", gpus=1, cpus=4, mem_gb=8,
+                   time_limit="01:00:00", run_command="python x.py")
+
+    with patch("iitgpu.notify.mta_present", return_value=False):
+        from iitgpu.notify import mta_present
+        if mta_present():
+            spec.mail_user = "should-not-be-set@example.com"
+
+    folder = make_job_folder(str(tmp_path), spec)
+    sbatch = render_sbatch(spec, folder)
+    assert "--mail-user" not in sbatch
+
+
+def test_mail_user_not_set_when_no_email_in_db(tmp_path):
+    """When MTA is present but user has no email registered, mail_user stays empty."""
+    from iitgpu.jobs import JobSpec, make_job_folder, render_sbatch
+
+    spec = JobSpec(job_name="j", partition="gpu", gpus=1, cpus=4, mem_gb=8,
+                   time_limit="01:00:00", run_command="python x.py")
+
+    with patch("iitgpu.notify.mta_present", return_value=True), \
+         patch("iitgpu.daemonclient.email_for", return_value=None):
+        from iitgpu.notify import mta_present
+        from iitgpu import daemonclient
+        if mta_present():
+            email = daemonclient.email_for("newuser")
+            if email:
+                spec.mail_user = email
+
+    folder = make_job_folder(str(tmp_path), spec)
+    sbatch = render_sbatch(spec, folder)
+    assert "--mail-user" not in sbatch

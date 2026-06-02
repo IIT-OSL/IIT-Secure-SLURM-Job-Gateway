@@ -685,6 +685,14 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
         data_path=data_path,
     )
 
+    # Auto-populate SLURM mail directive from users.db if an MTA is available.
+    from iitgpu.notify import mta_present
+    from iitgpu import daemonclient
+    if mta_present():
+        _registered_email = daemonclient.email_for(user)
+        if _registered_email:
+            spec.mail_user = _registered_email
+
     folder = make_job_folder(jdir, spec)
     script_text = render_sbatch(spec, folder)
 
@@ -743,12 +751,12 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
     if success:
         ok(f"Job submitted! ID: {result}")
         auditclient.log("job_submitted_ok", detail=job_name, job_id=result)
+        if spec.mail_user:
+            info(f"SLURM will email [cyan]{spec.mail_user}[/] when the job ends.")
         if questionary.confirm(
-            "Notify me when it finishes?", default=False, style=_STYLE
+            "Wait here for the result?", default=False, style=_STYLE
         ).ask():
-            from iitgpu.notify import poll_until_done, mta_present
-            if mta_present():
-                info("An MTA is present — add an email next time for SLURM mail. Polling now…")
+            from iitgpu.notify import poll_until_done
             info("Waiting for the job to finish (Ctrl-C to stop waiting)…")
             try:
                 final = poll_until_done(result, interval=10)
