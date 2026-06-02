@@ -1,64 +1,126 @@
 # deploy/audit_daemon.py
 """
 Audit daemon — runs as gpusync.
-Receives events over a Unix datagram socket, drains the spool dir,
-and persists to SQLite (WAL) + JSONL.
+
+Receives events over a Unix STREAM socket with SO_PEERCRED identity stamping,
+drains the spool dir, and persists to SQLite (WAL) + JSONL.
+Also brokers user-DB CRUD and privileged reads; all admin verbs are gated by
+checking that the peer UID is in the admin group before execution.
 
 Env vars:
   AUDIT_SOCKET   default /run/iit-gpu/audit.sock
   AUDIT_SPOOL    default /run/iit-gpu/spool
   AUDIT_STATE    default /var/lib/iit-gpu
+  ADMIN_GROUP    default gpuadmins
+  GPUUSERS_GROUP default gpuusers
+  NFS_ROOT       default /shared
+  JOBS_SUBDIR    default jobs
+  MSMTP_LOG      default /var/log/msmtp.log
 """
 import json
 import logging
 import os
+import pwd
 import select
 import signal
 import socket
 import sqlite3
+import struct
 import time
-import uuid
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(message)s")
 _log = logging.getLogger("audit_daemon")
 
 SOCKET_PATH = os.environ.get("AUDIT_SOCKET", "/run/iit-gpu/audit.sock")
-SPOOL_DIR = Path(os.environ.get("AUDIT_SPOOL", "/run/iit-gpu/spool"))
-STATE_DIR = Path(os.environ.get("AUDIT_STATE", "/var/lib/iit-gpu"))
-DB_PATH = STATE_DIR / "audit.db"
-JSONL_PATH = STATE_DIR / "audit.jsonl"
+SPOOL_DIR   = Path(os.environ.get("AUDIT_SPOOL",  "/run/iit-gpu/spool"))
+STATE_DIR   = Path(os.environ.get("AUDIT_STATE",  "/var/lib/iit-gpu"))
+DB_PATH     = STATE_DIR / "audit.db"
+USERS_DB    = STATE_DIR / "users.db"
+JSONL_PATH  = STATE_DIR / "audit.jsonl"
+
 _running = True
+_MAX_MSG  = 1_048_576   # 1 MiB hard cap on any single message
+
+_ALLOWED_UNITS = frozenset({
+    "iit-gpu-audit", "slurmctld", "slurmd", "mariadb", "slurmdbd",
+})
 
 
-def _handle_signal(signum, frame) -> None:
+# ─── signal handling ──────────────────────────────────────────────────────────
+
+def _handle_signal(signum, frame):
     global _running
-    _log.info(f"Signal {signum} received, shutting down.")
+    _log.info("Signal %s received, shutting down.", signum)
     _running = False
 
 
-def _init_db(conn: sqlite3.Connection) -> None:
+# ─── schema ───────────────────────────────────────────────────────────────────
+
+def _init_audit_db(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts      TEXT NOT NULL,
-            user    TEXT NOT NULL,
-            session TEXT NOT NULL,
-            action  TEXT NOT NULL,
-            detail  TEXT,
-            job_id  TEXT,
-            remote  TEXT
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts       TEXT NOT NULL,
+            user     TEXT NOT NULL,
+            session  TEXT NOT NULL,
+            action   TEXT NOT NULL,
+            detail   TEXT,
+            job_id   TEXT,
+            remote   TEXT,
+            meta     TEXT,
+            identity TEXT
         )
     """)
+    for col, typedef in [("meta", "TEXT"), ("identity", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col} {typedef}")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_user   ON events(user)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_action ON events(action)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts     ON events(ts)")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.commit()
 
 
-def _insert(conn: sqlite3.Connection, event: dict) -> None:
+def _init_users_db(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username   TEXT PRIMARY KEY,
+            uid        INTEGER,
+            full_name  TEXT,
+            email      TEXT NOT NULL,
+            role       TEXT NOT NULL CHECK (role IN ('admin','tool','shell')),
+            status     TEXT NOT NULL DEFAULT 'active'
+                       CHECK (status IN ('active','offboarded')),
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            notes      TEXT
+        )
+    """)
     conn.execute(
-        "INSERT INTO events (ts,user,session,action,detail,job_id,remote) VALUES (?,?,?,?,?,?,?)",
-        (event.get("ts",""), event.get("user",""), event.get("session",""),
-         event.get("action",""), event.get("detail",""), event.get("job_id",""), event.get("remote","")),
+        "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.commit()
+
+
+# ─── audit DB helpers ─────────────────────────────────────────────────────────
+
+def _insert(conn: sqlite3.Connection, event: dict) -> None:
+    meta = event.get("meta")
+    if meta is not None and not isinstance(meta, str):
+        meta = json.dumps(meta)
+    conn.execute(
+        "INSERT INTO events "
+        "(ts,user,session,action,detail,job_id,remote,meta,identity) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (event.get("ts", ""), event.get("user", ""),
+         event.get("session", ""), event.get("action", ""),
+         event.get("detail", ""), event.get("job_id", ""),
+         event.get("remote", ""), meta,
+         event.get("identity", "peercred")),
     )
     conn.commit()
 
@@ -68,15 +130,443 @@ def _append_jsonl(event: dict) -> None:
         f.write(json.dumps(event) + "\n")
 
 
-def _process(data: bytes, conn: sqlite3.Connection) -> None:
+def _self_audit(audit_conn: sqlite3.Connection, username: str,
+                action: str, detail: str = "",
+                meta: dict | None = None) -> None:
+    """Daemon-internal audit record (identity='daemon')."""
+    from datetime import datetime, timezone
+    event = {
+        "ts":       datetime.now(timezone.utc).isoformat(),
+        "user":     username,
+        "session":  "daemon",
+        "action":   action,
+        "detail":   detail,
+        "job_id":   "",
+        "remote":   "",
+        "meta":     json.dumps(meta) if meta else None,
+        "identity": "daemon",
+    }
+    try:
+        _insert(audit_conn, event)
+        _append_jsonl(event)
+    except Exception as exc:
+        _log.warning("Internal audit log failed: %s", exc)
+
+
+# ─── SO_PEERCRED / identity ───────────────────────────────────────────────────
+
+def _get_peer_uid(sock: socket.socket) -> int | None:
+    try:
+        creds = sock.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        _pid, uid, _gid = struct.unpack("3i", creds)
+        return uid
+    except (OSError, struct.error):
+        return None
+
+
+def _uid_to_username(uid: int) -> str | None:
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return None
+
+
+def _uid_is_admin(uid: int) -> bool:
+    import grp
+    if uid == 0:          # root always has admin access to the daemon
+        return True
+    admin_group = os.environ.get("ADMIN_GROUP", "gpuadmins")
+    try:
+        pw = pwd.getpwuid(uid)
+        g  = grp.getgrnam(admin_group)
+        return pw.pw_name in g.gr_mem or pw.pw_gid == g.gr_gid
+    except (KeyError, OSError):
+        return False
+
+
+# ─── stream framing ───────────────────────────────────────────────────────────
+
+def _recv_exactly(sock: socket.socket, n: int) -> bytes | None:
+    buf = b""
+    while len(buf) < n:
+        try:
+            chunk = sock.recv(n - len(buf))
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def _read_message(sock: socket.socket) -> bytes | None:
+    raw_len = _recv_exactly(sock, 4)
+    if raw_len is None:
+        return None
+    length = struct.unpack(">I", raw_len)[0]
+    if length > _MAX_MSG:
+        _log.warning("Oversized message (%d bytes), dropping", length)
+        return None
+    return _recv_exactly(sock, length)
+
+
+def _send_response(sock: socket.socket, ok: bool,
+                   data=None, error: str = "") -> None:
+    resp: dict = {"ok": ok}
+    if data is not None:
+        resp["data"] = data
+    if error:
+        resp["error"] = error
+    try:
+        body = json.dumps(resp).encode()
+        sock.sendall(struct.pack(">I", len(body)) + body)
+    except OSError:
+        pass   # client may have already closed (audit.log callers don't read response)
+
+
+# ─── verb handlers ────────────────────────────────────────────────────────────
+
+def _h_audit_log(payload: dict, peer_username: str | None,
+                 audit_conn: sqlite3.Connection):
+    event = dict(payload)
+    if peer_username:
+        event["user"]     = peer_username
+        event["identity"] = "peercred"
+    else:
+        event.setdefault("identity", "spooled")
+    _insert(audit_conn, event)
+    _append_jsonl(event)
+    _log.info("user=%s action=%s job=%s",
+              event.get("user"), event.get("action"), event.get("job_id"))
+    return True, None, ""
+
+
+def _h_users_create(payload: dict, peer_uid: int,
+                    users_conn: sqlite3.Connection,
+                    audit_conn: sqlite3.Connection):
+    from datetime import datetime, timezone
+    peer_user = _uid_to_username(peer_uid) or str(peer_uid)
+    username  = payload.get("username", "").strip()
+    email     = payload.get("email", "").strip()
+    role      = payload.get("role", "")
+    if not username or not email or role not in ("admin", "tool", "shell"):
+        return False, None, "username, email, and role (admin/tool/shell) required"
+    try:
+        uid_val = pwd.getpwnam(username).pw_uid
+    except KeyError:
+        uid_val = None
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        users_conn.execute(
+            "INSERT INTO users "
+            "(username,uid,full_name,email,role,status,created_at,created_by,notes) "
+            "VALUES (?,?,?,?,?,'active',?,?,?)",
+            (username, uid_val, payload.get("full_name", ""), email, role,
+             now, peer_user, payload.get("notes", "")),
+        )
+        users_conn.commit()
+    except sqlite3.IntegrityError as exc:
+        return False, None, str(exc)
+    _self_audit(audit_conn, peer_user, "admin_provision_user",
+                detail=username, meta={"role": role, "email": email})
+    return True, {"username": username}, ""
+
+
+def _h_users_get(payload: dict, users_conn: sqlite3.Connection):
+    username = payload.get("username", "").strip()
+    row = users_conn.execute(
+        "SELECT username,uid,full_name,email,role,status,"
+        "created_at,created_by,notes FROM users WHERE username=?",
+        (username,)
+    ).fetchone()
+    if not row:
+        return False, None, "user not found"
+    cols = ("username", "uid", "full_name", "email", "role", "status",
+            "created_at", "created_by", "notes")
+    return True, dict(zip(cols, row)), ""
+
+
+def _h_users_list(users_conn: sqlite3.Connection):
+    rows = users_conn.execute(
+        "SELECT username,uid,full_name,email,role,status,created_at,created_by "
+        "FROM users ORDER BY username"
+    ).fetchall()
+    cols = ("username", "uid", "full_name", "email", "role", "status",
+            "created_at", "created_by")
+    return True, {"users": [dict(zip(cols, r)) for r in rows]}, ""
+
+
+def _h_users_offboard(payload: dict, peer_uid: int,
+                      users_conn: sqlite3.Connection,
+                      audit_conn: sqlite3.Connection):
+    peer_user = _uid_to_username(peer_uid) or str(peer_uid)
+    username  = payload.get("username", "").strip()
+    if not username:
+        return False, None, "username required"
+    cur = users_conn.execute(
+        "UPDATE users SET status='offboarded' "
+        "WHERE username=? AND status='active'", (username,))
+    users_conn.commit()
+    if cur.rowcount == 0:
+        return False, None, "user not found or already offboarded"
+    _self_audit(audit_conn, peer_user, "admin_offboard_user", detail=username)
+    return True, {"username": username}, ""
+
+
+def _h_users_reconcile(users_conn: sqlite3.Connection):
+    import grp
+    gpuusers = os.environ.get("GPUUSERS_GROUP", "gpuusers")
+    admins   = os.environ.get("ADMIN_GROUP",    "gpuadmins")
+    rows     = users_conn.execute(
+        "SELECT username FROM users WHERE status='active'"
+    ).fetchall()
+    db_users: set[str] = {r[0] for r in rows}
+    os_users: set[str] = set()
+    for grp_name in (gpuusers, admins):
+        try:
+            os_users.update(grp.getgrnam(grp_name).gr_mem)
+        except KeyError:
+            pass
+    return True, {
+        "db_only": sorted(db_users - os_users),
+        "os_only": sorted(os_users - db_users),
+    }, ""
+
+
+def _h_users_email_for(payload: dict, peer_uid: int,
+                       users_conn: sqlite3.Connection):
+    username     = payload.get("username", "").strip()
+    peer_user    = _uid_to_username(peer_uid) or ""
+    if not username:
+        return False, None, "username required"
+    if peer_user != username and not _uid_is_admin(peer_uid):
+        return False, None, "permission denied: can only look up your own email"
+    row = users_conn.execute(
+        "SELECT email FROM users WHERE username=? AND status='active'",
+        (username,)
+    ).fetchone()
+    if not row:
+        return False, None, "user not found"
+    return True, {"email": row[0]}, ""
+
+
+def _h_audit_query(payload: dict, peer_uid: int,
+                   audit_conn: sqlite3.Connection):
+    peer_user    = _uid_to_username(peer_uid) or str(peer_uid)
+    user_filter  = payload.get("user", "")
+    action_filter= payload.get("action", "")
+    date_from    = payload.get("date_from", "")
+    date_to      = payload.get("date_to", "")
+    limit        = min(int(payload.get("limit", 100)), 500)
+
+    clauses, params = [], []
+    if user_filter:
+        clauses.append("user=?");       params.append(user_filter)
+    if action_filter:
+        clauses.append("action LIKE ?"); params.append(f"%{action_filter}%")
+    if date_from:
+        clauses.append("ts>=?");        params.append(date_from)
+    if date_to:
+        clauses.append("ts<=?");        params.append(date_to)
+
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    rows = audit_conn.execute(
+        f"SELECT ts,user,session,action,detail,job_id,remote,meta,identity "
+        f"FROM events {where} ORDER BY ts DESC LIMIT ?", params
+    ).fetchall()
+    cols = ("ts","user","session","action","detail","job_id","remote","meta","identity")
+    events = []
+    for r in rows:
+        ev = dict(zip(cols, r))
+        if ev.get("meta"):
+            try:
+                ev["meta"] = json.loads(ev["meta"])
+            except (ValueError, TypeError):
+                pass
+        events.append(ev)
+    _self_audit(audit_conn, peer_user, "admin_viewed_audit",
+                detail=f"user={user_filter} action={action_filter}")
+    return True, {"events": events}, ""
+
+
+def _h_roster_view(peer_uid: int, users_conn: sqlite3.Connection,
+                   audit_conn: sqlite3.Connection):
+    peer_user    = _uid_to_username(peer_uid) or str(peer_uid)
+    _, udata, _  = _h_users_list(users_conn)
+    _, rdata, _  = _h_users_reconcile(users_conn)
+    _self_audit(audit_conn, peer_user, "admin_viewed_roster")
+    return True, {
+        "users": (udata or {}).get("users", []),
+        "drift": rdata or {},
+    }, ""
+
+
+def _h_maillog_tail(payload: dict, peer_uid: int,
+                    audit_conn: sqlite3.Connection):
+    peer_user = _uid_to_username(peer_uid) or str(peer_uid)
+    n         = min(int(payload.get("lines", 50)), 200)
+    log_path  = os.environ.get("MSMTP_LOG", "/var/log/msmtp.log")
+    try:
+        lines = Path(log_path).read_text(errors="replace").splitlines()[-n:]
+    except OSError as exc:
+        return False, None, str(exc)
+    _self_audit(audit_conn, peer_user, "admin_viewed_maillog")
+    return True, {"lines": lines}, ""
+
+
+def _h_joblog_read(payload: dict, peer_uid: int,
+                   audit_conn: sqlite3.Connection):
+    peer_user   = _uid_to_username(peer_uid) or str(peer_uid)
+    target_user = payload.get("user", "").strip()
+    filename    = payload.get("filename", "").strip()
+    if not target_user or not filename:
+        return False, None, "user and filename required"
+    nfs_root    = os.environ.get("NFS_ROOT", "/shared")
+    jobs_sub    = os.environ.get("JOBS_SUBDIR", "jobs")
+    allowed     = Path(nfs_root) / jobs_sub / target_user
+    try:
+        resolved = (allowed / filename).resolve()
+    except OSError:
+        return False, None, "invalid path"
+    if not str(resolved).startswith(str(allowed.resolve())):
+        return False, None, "path outside allowed directory"
+    if not filename.endswith((".out", ".err")):
+        return False, None, "only .out and .err files allowed"
+    try:
+        content = resolved.read_text(errors="replace")
+    except OSError as exc:
+        return False, None, str(exc)
+    _self_audit(audit_conn, peer_user, "admin_read_user_log",
+                detail=target_user, meta={"filename": filename})
+    return True, {"content": content, "path": str(resolved)}, ""
+
+
+def _h_service_status(payload: dict, peer_uid: int,
+                      audit_conn: sqlite3.Connection):
+    import subprocess
+    peer_user = _uid_to_username(peer_uid) or str(peer_uid)
+    unit      = payload.get("unit", "").strip()
+    if unit not in _ALLOWED_UNITS:
+        return False, None, f"unit not in allowlist: {sorted(_ALLOWED_UNITS)}"
+    try:
+        active = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        journal = subprocess.run(
+            ["journalctl", "-u", unit, "-n", "20", "--no-pager"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, None, str(exc)
+    _self_audit(audit_conn, peer_user, "admin_viewed_service", detail=unit)
+    return True, {"unit": unit, "active": active, "journal": journal}, ""
+
+
+# ─── dispatch ─────────────────────────────────────────────────────────────────
+
+_ADMIN_VERBS = frozenset({
+    "users.create", "users.get", "users.list", "users.offboard",
+    "users.reconcile", "audit.query", "roster.view", "maillog.tail",
+    "joblog.read", "service.status",
+})
+
+
+def _dispatch(verb: str, payload: dict, peer_uid: int | None,
+              peer_username: str | None,
+              audit_conn: sqlite3.Connection,
+              users_conn: sqlite3.Connection):
+
+    if verb == "audit.log":
+        return _h_audit_log(payload, peer_username, audit_conn)
+
+    if peer_uid is None:
+        return False, None, "cannot determine peer identity"
+
+    if verb == "users.email_for":
+        return _h_users_email_for(payload, peer_uid, users_conn)
+
+    if verb in _ADMIN_VERBS:
+        if not _uid_is_admin(peer_uid):
+            return False, None, "permission denied: admin group required"
+        if verb == "users.create":
+            return _h_users_create(payload, peer_uid, users_conn, audit_conn)
+        if verb == "users.get":
+            return _h_users_get(payload, users_conn)
+        if verb == "users.list":
+            return _h_users_list(users_conn)
+        if verb == "users.offboard":
+            return _h_users_offboard(payload, peer_uid, users_conn, audit_conn)
+        if verb == "users.reconcile":
+            return _h_users_reconcile(users_conn)
+        if verb == "audit.query":
+            return _h_audit_query(payload, peer_uid, audit_conn)
+        if verb == "roster.view":
+            return _h_roster_view(peer_uid, users_conn, audit_conn)
+        if verb == "maillog.tail":
+            return _h_maillog_tail(payload, peer_uid, audit_conn)
+        if verb == "joblog.read":
+            return _h_joblog_read(payload, peer_uid, audit_conn)
+        if verb == "service.status":
+            return _h_service_status(payload, peer_uid, audit_conn)
+
+    return False, None, f"unknown verb: {verb}"
+
+
+# ─── connection handler ───────────────────────────────────────────────────────
+
+def _handle_connection(conn_sock: socket.socket,
+                       audit_conn: sqlite3.Connection,
+                       users_conn: sqlite3.Connection) -> None:
+    try:
+        conn_sock.settimeout(5.0)
+        peer_uid      = _get_peer_uid(conn_sock)
+        peer_username = _uid_to_username(peer_uid) if peer_uid is not None else None
+
+        data = _read_message(conn_sock)
+        if data is None:
+            return
+
+        try:
+            req = json.loads(data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            _send_response(conn_sock, False, error=f"bad JSON: {exc}")
+            return
+
+        verb    = req.get("verb", "")
+        payload = req.get("payload", {})
+        ok, result, err = _dispatch(verb, payload, peer_uid,
+                                     peer_username, audit_conn, users_conn)
+        _send_response(conn_sock, ok, result, err)
+
+    except OSError as exc:
+        _log.debug("Connection error: %s", exc)
+    finally:
+        try:
+            conn_sock.close()
+        except OSError:
+            pass
+
+
+# ─── spool ────────────────────────────────────────────────────────────────────
+
+def _process_event(data: bytes, conn: sqlite3.Connection,
+                   peer_username: str | None = None) -> None:
     try:
         event = json.loads(data.decode())
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        _log.warning(f"Bad payload: {exc}")
+        _log.warning("Bad spool payload: %s", exc)
         return
+    if peer_username:
+        event["user"]     = peer_username
+        event["identity"] = "peercred"
+    else:
+        event.setdefault("identity", "spooled")
     _insert(conn, event)
     _append_jsonl(event)
-    _log.info(f"user={event.get('user')} action={event.get('action')} job={event.get('job_id')}")
+    _log.info("spool user=%s action=%s", event.get("user"), event.get("action"))
 
 
 def _drain_spool(conn: sqlite3.Connection) -> None:
@@ -85,52 +575,64 @@ def _drain_spool(conn: sqlite3.Connection) -> None:
     for f in list(SPOOL_DIR.iterdir()):
         if f.suffix == ".json":
             try:
-                _process(f.read_bytes(), conn)
+                _process_event(f.read_bytes(), conn)
                 f.unlink()
             except OSError as exc:
-                _log.warning(f"Spool drain error {f}: {exc}")
+                _log.warning("Spool drain error %s: %s", f, exc)
 
+
+# ─── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGINT,  _handle_signal)
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SPOOL_DIR.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(DB_PATH))
-    _init_db(conn)
+    audit_conn = sqlite3.connect(str(DB_PATH))
+    _init_audit_db(audit_conn)
+
+    users_conn = sqlite3.connect(str(USERS_DB))
+    _init_users_db(users_conn)
+    try:
+        USERS_DB.chmod(0o600)
+    except OSError:
+        pass
 
     sock_path = Path(SOCKET_PATH)
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     if sock_path.exists():
         sock_path.unlink()
 
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    sock.bind(str(sock_path))
-    sock_path.chmod(0o777)  # world-writable so any tool user can send
-    sock.setblocking(False)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    sock_path.chmod(0o777)   # world-connectable; SO_PEERCRED is the security boundary
+    server.listen(16)
+    server.setblocking(False)
 
-    _log.info(f"Listening on {SOCKET_PATH}")
-    _drain_spool(conn)
+    _log.info("Listening on %s (STREAM, SO_PEERCRED)", SOCKET_PATH)
+    _drain_spool(audit_conn)
 
     last_drain = time.monotonic()
     while _running:
-        readable, _, _ = select.select([sock], [], [], 5.0)
-        if readable:
-            try:
-                data, _ = sock.recvfrom(65535)
-                _process(data, conn)
-            except OSError:
-                pass
+        readable, _, _ = select.select([server], [], [], 5.0)
+        for s in readable:
+            if s is server:
+                try:
+                    conn_sock, _ = server.accept()
+                    _handle_connection(conn_sock, audit_conn, users_conn)
+                except OSError:
+                    pass
         if time.monotonic() - last_drain > 30:
-            _drain_spool(conn)
+            _drain_spool(audit_conn)
             last_drain = time.monotonic()
 
-    sock.close()
+    server.close()
     if sock_path.exists():
         sock_path.unlink()
-    conn.close()
+    audit_conn.close()
+    users_conn.close()
     _log.info("Daemon stopped.")
 
 
