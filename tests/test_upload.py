@@ -10,6 +10,7 @@ from iitgpu.upload import (
     _ensure_folder,
     _download_from_url,
     _browse_folder,
+    _show_scp_instructions,
 )
 
 
@@ -306,3 +307,81 @@ class TestRunUpload:
         run_upload()
 
         assert any(action == "data_folder_open" for action, _ in logged)
+
+
+# ---------------------------------------------------------------------------
+# _show_scp_instructions — gateway host/port and quoted paths
+# ---------------------------------------------------------------------------
+
+class TestShowScpInstructions:
+    def _make_cfg(self, gateway_host="10.35.4.100", gateway_port="2225"):
+        import dataclasses
+        from iitgpu.config import load_config
+        cfg = load_config()
+        return dataclasses.replace(cfg, gateway_host=gateway_host, gateway_port=gateway_port)
+
+    def test_uses_gateway_host_not_socket_hostname(self, capsys, monkeypatch):
+        """Output must reference cfg.gateway_host, not socket.gethostname()."""
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        cfg = self._make_cfg(gateway_host="10.35.4.100", gateway_port="2225")
+
+        with patch("questionary.press_any_key_to_continue") as mock_key, \
+             patch("iitgpu.upload.header"):
+            mock_key.return_value.ask.return_value = None
+            _show_scp_instructions("/shared/mydata", cfg)
+
+        out = capsys.readouterr().out
+        assert "10.35.4.100" in out
+        assert "login-node" not in out
+
+    def test_scp_uses_uppercase_P_for_port(self, capsys, monkeypatch):
+        """scp port flag must be -P (uppercase), not -p."""
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        cfg = self._make_cfg(gateway_port="2225")
+
+        with patch("questionary.press_any_key_to_continue") as mock_key, \
+             patch("iitgpu.upload.header"):
+            mock_key.return_value.ask.return_value = None
+            _show_scp_instructions("/shared/mydata", cfg)
+
+        out = capsys.readouterr().out
+        assert "-P 2225" in out
+
+    def test_rsync_uses_ssh_p_for_port(self, capsys, monkeypatch):
+        """rsync port is passed via -e 'ssh -p PORT'."""
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        cfg = self._make_cfg(gateway_port="2225")
+
+        with patch("questionary.press_any_key_to_continue") as mock_key, \
+             patch("iitgpu.upload.header"):
+            mock_key.return_value.ask.return_value = None
+            _show_scp_instructions("/shared/mydata", cfg)
+
+        out = capsys.readouterr().out
+        assert "ssh -p 2225" in out
+
+    def test_folder_path_is_quoted(self, capsys, monkeypatch):
+        """Remote path must be wrapped in double-quotes to handle spaces."""
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        cfg = self._make_cfg()
+
+        with patch("questionary.press_any_key_to_continue") as mock_key, \
+             patch("iitgpu.upload.header"):
+            mock_key.return_value.ask.return_value = None
+            _show_scp_instructions("/shared/my folder", cfg)
+
+        out = capsys.readouterr().out
+        assert '"/shared/my folder/' in out
+
+    def test_data_ref_path_is_quoted(self, capsys, monkeypatch):
+        """The '--data ...' reference line must also quote the path."""
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        cfg = self._make_cfg()
+
+        with patch("questionary.press_any_key_to_continue") as mock_key, \
+             patch("iitgpu.upload.header"):
+            mock_key.return_value.ask.return_value = None
+            _show_scp_instructions("/shared/my folder", cfg)
+
+        out = capsys.readouterr().out
+        assert '--data "/shared/my folder"' in out

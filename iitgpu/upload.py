@@ -1,6 +1,5 @@
 import os
 import re
-import socket
 import getpass
 import subprocess
 from pathlib import Path
@@ -36,27 +35,28 @@ def _ensure_folder(path: str) -> bool:
         return False
 
 
-def _show_scp_instructions(folder_path: str) -> None:
-    hostname = socket.gethostname()
+def _show_scp_instructions(folder_path: str, cfg) -> None:
     user = getpass.getuser()
+    host = cfg.gateway_host
+    port = cfg.gateway_port
     header("Upload via SCP / rsync")
     console.print(
         "\nOpen a [bold]new terminal on your local machine[/] and run either of these:\n"
     )
     console.print(
-        f"  [bold cyan]scp[/]   -r  /path/to/local/data/  "
-        f"[cyan]{user}@{hostname}:{folder_path}/[/]"
+        f"  [bold cyan]scp[/]   -P {port} -r  \"/path/to/local/data/\"  "
+        f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
     )
     console.print()
     console.print(
-        f"  [bold cyan]rsync[/] -avz --progress  /path/to/local/data/  "
-        f"[cyan]{user}@{hostname}:{folder_path}/[/]"
+        f"  [bold cyan]rsync[/] -avz --progress -e \"ssh -p {port}\"  \"/path/to/local/data/\"  "
+        f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
     )
     console.print()
     console.print(f"[dim]Data will be stored at:[/]  [cyan]{folder_path}[/]")
     console.print(
         "[dim]Reference this path in your job script as:[/]  "
-        f"[cyan]--data {folder_path}[/]\n"
+        f"[cyan]--data \"{folder_path}\"[/]\n"
     )
     questionary.press_any_key_to_continue("Press any key when done").ask()
 
@@ -195,7 +195,7 @@ def run_upload() -> None:
         if action is None or action == "back":
             break
         elif action == "scp":
-            _show_scp_instructions(folder_path)
+            _show_scp_instructions(folder_path, cfg)
         elif action == "url":
             _download_from_url(folder_path)
         elif action == "browse":
