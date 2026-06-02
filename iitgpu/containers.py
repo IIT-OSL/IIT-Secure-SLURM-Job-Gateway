@@ -46,10 +46,13 @@ def validate_image(image_path: str) -> bool:
 def delete_image(image_path: str) -> tuple[bool, str]:
     """Delete a .sif image (jailed + must be a .sif)."""
     import os
+    from iitgpu import auditclient
     if not validate_image(image_path):
         return False, "Access denied or not a .sif file."
     try:
         os.remove(image_path)
+        auditclient.log("container_image_delete", detail=image_path,
+                        meta={"path": image_path})
         return True, f"Deleted {os.path.basename(image_path)}"
     except OSError as exc:
         return False, str(exc)

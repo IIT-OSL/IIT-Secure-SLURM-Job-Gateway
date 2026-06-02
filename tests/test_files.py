@@ -157,6 +157,22 @@ def test_delete_image_rejects_non_sif():
     assert ok is False
 
 
+def test_delete_image_emits_audit(tmp_path, monkeypatch):
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    import iitgpu.validate as v
+    importlib.reload(v)
+    sif = tmp_path / "images" / "model.sif"
+    sif.parent.mkdir(parents=True, exist_ok=True)
+    sif.write_bytes(b"SIF")
+    import iitgpu.containers as c
+    importlib.reload(c)
+    with patch("iitgpu.auditclient.log") as mock_log:
+        ok, _ = c.delete_image(str(sif))
+    assert ok
+    mock_log.assert_called_once()
+    assert mock_log.call_args[0][0] == "container_image_delete"
+
+
 def test_delete_env_refuses_outside_envs_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("NFS_ROOT", str(tmp_path))
     import iitgpu.validate as v
