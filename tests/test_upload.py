@@ -159,3 +159,150 @@ class TestBrowseFolder:
         out = capsys.readouterr().out
         assert "train.csv" in out
         assert "subdir" in out
+
+
+# ---------------------------------------------------------------------------
+# run_upload — folder selection flow
+# ---------------------------------------------------------------------------
+
+class TestRunUpload:
+    def _sel(self, value):
+        m = MagicMock()
+        m.ask.return_value = value
+        return m
+
+    def test_cancel_exits_without_creating_anything(self, tmp_path, monkeypatch):
+        """Selecting [cancel] returns without creating any folder."""
+        monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+
+        monkeypatch.setattr(
+            "questionary.select",
+            lambda *a, **kw: self._sel("__cancel__"),
+        )
+
+        from iitgpu.upload import run_upload
+        run_upload()
+        # Nothing created inside tmp_path
+        assert list(tmp_path.iterdir()) == []
+
+    def test_select_existing_folder_uses_it_directly(self, tmp_path, monkeypatch):
+        """Picking an existing folder skips the name-entry prompt entirely."""
+        monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        monkeypatch.setattr("iitgpu.auditclient.log", lambda *a, **kw: None)
+
+        existing = tmp_path / "my-dataset"
+        existing.mkdir()
+
+        # First select: pick the existing folder path; second: "back"
+        sel_responses = iter([str(existing), "back"])
+        monkeypatch.setattr(
+            "questionary.select",
+            lambda *a, **kw: self._sel(next(sel_responses)),
+        )
+
+        from iitgpu.upload import run_upload
+        run_upload()
+
+        assert existing.is_dir()
+        # No new folder should have been created
+        assert list(tmp_path.iterdir()) == [existing]
+
+    def test_create_new_folder_prompts_for_name_and_creates_dir(self, tmp_path, monkeypatch):
+        """Choosing [create new folder] prompts for a name and creates the directory."""
+        monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        monkeypatch.setattr("iitgpu.auditclient.log", lambda *a, **kw: None)
+
+        # First select: "create new"; second select: "back"
+        sel_responses = iter(["__new__", "back"])
+        monkeypatch.setattr(
+            "questionary.select",
+            lambda *a, **kw: self._sel(next(sel_responses)),
+        )
+        monkeypatch.setattr(
+            "questionary.text",
+            lambda *a, **kw: self._sel("newdataset"),
+        )
+
+        from iitgpu.upload import run_upload
+        run_upload()
+
+        assert (tmp_path / "newdataset").is_dir()
+
+    def test_existing_folders_appear_in_choices(self, tmp_path, monkeypatch):
+        """Existing subdirectories of nfs_root are listed as selectable choices."""
+        monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+
+        (tmp_path / "alpha").mkdir()
+        (tmp_path / "beta").mkdir()
+
+        choices_seen: list = []
+
+        def fake_select(prompt, choices, **kw):
+            choices_seen.extend(
+                c.value if hasattr(c, "value") else c for c in choices
+            )
+            m = MagicMock()
+            m.ask.return_value = "__cancel__"
+            return m
+
+        monkeypatch.setattr("questionary.select", fake_select)
+
+        from iitgpu.upload import run_upload
+        run_upload()
+
+        assert str(tmp_path / "alpha") in choices_seen
+        assert str(tmp_path / "beta") in choices_seen
+        assert "__new__" in choices_seen
+        assert "__cancel__" in choices_seen
+
+    def test_no_existing_folders_still_offers_create(self, tmp_path, monkeypatch):
+        """With an empty nfs_root, the prompt still offers [create new folder]."""
+        monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+
+        choices_seen: list = []
+
+        def fake_select(prompt, choices, **kw):
+            choices_seen.extend(
+                c.value if hasattr(c, "value") else c for c in choices
+            )
+            m = MagicMock()
+            m.ask.return_value = "__cancel__"
+            return m
+
+        monkeypatch.setattr("questionary.select", fake_select)
+
+        from iitgpu.upload import run_upload
+        run_upload()
+
+        assert "__new__" in choices_seen
+        assert "__cancel__" in choices_seen
+
+    def test_audit_log_called_on_folder_open(self, tmp_path, monkeypatch):
+        """run_upload logs data_folder_open after the folder is ready."""
+        monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+
+        logged = []
+        monkeypatch.setattr(
+            "iitgpu.auditclient.log",
+            lambda action, **kw: logged.append((action, kw)),
+        )
+
+        existing = tmp_path / "my-dataset"
+        existing.mkdir()
+
+        sel_responses = iter([str(existing), "back"])
+        monkeypatch.setattr(
+            "questionary.select",
+            lambda *a, **kw: self._sel(next(sel_responses)),
+        )
+
+        from iitgpu.upload import run_upload
+        run_upload()
+
+        assert any(action == "data_folder_open" for action, _ in logged)

@@ -128,20 +128,47 @@ def _download_from_url(folder_path: str) -> None:
 
 def run_upload() -> None:
     cfg = load_config()
+    base = Path(cfg.nfs_root)
 
-    folder_name = questionary.text(
-        "Folder name  (will be created at /shared/<name>):",
-        validate=lambda x: (
-            _validate_folder_name(x.strip())
-            or "Letters, digits, hyphens, underscores only — start with a letter or digit"
-        ),
+    # Build list of existing accessible subdirectories
+    try:
+        _existing = sorted(
+            p.name for p in base.iterdir()
+            if p.is_dir() and in_jail(str(p))
+        ) if base.exists() else []
+    except OSError:
+        _existing = []
+
+    _folder_choices = (
+        [questionary.Choice(f"{n}  ({base / n})", str(base / n)) for n in _existing]
+        + [questionary.Choice("[create new folder]", "__new__"),
+           questionary.Choice("[cancel]",             "__cancel__")]
+    )
+
+    sel = questionary.select(
+        "Select a shared folder, or create a new one:",
+        choices=_folder_choices,
         style=_STYLE,
     ).ask()
-    if not folder_name:
+
+    if sel is None or sel == "__cancel__":
         return
 
-    folder_name = folder_name.strip()
-    folder_path = str(Path(cfg.nfs_root) / folder_name)
+    if sel == "__new__":
+        folder_name = questionary.text(
+            "New folder name  (will be created at shared/<name>):",
+            validate=lambda x: (
+                _validate_folder_name(x.strip())
+                or "Letters, digits, hyphens, underscores only — start with a letter or digit"
+            ),
+            style=_STYLE,
+        ).ask()
+        if not folder_name:
+            return
+        folder_name = folder_name.strip()
+        folder_path = str(base / folder_name)
+    else:
+        folder_path = sel
 
     if not in_jail(folder_path):
         err("Folder path is outside the allowed directory.")
