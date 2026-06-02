@@ -51,7 +51,7 @@ class JobSpec:
     array: str = ""            # SLURM --array spec, e.g. "0-9" or "1-100%4"
     dependency: str = ""       # SLURM --dependency, e.g. "afterok:12345"
     data_path: str = ""        # path exported as DATA_PATH in the sbatch script
-    mail_user: str = ""        # email for --mail-type=END,FAIL (if MTA present)
+    mail_user: str = ""        # email for SLURM mail directives (if MTA present)
 
 
 def make_job_folder(jobs_dir: str, spec: JobSpec) -> str:
@@ -96,8 +96,10 @@ def render_sbatch(spec: JobSpec, folder: str) -> str:
     if spec.dependency:
         lines.append(f"#SBATCH --dependency={spec.dependency}")
     if spec.mail_user:
+        from iitgpu.config import load_config
+        mail_types = load_config().notify_mail_types
         lines.append(f"#SBATCH --mail-user={spec.mail_user}")
-        lines.append("#SBATCH --mail-type=END,FAIL")
+        lines.append(f"#SBATCH --mail-type={mail_types}")
     lines += [
         (f"#SBATCH --output={folder}/slurm-%A_%a.out"
          if spec.array else f"#SBATCH --output={folder}/slurm-%j.out"),

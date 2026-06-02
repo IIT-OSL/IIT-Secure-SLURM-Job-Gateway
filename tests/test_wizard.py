@@ -300,7 +300,7 @@ def test_mail_user_set_from_users_db_when_mta_present(tmp_path):
     folder = make_job_folder(str(tmp_path), spec)
     sbatch = render_sbatch(spec, folder)
     assert "#SBATCH --mail-user=alice@uni.edu" in sbatch
-    assert "#SBATCH --mail-type=END,FAIL" in sbatch
+    assert "--mail-type=" in sbatch
 
 
 def test_mail_user_not_set_when_mta_absent(tmp_path):

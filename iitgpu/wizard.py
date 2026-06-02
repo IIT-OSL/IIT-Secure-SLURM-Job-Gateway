@@ -155,9 +155,11 @@ def _inline_paste(cfg, user: str) -> tuple[str | None, str | None]:
         err("Data destination is outside the allowed jail — refused.")
         return None, None
 
-    Path(data_dest).write_text("\n".join(lines) + "\n")
+    content = "\n".join(lines) + "\n"
+    Path(data_dest).write_text(content)
     Path(data_dest).chmod(0o644)
-    auditclient.log("data_inline_paste", detail=Path(data_dest).name)
+    auditclient.log("data_inline_paste", detail=Path(data_dest).name,
+                    meta={"path": data_dest, "bytes": len(content.encode())})
     ok(f"Saved {len(lines)} lines to {data_dest}")
 
     script_path: str | None = None
@@ -743,7 +745,22 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
     Path(sbatch_path).chmod(0o644)
     kv("Script saved", sbatch_path)
 
-    if not auditclient.log_or_block("job_submit", detail=job_name):
+    _submit_meta: dict = {"run_command": spec.run_command, "task_type": spec.task_type}
+    if spec.conda_env:
+        _submit_meta["conda_env"] = spec.conda_env
+    if spec.venv_path:
+        _submit_meta["venv_path"] = spec.venv_path
+    if spec.container_image:
+        _submit_meta["container_image"] = spec.container_image
+    if spec.model_path:
+        _submit_meta["model_path"] = spec.model_path
+    if spec.data_path:
+        _submit_meta["data_path"] = spec.data_path
+    if spec.array:
+        _submit_meta["array"] = spec.array
+    if spec.dependency:
+        _submit_meta["dependency"] = spec.dependency
+    if not auditclient.log_or_block("job_submit", detail=job_name, meta=_submit_meta):
         err("Audit logging failed. Refusing to submit (safety policy).")
         return
 

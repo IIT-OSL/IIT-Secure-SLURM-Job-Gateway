@@ -18,7 +18,19 @@ def test_mail_directives_emitted(tmp_path):
     folder = make_job_folder(str(tmp_path), spec)
     s = render_sbatch(spec, folder)
     assert "#SBATCH --mail-user=me@example.edu" in s
+    # Default must cover begin/end/fail/requeue/time_limit (spec §7)
+    mail_line = next(l for l in s.splitlines() if "--mail-type" in l)
+    for event in ("BEGIN", "END", "FAIL", "REQUEUE", "TIME_LIMIT"):
+        assert event in mail_line, f"--mail-type missing {event}: {mail_line}"
+
+
+def test_mail_type_configurable(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOTIFY_MAIL_TYPES", "END,FAIL")
+    spec = _spec(mail_user="me@example.edu")
+    folder = make_job_folder(str(tmp_path), spec)
+    s = render_sbatch(spec, folder)
     assert "#SBATCH --mail-type=END,FAIL" in s
+    assert "BEGIN" not in s
 
 
 def test_no_mail_when_unset(tmp_path):

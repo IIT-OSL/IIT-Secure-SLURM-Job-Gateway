@@ -10,6 +10,7 @@ def _cfg(**over):
         default_account="default", default_qos="normal", partition="gpu",
         shared_user="daham", gateway_shared_user=False,
         gateway_host="localhost", gateway_port="22",
+        notify_mail_types="BEGIN,END,FAIL,REQUEUE,TIME_LIMIT",
     )
     base.update(over)
     return Config(**base)

@@ -76,6 +76,8 @@ class Config:
     # Gateway / tunnels (for notebook & service SSH hints)
     gateway_host: str         # public-facing SSH host users tunnel to
     gateway_port: str         # public-facing SSH port
+    # Mail
+    notify_mail_types: str    # SLURM --mail-type value when mail_user is set
 
 
 def _truthy(val: str) -> bool:
@@ -109,6 +111,8 @@ def load_config() -> Config:
         gateway_shared_user=_truthy(_get("GATEWAY_SHARED_USER", "0")),
         gateway_host=_get("GATEWAY_HOST", "localhost"),
         gateway_port=_get("GATEWAY_PORT", "22"),
+        notify_mail_types=_get("NOTIFY_MAIL_TYPES",
+                               "BEGIN,END,FAIL,REQUEUE,TIME_LIMIT"),
     )
 
 
