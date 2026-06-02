@@ -38,16 +38,28 @@ _path_ok() {
     [[ "$raw" == "." || "$raw" == "${NFS_ROOT}" || "$raw" == "${NFS_ROOT}/"* ]]
 }
 
+# ── Transfer audit (best-effort — never blocks the transfer) ──────────────────
+# auditclient.log() builds a proper event (ts/session/remote) and delivers it
+# over the stream socket; SO_PEERCRED stamps the authoritative user on ingest.
+_audit_transfer() {
+    local kind="$1" path="$2"
+    python3 -c \
+        "from iitgpu import auditclient; auditclient.log('transfer_${kind}', detail='${path}')" \
+        2>/dev/null || true
+}
+
 # ── Route ─────────────────────────────────────────────────────────────────────
 # Use "eval exec" rather than "exec /bin/bash -c" so that the transfer binary
 # replaces this process directly — no new bash subprocess, no .bashrc sourcing.
 case "$_ORIG" in
     scp\ *-t\ *|scp\ *-f\ *)
         _path_ok || { printf 'iit-gpu: scp path outside %s — denied.\n' "${NFS_ROOT}" >&2; exit 1; }
+        _audit_transfer "scp" "${_ORIG##* }"
         eval exec "$_ORIG"
         ;;
     rsync\ --server\ *)
         _path_ok || { printf 'iit-gpu: rsync path outside %s — denied.\n' "${NFS_ROOT}" >&2; exit 1; }
+        _audit_transfer "rsync" "${_ORIG##* }"
         eval exec "$_ORIG"
         ;;
     *sftp-server*)
@@ -55,6 +67,7 @@ case "$_ORIG" in
         # subsystem internally. SSH_ORIGINAL_COMMAND is the sftp-server binary
         # path, not "scp -t /path". sftp-server runs as the authenticated user
         # so filesystem permissions are the security boundary.
+        _audit_transfer "sftp" "sftp-session"
         eval exec "$_ORIG"
         ;;
 esac

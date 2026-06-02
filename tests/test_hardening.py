@@ -247,3 +247,34 @@ def test_gateway_wrapper_uses_eval_exec_not_bash_c():
         "'exec /bin/bash -c' spawns a new bash that may source ~/.bashrc "
         "and corrupt the transfer protocol"
     )
+
+
+def test_gateway_wrapper_has_audit_helper():
+    text = GATEWAY_SCRIPT.read_text()
+    assert "_audit_transfer" in text, \
+        "gateway wrapper must define an _audit_transfer helper"
+    assert "auditclient" in text, \
+        "_audit_transfer must call auditclient.log"
+
+
+def test_gateway_wrapper_audits_all_three_transfer_branches():
+    text = GATEWAY_SCRIPT.read_text()
+    # Each branch must call _audit_transfer with its kind string
+    for kind in ('"scp"', '"rsync"', '"sftp"'):
+        assert f'_audit_transfer {kind}' in text, \
+            f"gateway wrapper missing _audit_transfer {kind} call"
+
+
+def test_gateway_wrapper_audit_is_best_effort():
+    """The audit call must not block the transfer — it must be followed by || true
+    or equivalent so a daemon failure never prevents a file transfer."""
+    text = GATEWAY_SCRIPT.read_text()
+    assert "|| true" in text, \
+        "gateway audit call must be best-effort (|| true) so daemon failure never blocks transfer"
+
+
+def test_gateway_wrapper_passes_bash_syntax_check():
+    import subprocess
+    r = subprocess.run(["bash", "-n", str(GATEWAY_SCRIPT)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"bash -n failed: {r.stderr}"
