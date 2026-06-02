@@ -1,5 +1,5 @@
 # iitgpu/admin.py
-"""Admin panel (Phase 7) — gated to the admin group (config.is_admin()).
+"""Admin panel — gated to the admin group (config.is_admin()).
 
 Permission gatekeepers applied to every privileged subprocess call:
   • stdin=subprocess.DEVNULL — questionary/prompt_toolkit leaves the PTY in
@@ -12,15 +12,19 @@ Permission gatekeepers applied to every privileged subprocess call:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from iitgpu import auditclient
 from iitgpu.config import load_config, is_admin
+from iitgpu import daemonclient
 
 # Sri Lanka Standard Time = UTC+5:30
 _LK = timezone(timedelta(hours=5, minutes=30))
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _fmt_ts(ts_str: str) -> str:
@@ -34,12 +38,7 @@ def _fmt_ts(ts_str: str) -> str:
 
 def _run(cmd: list[str], timeout: int = 15,
          stdin_data: str | None = None) -> tuple[int, str, str]:
-    """Run a subprocess with stdin always closed (DEVNULL) unless stdin_data is given.
-
-    questionary puts the PTY in raw mode and doesn't always restore it before we
-    call out to sudo. DEVNULL + sudo -n means the call either succeeds via NOPASSWD
-    or fails fast — it never hangs waiting for a password.
-    """
+    """Run a subprocess with stdin always closed (DEVNULL) unless stdin_data is given."""
     try:
         r = subprocess.run(
             cmd,
@@ -57,7 +56,6 @@ def _run(cmd: list[str], timeout: int = 15,
 # ── Node control ─────────────────────────────────────────────────────────────────
 
 def get_jobs_on_node(node: str) -> list[dict]:
-    """Return jobs currently allocated to a node as list of {id, user, name, state}."""
     rc, out, _ = _run(["squeue", "--noheader",
                         "--format=%i|%u|%j|%T", f"--nodelist={node}"])
     if rc != 0 or not out.strip():
@@ -72,7 +70,6 @@ def get_jobs_on_node(node: str) -> list[dict]:
 
 
 def cancel_jobs_on_node(node: str) -> tuple[int, list[str]]:
-    """Cancel all jobs on a node. Returns (count_cancelled, list_of_ids)."""
     jobs = get_jobs_on_node(node)
     cancelled = []
     for j in jobs:
@@ -111,7 +108,6 @@ def resume_node(node: str) -> tuple[bool, str]:
 # ── Users ─────────────────────────────────────────────────────────────────────────
 
 def list_gpuusers() -> list[str]:
-    """Return members of the gateway group."""
     cfg = load_config()
     import grp
     import pwd
@@ -127,31 +123,42 @@ def list_gpuusers() -> list[str]:
 
 
 def set_user_password(username: str, password: str) -> tuple[bool, str]:
-    """Set a Linux password non-interactively via chpasswd (login node only)."""
-    rc, _, err = _run(
-        ["sudo", "-n", "chpasswd"],
-        stdin_data=f"{username}:{password}\n",
-    )
+    rc, _, err = _run(["sudo", "-n", "chpasswd"],
+                       stdin_data=f"{username}:{password}\n")
     return (rc == 0), (err.strip() or "")
 
 
 def provision_user(username: str, admin: bool = False,
-                   password: str = "") -> tuple[bool, str]:
-    """Create user on both nodes + SLURM association, then optionally set password."""
+                   password: str = "",
+                   role: str = "",
+                   email: str = "",
+                   full_name: str = "",
+                   notes: str = "") -> tuple[bool, str]:
+    """Create user on both nodes + SLURM association, then write users.db row."""
     cmd = ["sudo", "-n", "/usr/local/bin/iit-gpu-adduser", username]
-    if admin:
+    if admin or role == "admin":
         cmd.append("--admin")
+    elif role == "shell":
+        cmd.append("--shell-user")
     rc, out, err = _run(cmd, timeout=120)
-    auditclient.log("admin_provision_user", detail=username)
     if rc != 0:
         return False, err.strip() or "provision failed"
     msg = out.strip()
+    if email:
+        effective_role = "admin" if (admin or role == "admin") else role or "tool"
+        ok_db, db_msg = daemonclient.create_user(
+            username, email, effective_role, full_name, notes)
+        if ok_db:
+            msg += "\n  ✔  user DB record created"
+        else:
+            msg += f"\n  ⚠  user DB record failed: {db_msg}"
+    auditclient.log("admin_provision_user",
+                    detail=username,
+                    meta={"role": role or ("admin" if admin else "tool"),
+                          "email": email})
     if password:
         ok_pw, perr = set_user_password(username, password)
-        if ok_pw:
-            msg += "\n  ✔  password set"
-        else:
-            msg += f"\n  ⚠  password not set: {perr or 'chpasswd failed'}"
+        msg += "\n  ✔  password set" if ok_pw else f"\n  ⚠  password not set: {perr or 'chpasswd failed'}"
     return True, msg
 
 
@@ -160,49 +167,32 @@ def offboard_user(username: str, purge: bool = False) -> tuple[bool, str]:
     if purge:
         cmd.append("--purge-data")
     rc, out, err = _run(cmd, timeout=120)
-    auditclient.log("admin_offboard_user", detail=username)
+    if rc == 0:
+        # Also mark offboarded in users.db (best-effort — script also calls daemoncli)
+        daemonclient.offboard_user(username)
+        auditclient.log("admin_offboard_user", detail=username)
     return (rc == 0), (out.strip() if rc == 0 else (err.strip() or "offboard failed"))
 
 
 # ── Audit log ─────────────────────────────────────────────────────────────────────
 
 def read_audit(limit: int = 40, action_filter: str = "",
-               user_filter: str = "") -> list[dict]:
-    """Read recent audit events from JSONL, newest first."""
-    import json
-    state = Path("/var/lib/iit-gpu/audit.jsonl")
-    if not state.exists():
-        return []
-    try:
-        lines = state.read_text(errors="replace").splitlines()
-    except OSError:
-        return []
-    events: list[dict] = []
-    for line in reversed(lines):
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if action_filter and action_filter not in ev.get("action", ""):
-            continue
-        if user_filter and user_filter != ev.get("user", ""):
-            continue
-        events.append(ev)
-        if len(events) >= limit:
-            break
-    return events
+               user_filter: str = "",
+               date_from: str = "", date_to: str = "") -> list[dict]:
+    """Read recent audit events via daemon (SQLite), newest first."""
+    return daemonclient.query_audit(
+        user=user_filter, action=action_filter,
+        date_from=date_from, date_to=date_to, limit=limit)
 
 
 # ── Maintenance notice ────────────────────────────────────────────────────────────
 
 def _maintenance_path() -> str:
-    """Path to the cluster-wide maintenance notice file (NFS, world-readable)."""
     cfg = load_config()
     return f"{cfg.nfs_root}/.maintenance.json"
 
 
 def get_maintenance() -> dict | None:
-    """Return the active maintenance notice dict, or None if not set."""
     import json
     try:
         data = json.loads(open(_maintenance_path()).read())
@@ -214,8 +204,8 @@ def get_maintenance() -> dict | None:
 
 
 def set_maintenance(reason: str, set_by: str) -> tuple[bool, str]:
-    """Write a maintenance notice to shared storage (visible to all users on login)."""
-    import json, os
+    import json
+    import os
     data = {
         "active": True,
         "reason": reason,
@@ -234,7 +224,6 @@ def set_maintenance(reason: str, set_by: str) -> tuple[bool, str]:
 
 
 def clear_maintenance() -> tuple[bool, str]:
-    """Remove the maintenance notice."""
     import os
     try:
         os.remove(_maintenance_path())
@@ -249,7 +238,6 @@ def clear_maintenance() -> tuple[bool, str]:
 # ── QOS / partitions ──────────────────────────────────────────────────────────────
 
 def list_qos() -> list[dict]:
-    """Return QOS entries as structured dicts (name, max_wall, max_gpu, priority)."""
     rc, out, _ = _run(["sacctmgr", "-n", "--parsable2", "show", "qos",
                         "format=Name,MaxWall,MaxTRESPerUser,Priority"])
     rows: list[dict] = []
@@ -274,35 +262,26 @@ def list_qos() -> list[dict]:
 
 
 def set_qos_maxwall(qos_name: str, max_wall: str) -> tuple[bool, str]:
-    """Set MaxWall for a QOS. Format: HH:MM:SS or D-HH:MM:SS; empty = unlimited."""
     rc, out, err = _run(
         ["sudo", "-n", "sacctmgr", "-i", "modify", "qos", qos_name,
-         "set", f"MaxWall={max_wall}"],
-        timeout=20,
-    )
+         "set", f"MaxWall={max_wall}"], timeout=20)
     auditclient.log("admin_qos_modify", detail=f"{qos_name}:MaxWall={max_wall!r}")
     return (rc == 0), (out.strip() or "updated") if rc == 0 else (err.strip() or "failed")
 
 
 def set_qos_maxgpu(qos_name: str, max_gpu: int | None) -> tuple[bool, str]:
-    """Set MaxTRESPerUser GPU count. Pass None to remove the limit (unlimited)."""
     tres = f"gres/gpu={max_gpu}" if max_gpu is not None else ""
     rc, out, err = _run(
         ["sudo", "-n", "sacctmgr", "-i", "modify", "qos", qos_name,
-         "set", f"MaxTRESPerUser={tres}"],
-        timeout=20,
-    )
+         "set", f"MaxTRESPerUser={tres}"], timeout=20)
     auditclient.log("admin_qos_modify", detail=f"{qos_name}:MaxGPU={max_gpu}")
     return (rc == 0), (out.strip() or "updated") if rc == 0 else (err.strip() or "failed")
 
 
 def set_qos_priority(qos_name: str, priority: int) -> tuple[bool, str]:
-    """Set Priority for a QOS."""
     rc, out, err = _run(
         ["sudo", "-n", "sacctmgr", "-i", "modify", "qos", qos_name,
-         "set", f"Priority={priority}"],
-        timeout=20,
-    )
+         "set", f"Priority={priority}"], timeout=20)
     auditclient.log("admin_qos_modify", detail=f"{qos_name}:Priority={priority}")
     return (rc == 0), (out.strip() or "updated") if rc == 0 else (err.strip() or "failed")
 
@@ -331,20 +310,15 @@ def _qos_menu(style) -> None:
 
         qos_names = [r["name"] for r in rows]
         qname = questionary.select(
-            "Select QOS to edit:",
-            choices=qos_names + ["Back"],
-            style=style,
-        ).ask()
+            "Select QOS to edit:", choices=qos_names + ["Back"], style=style).ask()
         if qname is None or qname == "Back":
             return
 
         current = next((r for r in rows if r["name"] == qname), {})
-
         field = questionary.select(
             "Field to change:",
             choices=["Max Wall Time", "Max GPUs per user", "Priority", "Back"],
-            style=style,
-        ).ask()
+            style=style).ask()
         if field is None or field == "Back":
             continue
 
@@ -365,8 +339,7 @@ def _qos_menu(style) -> None:
             info(f"  Current: [magenta]{current.get('max_gpu', '?')}[/]")
             val = questionary.text(
                 "New max GPUs (positive integer; blank = unlimited):",
-                style=style,
-            ).ask()
+                style=style).ask()
             if val is None:
                 continue
             val = val.strip()
@@ -395,11 +368,229 @@ def _qos_menu(style) -> None:
             except ValueError:
                 err("Enter an integer."); continue
             if questionary.confirm(
-                    f"Set [magenta]{qname}[/] Priority to "
-                    f"[magenta]{prio}[/]?",
+                    f"Set [magenta]{qname}[/] Priority to [magenta]{prio}[/]?",
                     default=True, style=style).ask():
                 good, msg = set_qos_priority(qname, prio)
                 (ok if good else err)(msg)
+
+
+# ── Provision-user sub-flow ───────────────────────────────────────────────────────
+
+def _provision_menu(style) -> None:
+    import questionary
+    from iitgpu.ui import ok, err, info, warn
+
+    u = questionary.text("New username:", style=style).ask()
+    if not u or not u.strip():
+        return
+    u = u.strip()
+
+    role = questionary.select(
+        "User type:",
+        choices=[
+            questionary.Choice("tool   — forced-TUI, audited (default)", "tool"),
+            questionary.Choice("admin  — forced-TUI + admin panel",      "admin"),
+            questionary.Choice("shell  — real bash shell, NOT audited",  "shell"),
+        ],
+        style=style,
+    ).ask()
+    if role is None:
+        return
+
+    if role == "shell":
+        warn("[yellow bold]⚠  Shell user warning:[/]")
+        warn("[yellow]This grants a real shell on the login node. Their activity is[/]")
+        warn("[yellow]NOT audited by the tool. Use only for edge cases the tool[/]")
+        warn("[yellow]cannot handle. They are still SLURM-capped via their association.[/]")
+        if not questionary.confirm(
+                "Understood — proceed with shell user creation?",
+                default=False, style=style).ask():
+            return
+
+    full_name = questionary.text("Full name:", style=style).ask() or ""
+    email = questionary.text("Email address:", style=style).ask() or ""
+    if email and not _EMAIL_RE.match(email.strip()):
+        err("Invalid email address — user DB record will be skipped.")
+        email = ""
+    email = email.strip()
+    notes = questionary.text("Notes (optional):", style=style).ask() or ""
+    pw = questionary.password(
+        "Password (leave blank to set later):", style=style).ask() or ""
+    if pw:
+        pw2 = questionary.password("Confirm password:", style=style).ask() or ""
+        if pw != pw2:
+            err("Passwords do not match — user not created.")
+            return
+
+    good, msg = provision_user(
+        u, admin=(role == "admin"), role=role, password=pw,
+        email=email, full_name=full_name.strip(), notes=notes.strip())
+    (ok if good else err)(msg)
+    if good and not pw:
+        info(f"[dim]Set a password: sudo passwd {u}[/]")
+
+
+# ── Admin log viewers ─────────────────────────────────────────────────────────────
+
+def _view_audit_log(style) -> None:
+    import questionary
+    from iitgpu.ui import console, header, info
+
+    header("Audit Log")
+    uf  = questionary.text("Filter by user (blank=all):", style=style).ask() or ""
+    af  = questionary.text("Filter by action (blank=all):", style=style).ask() or ""
+    df  = questionary.text("Date from (YYYY-MM-DD, blank=any):", style=style).ask() or ""
+    dt  = questionary.text("Date to   (YYYY-MM-DD, blank=any):", style=style).ask() or ""
+    lim = questionary.text("Limit (default 40):", style=style).ask() or "40"
+    try:
+        limit = int(lim)
+    except ValueError:
+        limit = 40
+    date_from = (df.strip() + "T00:00:00+00:00") if df.strip() else ""
+    date_to   = (dt.strip() + "T23:59:59+00:00") if dt.strip() else ""
+    events = read_audit(limit=limit, action_filter=af.strip(),
+                        user_filter=uf.strip(),
+                        date_from=date_from, date_to=date_to)
+    if not events:
+        info("No matching events.")
+        return
+    for ev in events:
+        meta_str = ""
+        if ev.get("meta"):
+            meta_str = f"  [dim]{ev['meta']}[/]"
+        console.print(
+            f"  [dim]{_fmt_ts(ev.get('ts', ''))}[/]  "
+            f"[magenta]{ev.get('user', '?')}[/]  "
+            f"{ev.get('action', '?')}  "
+            f"[dim]{ev.get('detail', '')}[/]"
+            f"{meta_str}"
+        )
+
+
+def _view_users(style) -> None:
+    import questionary
+    from rich.table import Table
+    from iitgpu.ui import console, header, info, warn
+
+    header("User Roster")
+    data = daemonclient.view_roster()
+    users = data.get("users", [])
+    drift = data.get("drift", {})
+    db_only = set(drift.get("db_only", []))
+    os_only = set(drift.get("os_only", []))
+
+    if not users and not os_only:
+        info("No users in database (daemon may be unavailable)."); return
+
+    t = Table(show_header=True, header_style="bold cyan", show_lines=False)
+    t.add_column("Username",   style="magenta")
+    t.add_column("Full name")
+    t.add_column("Email")
+    t.add_column("Role")
+    t.add_column("Status")
+    t.add_column("Created at")
+    t.add_column("Created by")
+    t.add_column("Flags",      style="yellow")
+    for u in users:
+        flags = []
+        if u["username"] in db_only:
+            flags.append("DB-only")
+        t.add_row(
+            u["username"], u.get("full_name", ""), u.get("email", ""),
+            u["role"], u["status"], _fmt_ts(u.get("created_at", "")),
+            u.get("created_by", ""), ", ".join(flags))
+    console.print(t)
+
+    if os_only:
+        warn(f"[yellow]OS-only (in group but no DB row):[/] {', '.join(sorted(os_only))}")
+    if db_only:
+        warn(f"[yellow]DB-only (DB row but no OS group):[/] {', '.join(sorted(db_only))}")
+
+    questionary.press_any_key_to_continue("").ask()
+
+
+def _view_maillog(style) -> None:
+    import questionary
+    from iitgpu.ui import console, header, info
+
+    header("Mail Delivery Log  (/var/log/msmtp.log)")
+    lines = daemonclient.tail_maillog(lines=60)
+    if not lines:
+        info("Log empty or unavailable (check daemon + /var/log/msmtp.log).")
+    else:
+        for line in lines:
+            console.print(f"  [dim]{line}[/]")
+    questionary.press_any_key_to_continue("").ask()
+
+
+def _view_job_output(style) -> None:
+    import questionary
+    from iitgpu.ui import console, header, info, err
+
+    header("User Job Output")
+    target_user = questionary.text("Username:", style=style).ask()
+    if not target_user or not target_user.strip():
+        return
+    target_user = target_user.strip()
+    cfg = load_config()
+    jobs_base = Path(cfg.nfs_root) / cfg.jobs_subdir / target_user
+    if not jobs_base.exists():
+        info(f"No job directory for {target_user}")
+        return
+    # Collect .out/.err files
+    files = sorted(
+        f.name for jd in jobs_base.iterdir() if jd.is_dir()
+        for f in jd.iterdir()
+        if f.suffix in (".out", ".err")
+    ) if jobs_base.exists() else []
+    if not files:
+        info(f"No .out/.err files for {target_user}")
+        return
+    fname = questionary.select("Select file:", choices=files + ["Back"],
+                               style=style).ask()
+    if fname is None or fname == "Back":
+        return
+    # Find the full relative path
+    rel = None
+    for jd in jobs_base.iterdir():
+        if jd.is_dir() and (jd / fname).exists():
+            rel = f"{jd.name}/{fname}"
+            break
+    if rel is None:
+        err("File not found.")
+        return
+    good, content = daemonclient.read_job_log(target_user, rel)
+    if not good:
+        err(f"Cannot read: {content}")
+        return
+    header(f"Job output: {target_user}/{rel}")
+    console.print(content[:8000])   # first 8k chars
+    questionary.press_any_key_to_continue("").ask()
+
+
+def _view_service_health(style) -> None:
+    import questionary
+    from iitgpu.ui import console, header, info
+
+    _UNITS = ["iit-gpu-audit", "slurmctld", "slurmd", "mariadb", "slurmdbd"]
+    header("Service Health")
+    unit = questionary.select("Select service:", choices=_UNITS + ["Back"],
+                              style=style).ask()
+    if unit is None or unit == "Back":
+        return
+    good, data = daemonclient.service_status(unit)
+    if not good:
+        from iitgpu.ui import err
+        err(f"Cannot get status: {data.get('error', '?')}"); return
+    active = data.get("active", "unknown")
+    color = "green" if active == "active" else "red"
+    console.print(f"\n  [{color}]● {unit}[/]  status: [{color}]{active}[/]\n")
+    journal = data.get("journal", "")
+    if journal:
+        info("[dim]Recent journal entries:[/]")
+        for line in journal.splitlines()[-20:]:
+            console.print(f"  [dim]{line}[/]")
+    questionary.press_any_key_to_continue("").ask()
 
 
 # ── Main admin menu ───────────────────────────────────────────────────────────────
@@ -425,12 +616,16 @@ def admin_menu() -> None:
             choices=[
                 "Drain node",
                 "Resume node",
-                "List users",
                 "Provision user",
                 "Offboard user",
+                "View users",
                 "Audit log",
-                "QOS / limits",
+                "All-user job history",
                 "Cluster usage (all users)",
+                "Any user's job output",
+                "Mail delivery log",
+                "Service health",
+                "QOS / limits",
                 "Set maintenance notice",
                 "Clear maintenance notice",
                 "Back",
@@ -456,10 +651,8 @@ def admin_menu() -> None:
                     info(f"    job {j['id']}  user={j['user']}  "
                          f"name={j['name']}  [{j['state']}]")
                 cancel_running = questionary.confirm(
-                    "Cancel these jobs now? "
-                    "(force drain — node becomes DRAINED immediately)",
-                    default=False, style=style,
-                ).ask()
+                    "Cancel these jobs now? (force drain)",
+                    default=False, style=style).ask()
             else:
                 info(f"  [dim]No jobs running on {node}.[/]")
             good, msg = drain_node(node, reason.strip(), cancel_running=cancel_running)
@@ -470,63 +663,35 @@ def admin_menu() -> None:
             good, msg = resume_node(node or node_default)
             (ok if good else err)(msg)
 
-        elif choice == "List users":
-            for u in list_gpuusers():
-                console.print(f"  {u}")
-
         elif choice == "Provision user":
-            u = questionary.text("New username:", style=style).ask()
-            if not u:
-                questionary.press_any_key_to_continue("").ask()
-                continue
-            adm = questionary.confirm("Admin?", default=False, style=style).ask()
-            pw = questionary.password(
-                "Password (leave blank to set later):", style=style,
-            ).ask() or ""
-            if pw:
-                pw2 = questionary.password(
-                    "Confirm password:", style=style,
-                ).ask() or ""
-                if pw != pw2:
-                    err("Passwords do not match — user not created.")
-                    questionary.press_any_key_to_continue("").ask()
-                    continue
-            good, msg = provision_user(u.strip(), admin=adm, password=pw)
-            (ok if good else err)(msg)
-            if good and not pw:
-                info(f"[dim]Set a password: sudo passwd {u.strip()}[/]")
+            _provision_menu(style)
 
         elif choice == "Offboard user":
             u = questionary.text("Username to remove:", style=style).ask()
             if u and questionary.confirm(
                     f"Offboard {u}?", default=False, style=style).ask():
                 purge = questionary.confirm(
-                    "Purge their /shared data?", default=False, style=style,
-                ).ask()
+                    "Purge their /shared data?", default=False, style=style).ask()
                 good, msg = offboard_user(u.strip(), purge=purge)
                 (ok if good else err)(msg)
 
-        elif choice == "Audit log":
-            af = questionary.text(
-                "Filter by action (blank=all):", style=style,
-            ).ask() or ""
-            uf = questionary.text(
-                "Filter by user (blank=all):", style=style,
-            ).ask() or ""
-            events = read_audit(limit=40, action_filter=af.strip(),
-                                user_filter=uf.strip())
-            if not events:
-                info("No matching events.")
-            for ev in events:
-                console.print(
-                    f"  [dim]{_fmt_ts(ev.get('ts', ''))}[/]  "
-                    f"[magenta]{ev.get('user', '?')}[/]  "
-                    f"{ev.get('action', '?')}  "
-                    f"[dim]{ev.get('detail', '')}[/]"
-                )
+        elif choice == "View users":
+            _view_users(style)
+            continue
 
-        elif choice == "QOS / limits":
-            _qos_menu(style)
+        elif choice == "Audit log":
+            _view_audit_log(style)
+
+        elif choice == "All-user job history":
+            from iitgpu.monitor import filtered_history
+            from iitgpu.slurm import filtered_history as _fh
+            t = Table(show_header=True, header_style="bold cyan")
+            for c in ("Job ID", "User", "Name", "State", "Elapsed", "Partition"):
+                t.add_column(c)
+            for entry in (_fh(all_users=True) if hasattr(_fh, "__call__") else []):
+                t.add_row(entry.job_id, entry.user, entry.name, entry.state,
+                          entry.elapsed, entry.partition)
+            console.print(t)
 
         elif choice == "Cluster usage (all users)":
             from iitgpu.accounting import usage_by_user
@@ -538,14 +703,28 @@ def admin_menu() -> None:
                           f"{r.cpu_hours:.1f}", str(r.job_count))
             console.print(t)
 
+        elif choice == "Any user's job output":
+            _view_job_output(style)
+            continue
+
+        elif choice == "Mail delivery log":
+            _view_maillog(style)
+            continue
+
+        elif choice == "Service health":
+            _view_service_health(style)
+            continue
+
+        elif choice == "QOS / limits":
+            _qos_menu(style)
+
         elif choice == "Set maintenance notice":
             current = get_maintenance()
             if current:
                 info(f"  [yellow]Active notice:[/] {current.get('reason', '')}")
             reason = questionary.text(
                 "Maintenance reason (shown to all users on login):",
-                style=style,
-            ).ask()
+                style=style).ask()
             if reason and reason.strip():
                 import os
                 good, msg = set_maintenance(

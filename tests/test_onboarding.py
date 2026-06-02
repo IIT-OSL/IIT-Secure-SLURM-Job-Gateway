@@ -68,3 +68,60 @@ def test_user_groups_returns_set():
     from iitgpu.config import user_groups
     g = user_groups()
     assert isinstance(g, set)
+
+# ── Phase 3: three user types ──────────────────────────────────────────────────
+
+def test_adduser_shell_user_dry_run_not_in_gpuusers():
+    """--shell-user flag accepted; warning printed; gpuusers not targeted in dry-run usermod."""
+    import subprocess
+    from pathlib import Path
+    DEPLOY = Path(__file__).parent.parent / "deploy"
+    r = subprocess.run(
+        ["bash", str(DEPLOY / "iit-gpu-adduser.sh"), "testshell", "--dry-run", "--shell-user"],
+        capture_output=True, text=True,
+        env={"GPU_HOST_SSH": "x@localhost_unreachable",
+             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+             "UID_MIN": "2000", "UID_MAX": "60000",
+             "GPUUSERS_GROUP": "gpuusers"},
+    )
+    out = r.stdout + r.stderr
+    # Script prints the shell-user warning before any SSH
+    assert "not be added to" in out.lower() or "shell user" in out.lower(), \
+        f"Expected shell user warning in output, got: {out!r}"
+    # Any dry-run usermod lines must not target gpuusers
+    for line in out.splitlines():
+        if "[dry-run]" in line and "usermod" in line:
+            assert "gpuusers" not in line, \
+                f"Shell user dry-run must not add to gpuusers. Got line: {line!r}"
+
+
+def test_adduser_admin_and_shell_user_mutually_exclusive():
+    import subprocess
+    from pathlib import Path
+    DEPLOY = Path(__file__).parent.parent / "deploy"
+    r = subprocess.run(
+        ["bash", str(DEPLOY / "iit-gpu-adduser.sh"),
+         "alice", "--dry-run", "--admin", "--shell-user"],
+        capture_output=True, text=True,
+        env={"GPU_HOST_SSH": "x@y", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    assert r.returncode != 0, "should reject --admin + --shell-user together"
+    assert "mutually exclusive" in (r.stdout + r.stderr).lower()
+
+
+def test_adduser_shell_user_bash_syntax():
+    import subprocess
+    from pathlib import Path
+    DEPLOY = Path(__file__).parent.parent / "deploy"
+    r = subprocess.run(["bash", "-n", str(DEPLOY / "iit-gpu-adduser.sh")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"bash -n failed: {r.stderr}"
+
+
+def test_deluser_bash_syntax():
+    import subprocess
+    from pathlib import Path
+    DEPLOY = Path(__file__).parent.parent / "deploy"
+    r = subprocess.run(["bash", "-n", str(DEPLOY / "iit-gpu-deluser.sh")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"bash -n failed: {r.stderr}"

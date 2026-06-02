@@ -174,28 +174,18 @@ def test_run_uses_pipe_when_stdin_data_given():
 
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
-def test_read_audit_filters_by_action(tmp_path):
-    state = tmp_path / "audit.jsonl"
-    state.write_text(
-        json.dumps({"ts": "2026-05-31T10:00:00+00:00", "user": "alice",
-                    "action": "job_submit"}) + "\n" +
-        json.dumps({"ts": "2026-05-31T10:01:00+00:00", "user": "bob",
-                    "action": "job_cancel"}) + "\n"
-    )
-    with patch("iitgpu.admin.Path", return_value=state):
+def test_read_audit_filters_by_action():
+    evs_data = [{"ts": "2026-05-31T10:00:00+00:00", "user": "alice",
+                 "action": "job_submit"}]
+    with patch("iitgpu.admin.daemonclient.query_audit", return_value=evs_data):
         evs = admin.read_audit(action_filter="job_submit")
     assert len(evs) == 1 and evs[0]["user"] == "alice"
 
 
-def test_read_audit_filters_by_user(tmp_path):
-    state = tmp_path / "audit.jsonl"
-    state.write_text(
-        json.dumps({"ts": "2026-05-31T10:00:00+00:00", "user": "alice",
-                    "action": "job_submit"}) + "\n" +
-        json.dumps({"ts": "2026-05-31T10:01:00+00:00", "user": "bob",
-                    "action": "job_cancel"}) + "\n"
-    )
-    with patch("iitgpu.admin.Path", return_value=state):
+def test_read_audit_filters_by_user():
+    evs_data = [{"ts": "2026-05-31T10:01:00+00:00", "user": "bob",
+                 "action": "job_cancel"}]
+    with patch("iitgpu.admin.daemonclient.query_audit", return_value=evs_data):
         evs = admin.read_audit(user_filter="bob")
     assert len(evs) == 1 and evs[0]["action"] == "job_cancel"
 
