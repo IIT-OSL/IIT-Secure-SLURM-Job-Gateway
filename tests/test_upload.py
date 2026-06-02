@@ -374,7 +374,7 @@ class TestShowScpInstructions:
         assert '"/shared/my folder/' in out
 
     def test_data_ref_path_is_quoted(self, capsys, monkeypatch):
-        """The '--data ...' reference line must also quote the path."""
+        """The '--data ...' reference line must quote the folder path prefix."""
         monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
         cfg = self._make_cfg()
 
@@ -384,4 +384,4 @@ class TestShowScpInstructions:
             _show_scp_instructions("/shared/my folder", cfg)
 
         out = capsys.readouterr().out
-        assert '--data "/shared/my folder"' in out
+        assert '--data "/shared/my folder/<your-data>"' in out

@@ -8,7 +8,7 @@ import questionary
 from questionary import Style
 
 from iitgpu import auditclient
-from iitgpu.config import load_config
+from iitgpu.config import load_config, make_shared_writable
 from iitgpu.ui import console, ok, err, info, header
 from iitgpu.validate import in_jail
 
@@ -30,6 +30,7 @@ def _validate_folder_name(name: str) -> bool:
 def _ensure_folder(path: str) -> bool:
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
+        make_shared_writable(path)
         return os.access(path, os.W_OK)
     except OSError:
         return False
@@ -41,22 +42,40 @@ def _show_scp_instructions(folder_path: str, cfg) -> None:
     port = cfg.gateway_port
     header("Upload via SCP / rsync")
     console.print(
-        "\nOpen a [bold]new terminal on your local machine[/] and run either of these:\n"
+        "\nOpen a [bold]new terminal on your local machine[/] and run one of these.\n"
+        "[dim]Replace the example path with your actual data folder.[/]\n"
+    )
+
+    console.print("[bold]Linux / macOS[/]")
+    console.print(
+        f"  [bold cyan]scp[/]   -P {port} -r  \"/path/to/your-data\"  "
+        f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
     )
     console.print(
-        f"  [bold cyan]scp[/]   -P {port} -r  \"/path/to/local/data/\"  "
+        f"  [bold cyan]rsync[/] -avz --progress -e \"ssh -p {port}\"  "
+        f"\"/path/to/your-data/\"  [cyan]{user}@{host}:\"{folder_path}/\"[/]"
+    )
+    console.print()
+
+    console.print("[bold]Windows  (PowerShell / CMD)[/]")
+    console.print(
+        f"  [bold cyan]scp[/]   -P {port} -r  \"C:\\Users\\You\\your-data\"  "
         f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
     )
     console.print()
+
     console.print(
-        f"  [bold cyan]rsync[/] -avz --progress -e \"ssh -p {port}\"  \"/path/to/local/data/\"  "
-        f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
+        f"[dim]Your local folder becomes a sub-folder here:[/]  "
+        f"[cyan]{folder_path}[bold]/<your-data>/[/][/]"
     )
-    console.print()
-    console.print(f"[dim]Data will be stored at:[/]  [cyan]{folder_path}[/]")
     console.print(
-        "[dim]Reference this path in your job script as:[/]  "
-        f"[cyan]--data \"{folder_path}\"[/]\n"
+        "[dim]Reference it in your job script as:[/]  "
+        f"[cyan]--data \"{folder_path}/<your-data>\"[/]\n"
+    )
+    console.print(
+        "[dim]Note: paths with spaces or special characters ( ' [ ] ) must be\n"
+        "      quoted exactly as shown above.  Do not add extra quotes around\n"
+        "      the remote path on Windows — the outer \" \" are sufficient.[/]\n"
     )
     questionary.press_any_key_to_continue("Press any key when done").ask()
 
