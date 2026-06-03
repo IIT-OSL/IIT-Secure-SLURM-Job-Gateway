@@ -129,6 +129,23 @@ def in_user_upload_jail(path: str, nfs_root: str, username: str) -> bool:
         return False
     upload_root = user_upload_root(nfs_root, username)
     return real == upload_root or real.startswith(upload_root + os.sep)
+
+
+def user_job_root(nfs_root: str, username: str, jobs_subdir: str = "jobs") -> str:
+    """The user's own job workspace (shared/<jobs_subdir>/<user>) — where the job
+    wizard writes generated scripts, per-job working dirs, and stdout/stderr."""
+    return str(Path(nfs_root).resolve() / jobs_subdir / username)
+
+
+def in_user_job_jail(path: str, nfs_root: str, username: str,
+                     jobs_subdir: str = "jobs") -> bool:
+    """True when path is inside the user's own job workspace."""
+    try:
+        real = str(Path(path).resolve())
+    except (OSError, ValueError):
+        return False
+    root = user_job_root(nfs_root, username, jobs_subdir)
+    return real == root or real.startswith(root + os.sep)
 # ── Submit-spec validators (Phase 2) ──────────────────────────────────────────
 
 import re as _re
@@ -228,6 +245,7 @@ def validate_sbatch(text: str, username: str, cfg=None) -> list[str]:
         cfg = load_config()
 
     nfs_root = cfg.nfs_root
+    jobs_subdir = getattr(cfg, "jobs_subdir", "jobs")
     errors: list[str] = []
 
     for key, val in _parse_sbatch_directives(text):
@@ -236,7 +254,8 @@ def validate_sbatch(text: str, username: str, cfg=None) -> list[str]:
             val_clean = re.sub(r'%[a-zA-Z]', '0', val)
             if val_clean:
                 target = str(Path(val_clean).parent) if key != "chdir" else val_clean
-                if not in_user_upload_jail(target, nfs_root, username):
+                if not (in_user_upload_jail(target, nfs_root, username)
+                        or in_user_job_jail(target, nfs_root, username, jobs_subdir)):
                     errors.append(
                         f"--{key} path is outside your personal workspace: {val!r}"
                     )

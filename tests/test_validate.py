@@ -201,6 +201,37 @@ def test_validate_sbatch_rejects_cross_user_output(tmp_path):
         "cross-user output path must be rejected by per-user jail"
 
 
+def _job_dir(tmp_path, user="alice"):
+    """Create and return the user's own job workspace (shared/jobs/<user>)."""
+    d = tmp_path / "jobs" / user
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_validate_sbatch_accepts_user_job_dir(tmp_path):
+    """The job wizard writes to shared/jobs/<user>/... — that IS the user's own
+    workspace and must pass the path jail (regression: it was being rejected)."""
+    _user_dir(tmp_path, "alice")
+    jd = _job_dir(tmp_path, "alice") / "train_123"
+    jd.mkdir(parents=True, exist_ok=True)
+    script = f"""#!/bin/bash
+#SBATCH --output={jd}/slurm-%j.out
+#SBATCH --error={jd}/slurm-%j.err
+#SBATCH --chdir={jd}
+#SBATCH --gres=gpu:1
+"""
+    assert _v(script, tmp_path) == []
+
+
+def test_validate_sbatch_rejects_cross_user_job_dir(tmp_path):
+    """alice must not target bob's job workspace either."""
+    _job_dir(tmp_path, "alice")
+    bob = _job_dir(tmp_path, "bob") / "train_x"
+    bob.mkdir(parents=True, exist_ok=True)
+    errors = _v(f"#SBATCH --chdir={bob}\n", tmp_path, username="alice")
+    assert any("--chdir" in e for e in errors)
+
+
 def test_validate_sbatch_multiflag_bypass_blocked(tmp_path):
     """H1: a dangerous flag hidden after a benign one on the same line must be caught."""
     _user_dir(tmp_path)
