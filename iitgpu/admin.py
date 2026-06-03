@@ -168,14 +168,22 @@ def provision_user(username: str, admin: bool = False,
 
 
 def offboard_user(username: str, purge: bool = False) -> tuple[bool, str]:
+    user_record = daemonclient.get_user(username)
     cmd = ["sudo", "-n", "/usr/local/bin/iit-gpu-deluser", username]
     if purge:
         cmd.append("--purge-data")
     rc, out, err = _run(cmd, timeout=120)
     if rc == 0:
-        # Also mark offboarded in users.db (best-effort — script also calls daemoncli)
         daemonclient.offboard_user(username)
         auditclient.log("admin_offboard_user", detail=username)
+        if user_record and user_record.get("email"):
+            from threading import Thread
+            from iitgpu import mailer as _mailer
+            Thread(target=_mailer.send_offboard,
+                   args=(username,
+                         user_record["email"],
+                         user_record.get("full_name", "")),
+                   daemon=True).start()
     return (rc == 0), (out.strip() if rc == 0 else (err.strip() or "offboard failed"))
 
 
@@ -649,9 +657,43 @@ def _view_disk_usage(style) -> None:
 
 # ── Main admin menu ───────────────────────────────────────────────────────────────
 
+def _maintenance_menu(style) -> None:
+    import os
+    import questionary
+    from iitgpu.ui import info, ok, err
+    current = get_maintenance()
+    if current:
+        info(f"  [yellow]Active notice:[/] {current.get('reason', '')}")
+        action = questionary.select(
+            "Maintenance notice:",
+            choices=["Update notice", "Clear notice", "Back"],
+            style=style,
+        ).ask()
+        if action == "Clear notice":
+            if questionary.confirm("Clear the maintenance notice?",
+                                   default=True, style=style).ask():
+                good, msg = clear_maintenance()
+                (ok if good else err)(msg)
+        elif action == "Update notice":
+            reason = questionary.text(
+                "New maintenance reason:", style=style).ask()
+            if reason and reason.strip():
+                good, msg = set_maintenance(
+                    reason.strip(), set_by=os.environ.get("USER", "admin"))
+                (ok if good else err)(msg)
+    else:
+        reason = questionary.text(
+            "Maintenance reason (shown to all users on login):",
+            style=style).ask()
+        if reason and reason.strip():
+            good, msg = set_maintenance(
+                reason.strip(), set_by=os.environ.get("USER", "admin"))
+            (ok if good else err)(msg)
+
+
 def admin_menu() -> None:
     import questionary
-    from questionary import Style
+    from questionary import Style, Separator
     from rich.table import Table
     from iitgpu.ui import console, header, info, ok, err, warn
 
@@ -666,28 +708,36 @@ def admin_menu() -> None:
     while True:
         header("Admin Panel")
         choice = questionary.select(
-            "Admin action:",
+            "Select action:",
             choices=[
-                "Drain node",
-                "Resume node",
-                "Provision user",
-                "Offboard user",
-                "View users",
-                "Audit log",
-                "All-user job history",
-                "Cluster usage (all users)",
-                "Disk usage by user",
-                "Any user's job output",
-                "Mail delivery log",
-                "Service health",
-                "QOS / limits",
-                "Set maintenance notice",
-                "Clear maintenance notice",
-                "Back",
+                Separator("──  User Management  ──────────────────────────"),
+                "  Provision user",
+                "  Offboard user",
+                "  View users",
+                Separator("──  Jobs & Usage  ─────────────────────────────"),
+                "  All-user job history",
+                "  Cluster usage (all users)",
+                "  Disk usage by user",
+                "  Any user's job output",
+                Separator("──  Cluster Control  ──────────────────────────"),
+                "  Drain node",
+                "  Resume node",
+                "  QOS / limits",
+                "  Maintenance notice",
+                Separator("──  Monitoring  ───────────────────────────────"),
+                "  Audit log",
+                "  Service health",
+                "  Mail delivery log",
+                Separator("───────────────────────────────────────────────"),
+                "  Back",
             ],
             style=style,
         ).ask()
-        if choice is None or choice == "Back":
+
+        if choice is None:
+            return
+        choice = choice.strip()
+        if choice == "Back":
             return
 
         if choice == "Drain node":
@@ -762,6 +812,7 @@ def admin_menu() -> None:
                 t.add_row(r.user, f"{r.gpu_hours:.1f}",
                           f"{r.cpu_hours:.1f}", str(r.job_count))
             console.print(t)
+            questionary.press_any_key_to_continue("").ask()
 
         elif choice == "Disk usage by user":
             _view_disk_usage(style)
@@ -782,27 +833,11 @@ def admin_menu() -> None:
         elif choice == "QOS / limits":
             _qos_menu(style)
 
-        elif choice == "Set maintenance notice":
-            current = get_maintenance()
-            if current:
-                info(f"  [yellow]Active notice:[/] {current.get('reason', '')}")
-            reason = questionary.text(
-                "Maintenance reason (shown to all users on login):",
-                style=style).ask()
-            if reason and reason.strip():
-                import os
-                good, msg = set_maintenance(
-                    reason.strip(), set_by=os.environ.get("USER", "admin"))
-                (ok if good else err)(msg)
+        elif choice == "Maintenance notice":
+            _maintenance_menu(style)
 
-        elif choice == "Clear maintenance notice":
-            current = get_maintenance()
-            if not current:
-                info("No active maintenance notice.")
-            elif questionary.confirm(
-                    "Clear the maintenance notice?",
-                    default=True, style=style).ask():
-                good, msg = clear_maintenance()
-                (ok if good else err)(msg)
+        else:
+            questionary.press_any_key_to_continue("").ask()
+            continue
 
         questionary.press_any_key_to_continue("").ask()

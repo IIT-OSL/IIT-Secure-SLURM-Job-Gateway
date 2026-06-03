@@ -169,6 +169,70 @@ def send_welcome(username: str, password: str, email: str,
     _fire(email, subject, html, bcc or None)
 
 
+def send_offboard(username: str, email: str, full_name: str = "") -> None:
+    bcc          = [e for e in _admin_bcc() if e != email]
+    display_name = full_name or username
+    subject      = f"[IIT GPU Cluster] Account deactivated — {username}"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F4F4F5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F4F4F5;padding:40px 0">
+    <tr><td align="center">
+      <table width="580" cellpadding="0" cellspacing="0" style="max-width:580px;width:100%">
+
+        <tr><td bgcolor="#6B7280" style="background:#6B7280;height:4px;font-size:0;line-height:0">&nbsp;</td></tr>
+
+        <tr><td bgcolor="#111827" style="background:#111827;padding:28px 32px 26px">
+          <p style="margin:0 0 20px;color:#4B5563;font-size:11px;font-weight:600;letter-spacing:2px;text-transform:uppercase">{_CLUSTER_NAME}</p>
+          <h1 style="margin:0 0 8px;color:#F9FAFB;font-size:22px;font-weight:600;letter-spacing:-0.3px;line-height:1.3">Account Deactivated</h1>
+          <p style="margin:0;color:#9CA3AF;font-size:14px;line-height:1.6">Your IIT GPU Cluster account has been deactivated by an administrator.</p>
+        </td></tr>
+
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:28px 32px 8px">
+          <p style="margin:0 0 16px;color:#9CA3AF;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Account Details</p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Name</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;border-bottom:1px solid #F3F4F6">{display_name}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Username</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',monospace;border-bottom:1px solid #F3F4F6">{username}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Deactivated at</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',monospace;border-bottom:1px solid #F3F4F6">{_now_lk()} (GMT+5:30)</td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:4px 32px 28px">
+          <div style="margin-top:16px;border-left:3px solid #6B7280;padding:14px 18px;background:#F9FAFB">
+            <p style="margin:0;color:#374151;font-size:13px;line-height:1.7">Your SSH access and all cluster resources have been revoked. If you believe this was done in error, contact the <strong>IIT Research Team</strong>.</p>
+          </div>
+        </td></tr>
+
+        <tr><td bgcolor="#F4F4F5" style="background:#F4F4F5;padding:18px 32px;border-top:1px solid #E4E4E7">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="color:#A1A1AA;font-size:11px">{_CLUSTER_NAME}&nbsp;&middot;&nbsp;{_now_lk()} (GMT+5:30)</td>
+              <td align="right" style="color:#A1A1AA;font-size:11px;font-family:monospace">iit-gpu-manager</td>
+            </tr>
+            <tr><td colspan="2" style="padding-top:4px;color:#A1A1AA;font-size:11px">By: IIT Research Team</td></tr>
+          </table>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    _fire(email, subject, html, bcc or None)
+
+
 def send_login_notification(username: str, email: str, remote_ip: str) -> None:
     bcc     = [e for e in _admin_bcc() if e != email]
     subject = f"[IIT GPU Cluster] Login detected — {username}"
