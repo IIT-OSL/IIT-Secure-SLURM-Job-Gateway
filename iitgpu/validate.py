@@ -159,6 +159,102 @@ def clean_dependency(value: str) -> str | None:
     return v if _DEP_RE.match(v) else None
 
 
+_SBATCH_RE = re.compile(r'^#SBATCH\s+--?([\w-]+)(?:[=\s](.*))?$')
+_PATH_DIRECTIVES = {"output", "error", "chdir", "open-mode"}
+_IDENTITY_DIRECTIVES = {"uid", "gid", "get-user-env"}
+
+def validate_sbatch(text: str, username: str, cfg=None) -> list[str]:
+    """Parse a sbatch script and return a list of error strings (empty = valid).
+
+    Checks enforced:
+    - --output / --error / --chdir paths must resolve inside the NFS jail.
+    - --mail-user must be the user's own registered address (if daemon reachable).
+    - --uid / --gid / --get-user-env directives are forbidden.
+    - Resource directives outside QOS limits produce a friendly pre-flight error.
+    """
+    if cfg is None:
+        from iitgpu.config import load_config
+        cfg = load_config()
+
+    errors: list[str] = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#SBATCH"):
+            continue
+        m = _SBATCH_RE.match(line)
+        if not m:
+            continue
+        key = m.group(1).lower().rstrip("=")
+        val = (m.group(2) or "").strip().strip('"').strip("'")
+
+        # ── Path jail check ────────────────────────────────────────────────
+        if key in ("output", "error", "chdir"):
+            # Strip SLURM format specifiers (%j, %A, etc.) before resolving
+            val_clean = re.sub(r'%[a-zA-Z]', '0', val)
+            if val_clean:
+                parent = str(Path(val_clean).parent) if key != "chdir" else val_clean
+                if not in_jail(parent):
+                    errors.append(
+                        f"--{key} path is outside the allowed directory: {val!r}"
+                    )
+
+        # ── mail-user must be user's own address ───────────────────────────
+        elif key == "mail-user":
+            if val:
+                try:
+                    from iitgpu import daemonclient
+                    registered = daemonclient.email_for(username)
+                    if registered and val.strip().lower() != registered.strip().lower():
+                        errors.append(
+                            f"--mail-user must be your registered address "
+                            f"({registered}); got: {val!r}"
+                        )
+                except Exception:
+                    pass  # daemon unavailable — skip check, SLURM enforces nothing here
+
+        # ── Identity escape directives ─────────────────────────────────────
+        elif key in _IDENTITY_DIRECTIVES:
+            errors.append(
+                f"--{key} is not permitted in submitted scripts"
+            )
+
+        # ── Resource pre-flight ────────────────────────────────────────────
+        elif key in ("gres", "gpus", "gpus-per-task"):
+            try:
+                # parse "gpu:N" or plain "N"
+                n = int(val.split(":")[-1])
+                if n > MAX_GPUS:
+                    errors.append(
+                        f"--{key} requests {n} GPUs; cluster limit is {MAX_GPUS}"
+                    )
+            except (ValueError, IndexError):
+                pass
+
+        elif key == "cpus-per-task":
+            try:
+                if int(val) > MAX_CPUS:
+                    errors.append(
+                        f"--cpus-per-task {val} exceeds cluster limit of {MAX_CPUS}"
+                    )
+            except ValueError:
+                pass
+
+        elif key == "mem":
+            try:
+                unit = val[-1].upper() if val and val[-1].isalpha() else "M"
+                num  = int(val[:-1]) if val and val[-1].isalpha() else int(val)
+                mem_gb = num // 1024 if unit == "M" else num if unit == "G" else num * 1024
+                if mem_gb > MAX_MEM_GB:
+                    errors.append(
+                        f"--mem {val} exceeds cluster limit of {MAX_MEM_GB}G"
+                    )
+            except (ValueError, IndexError):
+                pass
+
+    return errors
+
+
 def validate_against_qos(gpus: int, time_limit: str, max_gpus_per_user: int = 1,
                          max_hours: int | None = None) -> tuple[bool, str]:
     """Reject out-of-policy requests before submission.

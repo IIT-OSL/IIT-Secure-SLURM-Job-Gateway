@@ -211,6 +211,123 @@ def _inline_paste(cfg, user: str) -> tuple[str | None, str | None]:
     return data_dest, script_path
 
 
+def _validate_and_show_errors(script_text: str, username: str, cfg) -> bool:
+    """Run validate_sbatch; print errors and return False if any found."""
+    from iitgpu.validate import validate_sbatch
+    from iitgpu.ui import err as _err
+    errors = validate_sbatch(script_text, username, cfg)
+    if errors:
+        for e in errors:
+            _err(f"  Script error: {e}")
+        return False
+    return True
+
+
+def _tier2_edit(script_text: str, username: str, cfg) -> str | None:
+    """Open the generated script in an editor; validate on save. Returns final text or None."""
+    import subprocess, tempfile, difflib
+    from iitgpu.ui import info, warn, err as _err
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+    while True:
+        with tempfile.NamedTemporaryFile(suffix=".sbatch", mode="w",
+                                         delete=False, prefix="iitgpu_") as tf:
+            tf.write(script_text)
+            tmpfile = tf.name
+        try:
+            subprocess.run([editor, tmpfile])
+            with open(tmpfile) as f:
+                edited = f.read()
+        except (OSError, FileNotFoundError) as exc:
+            _err(f"Editor failed ({exc}). Falling back to nano.")
+            try:
+                subprocess.run(["nano", tmpfile])
+                with open(tmpfile) as f:
+                    edited = f.read()
+            except OSError:
+                return None
+        finally:
+            try:
+                os.unlink(tmpfile)
+            except OSError:
+                pass
+
+        if not _validate_and_show_errors(edited, username, cfg):
+            import questionary
+            if not questionary.confirm("Fix errors and try again?", default=True,
+                                       style=_STYLE).ask():
+                return None
+            script_text = edited
+            continue
+
+        diff = list(difflib.unified_diff(
+            script_text.splitlines(keepends=True),
+            edited.splitlines(keepends=True),
+            fromfile="generated", tofile="edited",
+        ))
+        if diff:
+            from iitgpu import auditclient
+            auditclient.log("sbatch_edited", meta={"diff": "".join(diff[:40])})
+        return edited
+
+
+def _tier3_own_script(username: str, cfg) -> str | None:
+    """Browse to a user's .sbatch file; validate and return its content."""
+    import questionary
+    from iitgpu.validate import in_user_browse_jail, user_browse_roots, in_jail
+    from iitgpu.ui import info, err as _err
+    from iitgpu import auditclient
+
+    info("Browse to your .sbatch file (must be inside your allowed directories).")
+    roots = user_browse_roots(cfg.nfs_root, username)
+    start = roots[0] if roots else cfg.nfs_root
+    current = start
+
+    while True:
+        try:
+            entries = [e for e in os.listdir(current)
+                       if os.path.isdir(os.path.join(current, e))
+                       or e.endswith(".sbatch")]
+        except OSError:
+            _err("Cannot list directory.")
+            return None
+        choices = ["[.. up]"] + \
+                  [f"[dir] {e}" for e in sorted(entries) if os.path.isdir(os.path.join(current, e))] + \
+                  [e for e in sorted(entries) if e.endswith(".sbatch")] + \
+                  ["[cancel]"]
+        pick = questionary.select(f"Browse ({current}):", choices=choices,
+                                  style=_STYLE).ask()
+        if pick is None or pick == "[cancel]":
+            return None
+        if pick == "[.. up]":
+            parent = str(Path(current).parent)
+            if in_jail(parent):
+                current = parent
+            continue
+        if pick.startswith("[dir] "):
+            candidate = str(Path(current) / pick[6:])
+            if in_jail(candidate):
+                current = candidate
+            continue
+        # selected a .sbatch file
+        sbatch_path = str(Path(current) / pick)
+        if not in_jail(sbatch_path):
+            _err("File is outside the allowed directory.")
+            return None
+        try:
+            text = Path(sbatch_path).read_text()
+        except OSError as exc:
+            _err(f"Cannot read file: {exc}")
+            return None
+        if not _validate_and_show_errors(text, username, cfg):
+            import questionary
+            if not questionary.confirm("Select a different file?", default=True,
+                                       style=_STYLE).ask():
+                return None
+            continue
+        auditclient.log("sbatch_own_script", meta={"path": sbatch_path})
+        return text
+
+
 def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity ok for a wizard)
     cfg = load_config()
     jdir = jobs_dir(cfg)
@@ -719,7 +836,14 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
     # ── Action ────────────────────────────────────────────────────────────────
     action = questionary.select(
         "What would you like to do?",
-        choices=["Submit job", "Save as template + submit", "Save template only", "Discard"],
+        choices=[
+            "Submit job",
+            "Review & edit script, then submit",
+            "Bring your own .sbatch, then submit",
+            "Save as template + submit",
+            "Save template only",
+            "Discard",
+        ],
         style=_STYLE,
     ).ask()
 
@@ -740,6 +864,22 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
     if action == "Save template only":
         auditclient.log("job_template_saved", detail=job_name)
         return
+
+    # ── Tier 2: Review & edit script ─────────────────────────────────────────
+    if action == "Review & edit script, then submit":
+        script_text = _tier2_edit(script_text, user, cfg)
+        if script_text is None:
+            shutil.rmtree(folder, ignore_errors=True)
+            info("Discarded.")
+            return
+
+    # ── Tier 3: Bring your own .sbatch ────────────────────────────────────────
+    if action == "Bring your own .sbatch, then submit":
+        script_text = _tier3_own_script(user, cfg)
+        if script_text is None:
+            shutil.rmtree(folder, ignore_errors=True)
+            info("Discarded.")
+            return
 
     # ── Submit ────────────────────────────────────────────────────────────────
     sbatch_path = str(Path(folder) / "job.sbatch")

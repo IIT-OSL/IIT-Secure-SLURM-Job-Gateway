@@ -144,3 +144,84 @@ def test_clean_run_command_removes_control_chars():
 def test_clean_run_command_truncates_at_1000():
     from iitgpu.validate import clean_run_command
     assert len(clean_run_command("x" * 2000)) == 1000
+
+
+# ── validate_sbatch ───────────────────────────────────────────────────────────
+
+def _call(text, username="alice", nfs="/shared"):
+    import os
+    os.environ.setdefault("NFS_ROOT", nfs)
+    from iitgpu.validate import validate_sbatch
+    return validate_sbatch(text, username)
+
+
+def test_validate_sbatch_clean_script_passes(tmp_path):
+    folder = str(tmp_path)
+    script = f"""#!/bin/bash
+#SBATCH --job-name=test
+#SBATCH --output={folder}/slurm-%j.out
+#SBATCH --error={folder}/slurm-%j.err
+#SBATCH --chdir={folder}
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+python train.py
+"""
+    import os; os.environ["NFS_ROOT"] = str(tmp_path.parent)
+    from iitgpu.validate import validate_sbatch
+    errors = validate_sbatch(script, "alice")
+    assert errors == []
+
+
+def test_validate_sbatch_rejects_output_outside_jail(tmp_path):
+    script = "#SBATCH --output=/etc/malicious.out\n"
+    import os; os.environ["NFS_ROOT"] = str(tmp_path)
+    from iitgpu.validate import validate_sbatch
+    errors = validate_sbatch(script, "alice")
+    assert any("--output" in e for e in errors)
+
+
+def test_validate_sbatch_rejects_chdir_outside_jail(tmp_path):
+    script = "#SBATCH --chdir=/etc\n"
+    import os; os.environ["NFS_ROOT"] = str(tmp_path)
+    from iitgpu.validate import validate_sbatch
+    errors = validate_sbatch(script, "alice")
+    assert any("--chdir" in e for e in errors)
+
+
+def test_validate_sbatch_rejects_uid_directive(tmp_path):
+    script = "#SBATCH --uid=0\n"
+    import os; os.environ["NFS_ROOT"] = str(tmp_path)
+    from iitgpu.validate import validate_sbatch
+    errors = validate_sbatch(script, "alice")
+    assert any("--uid" in e for e in errors)
+
+
+def test_validate_sbatch_rejects_gid_directive(tmp_path):
+    script = "#SBATCH --gid=0\n"
+    import os; os.environ["NFS_ROOT"] = str(tmp_path)
+    from iitgpu.validate import validate_sbatch
+    errors = validate_sbatch(script, "alice")
+    assert any("--gid" in e for e in errors)
+
+
+def test_validate_sbatch_rejects_excess_gpus(tmp_path):
+    import os; os.environ.update({"NFS_ROOT": str(tmp_path), "MAX_GPUS": "2"})
+    import importlib, iitgpu.validate as v; importlib.reload(v)
+    errors = v.validate_sbatch("#SBATCH --gres=gpu:8\n", "alice")
+    assert any("GPU" in e for e in errors)
+
+
+def test_validate_sbatch_rejects_excess_cpus(tmp_path):
+    import os; os.environ.update({"NFS_ROOT": str(tmp_path), "MAX_CPUS": "4"})
+    import importlib, iitgpu.validate as v; importlib.reload(v)
+    errors = v.validate_sbatch("#SBATCH --cpus-per-task=32\n", "alice")
+    assert any("cpus" in e.lower() for e in errors)
+
+
+def test_validate_sbatch_no_false_positives_on_comments(tmp_path):
+    """Lines that are plain comments (not #SBATCH) must not trigger errors."""
+    import os; os.environ["NFS_ROOT"] = str(tmp_path)
+    from iitgpu.validate import validate_sbatch
+    script = "# This is a comment mentioning --uid and --gid\npython x.py\n"
+    assert validate_sbatch(script, "alice") == []
