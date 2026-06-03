@@ -38,10 +38,22 @@ print(f'    config OK | NFS_ROOT={cfg.nfs_root} | shared_user_mode={cfg.gateway_
 " || fail "Import check failed"
 ok "Import OK"
 
-# Audit daemon (if present) just needs a restart to pick up new daemon code.
+# Audit daemon — restart and VERIFY the process actually changed.
 if systemctl list-unit-files 2>/dev/null | grep -q '^iit-gpu-audit'; then
     step "Restarting iit-gpu-audit ..."
-    sudo systemctl restart iit-gpu-audit && ok "audit service restarted" || warn "audit restart failed"
+    _pid_before=$(systemctl show iit-gpu-audit --property=MainPID --value 2>/dev/null || echo 0)
+    _ts_before=$(systemctl show iit-gpu-audit --property=ExecMainStartTimestamp --value 2>/dev/null || echo "")
+    sudo systemctl restart iit-gpu-audit || fail "systemctl restart iit-gpu-audit failed"
+    sleep 1
+    _pid_after=$(systemctl show iit-gpu-audit --property=MainPID --value 2>/dev/null || echo 0)
+    _ts_after=$(systemctl show iit-gpu-audit --property=ExecMainStartTimestamp --value 2>/dev/null || echo "")
+    if [ "$_pid_after" = "0" ] || ! systemctl is-active --quiet iit-gpu-audit; then
+        fail "iit-gpu-audit failed to start after restart — check: journalctl -u iit-gpu-audit -n 20"
+    fi
+    if [ "$_pid_after" = "$_pid_before" ] && [ "$_ts_after" = "$_ts_before" ]; then
+        fail "iit-gpu-audit PID unchanged after restart (${_pid_after}) — daemon did not restart. Check sudoers and journalctl."
+    fi
+    ok "audit service restarted (PID ${_pid_before} -> ${_pid_after})"
 fi
 
 echo

@@ -441,6 +441,38 @@ def _provision_menu(style) -> None:
             err("Passwords do not match — user not created.")
             return
 
+    # ── Workspace exists check (re-provision of offboarded user) ──────────────
+    from iitgpu.config import load_config, user_dir
+    _cfg = load_config()
+    _ws = Path(user_dir(_cfg, u))
+    if _ws.exists():
+        warn(f"[yellow]Workspace already exists: {_ws}[/]")
+        _ws_choice = questionary.select(
+            "A workspace from a previous tenant exists. What should happen?",
+            choices=[
+                "Reuse existing workspace (new user inherits old files)",
+                "Wipe and recreate workspace (delete all old files)",
+                "Cancel — do not provision",
+            ],
+            style=style,
+        ).ask()
+        if _ws_choice is None or _ws_choice.startswith("Cancel"):
+            info("Provisioning cancelled.")
+            return
+        auditclient.log(
+            "workspace_decision",
+            detail=u,
+            meta={"decision": "reuse" if "Reuse" in _ws_choice else "wipe"},
+        )
+        if "Wipe" in _ws_choice:
+            import shutil
+            try:
+                shutil.rmtree(str(_ws))
+                info(f"[dim]Workspace wiped: {_ws}[/]")
+            except OSError as exc:
+                err(f"Could not wipe workspace: {exc}")
+                return
+
     good, msg = provision_user(
         u, admin=(role == "admin"), role=role, password=pw,
         email=email, full_name=full_name.strip(), notes=notes.strip())
