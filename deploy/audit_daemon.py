@@ -106,12 +106,16 @@ def _init_users_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
     conn.execute("PRAGMA journal_mode=WAL")
-    # Migrate existing DBs that predate the must_change_pw column.
-    try:
-        conn.execute("ALTER TABLE users ADD COLUMN must_change_pw INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass  # column already exists
+    # Migrate existing DBs — add columns introduced after initial schema.
+    for migration in (
+        "ALTER TABLE users ADD COLUMN must_change_pw INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_seen_ip TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            conn.execute(migration)
+            conn.commit()
+        except Exception:
+            pass  # column already exists
     conn.commit()
 
 
@@ -459,6 +463,32 @@ def _h_users_admin_emails(users_conn: sqlite3.Connection):
     return True, {"emails": [r[0] for r in rows]}, ""
 
 
+def _h_users_update_login_ip(payload: dict, peer_uid: int,
+                              users_conn: sqlite3.Connection):
+    """Record the user's login IP. Returns {"is_new_ip": bool}.
+    Accessible to the user themselves (ForceCommand runs as them).
+    """
+    username  = payload.get("username", "").strip()
+    ip        = payload.get("ip", "").strip()
+    peer_user = _uid_to_username(peer_uid) or ""
+    if not username or not ip:
+        return False, None, "username and ip required"
+    if peer_user != username and not _uid_is_admin(peer_uid):
+        return False, None, "permission denied"
+    row = users_conn.execute(
+        "SELECT last_seen_ip FROM users WHERE username=? AND status='active'",
+        (username,)
+    ).fetchone()
+    if not row:
+        return False, None, "user not found"
+    is_new = row[0] != ip
+    users_conn.execute(
+        "UPDATE users SET last_seen_ip=? WHERE username=?", (ip, username)
+    )
+    users_conn.commit()
+    return True, {"is_new_ip": is_new}, ""
+
+
 def _h_users_check_must_change_pw(payload: dict, peer_uid: int,
                                    users_conn: sqlite3.Connection):
     """Accessible to the user themselves or any admin."""
@@ -580,6 +610,9 @@ def _dispatch(verb: str, payload: dict, peer_uid: int | None,
 
     if verb == "users.admin_emails":
         return _h_users_admin_emails(users_conn)
+
+    if verb == "users.update_login_ip":
+        return _h_users_update_login_ip(payload, peer_uid, users_conn)
 
     if verb == "users.check_must_change_pw":
         return _h_users_check_must_change_pw(payload, peer_uid, users_conn)

@@ -78,6 +78,11 @@ class Config:
     gateway_port: str         # public-facing SSH port
     # Mail
     notify_mail_types: str    # SLURM --mail-type value when mail_user is set
+    mail_from: str            # "From:" address for transactional mail
+    # Cluster identity (used in emails, TUI, and open-source-safe defaults)
+    cluster_name: str         # display name, e.g. "IIT GPU Cluster"
+    cluster_location: str     # network label, e.g. "IIT-CityCampus-SpencerBuilding"
+    cluster_tz_offset: str    # UTC offset string, e.g. "+05:30"
 
 
 def _truthy(val: str) -> bool:
@@ -113,7 +118,30 @@ def load_config() -> Config:
         gateway_port=_get("GATEWAY_PORT", "22"),
         notify_mail_types=_get("NOTIFY_MAIL_TYPES",
                                "BEGIN,END,FAIL,REQUEUE,TIME_LIMIT"),
+        mail_from=_get("MAIL_FROM",
+                       "GPU Cluster <no-reply@example.com>"),
+        cluster_name=_get("CLUSTER_NAME", "IIT GPU Cluster"),
+        cluster_location=_get("CLUSTER_LOCATION",
+                               "IIT-CityCampus-SpencerBuilding"),
+        cluster_tz_offset=_get("CLUSTER_TZ_OFFSET", "+05:30"),
     )
+
+
+def cluster_tz():
+    """Return the cluster display timezone as a datetime.timezone object.
+
+    Reads CLUSTER_TZ_OFFSET from site.env (default +05:30 for Sri Lanka).
+    Format: [+|-]HH:MM
+    """
+    from datetime import timezone, timedelta
+    offset = _get("CLUSTER_TZ_OFFSET", "+05:30")
+    try:
+        sign   = -1 if offset.startswith("-") else 1
+        parts  = offset.lstrip("+-").split(":")
+        h, m   = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+        return timezone(timedelta(hours=sign * h, minutes=sign * m))
+    except Exception:
+        return timezone(timedelta(hours=5, minutes=30))
 
 
 def user_dir(cfg: "Config", username: str) -> str:

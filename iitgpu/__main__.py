@@ -130,7 +130,11 @@ def main() -> None:
         try:
             from iitgpu import daemonclient, mailer
             _email = daemonclient.email_for(_login_user)
-            if _email:
+            if not _email:
+                return
+            # Only notify on new/unseen source IP to avoid flooding on repeat logins.
+            _is_new_ip = daemonclient.update_login_ip(_login_user, _remote_ip or "local")
+            if _is_new_ip:
                 mailer.send_login_notification(_login_user, _email, _remote_ip)
         except Exception:
             pass

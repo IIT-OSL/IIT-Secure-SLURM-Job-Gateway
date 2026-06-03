@@ -22,7 +22,14 @@ from iitgpu.config import load_config, is_admin
 from iitgpu import daemonclient
 
 # Sri Lanka Standard Time = UTC+5:30
-_LK = timezone(timedelta(hours=5, minutes=30))
+def _cluster_tz():
+    try:
+        from iitgpu.config import cluster_tz
+        return cluster_tz()
+    except Exception:
+        return timezone(timedelta(hours=5, minutes=30))
+
+_LK = _cluster_tz()
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 

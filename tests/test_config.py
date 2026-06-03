@@ -11,6 +11,10 @@ def _cfg(**over):
         shared_user="daham", gateway_shared_user=False,
         gateway_host="localhost", gateway_port="22",
         notify_mail_types="BEGIN,END,FAIL,REQUEUE,TIME_LIMIT",
+        mail_from="no-reply@example.com",
+        cluster_name="Test Cluster",
+        cluster_location="Test Location",
+        cluster_tz_offset="+05:30",
     )
     base.update(over)
     return Config(**base)
