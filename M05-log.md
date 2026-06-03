@@ -2,328 +2,158 @@
 
 **Date:** 2026-06-03
 **Author:** Daham Dissanayake
-**Scope:** Two-session document. Session A covered the Resend SMTP pipeline,
-branded HTML job notifications, `/shared/users/` storage restructure, and
-per-user file jail. Session B (this document's additions) covers the full
-transactional mail service (`iitgpu/mailer.py`), admin panel reorganisation,
-user lifecycle email notifications, timezone hardening, and user-management
-bug fixes. **Builds on:** M04 (definitive architecture reference).
-**Tests:** 450 passing (unchanged — all new code covered by existing suite).
+**Status:** Deployed on `main` (commit `d4d223a`) · live at `/opt/iit-gpu/` on the login node (192.168.122.10)
+**Tests:** 510 passing — `PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q`
 **Repo:** `https://github.com/DahamDissanayake/IIT-Secure-SLURM-Job-Gateway`
-**Deployed at:** `/opt/iit-gpu/` on login node (192.168.122.10)
+**Builds on:** M04 (definitive architecture reference)
+
+This is a clean, consolidated milestone document. It supersedes the earlier
+session-by-session draft and describes the system **as it is deployed today**,
+including the latest change — the **admin mail-privacy fix** that stops admins
+being BCC'd on user-facing mail and gives them their own dedicated
+"new user created" notice instead.
 
 ---
 
 ## Table of Contents
 
-1. [Session A — What Was Already Here](#1-session-a--what-was-already-here)
-2. [Session B — Changes Overview](#2-session-b--changes-overview)
-3. [Bug Fixes](#3-bug-fixes)
-4. [Timezone Hardening — GMT+5:30 Everywhere](#4-timezone-hardening--gmt530-everywhere)
-5. [Transactional Mail Service — iitgpu/mailer.py](#5-transactional-mail-service--iitgpumailerpy)
-6. [Mail Architecture — Full Picture](#6-mail-architecture--full-picture)
-7. [User Management — Lifecycle Hardening](#7-user-management--lifecycle-hardening)
+1. [What This Milestone Delivers](#1-what-this-milestone-delivers)
+2. [Admin Mail Privacy — The Latest Fix](#2-admin-mail-privacy--the-latest-fix)
+3. [Mail Architecture — Full Picture](#3-mail-architecture--full-picture)
+4. [Transactional Mail Service — iitgpu/mailer.py](#4-transactional-mail-service--iitgpumailerpy)
+5. [User Management — Lifecycle Hardening](#5-user-management--lifecycle-hardening)
+6. [Bug Fixes](#6-bug-fixes)
+7. [Timezone Hardening — GMT+5:30 Everywhere](#7-timezone-hardening--gmt530-everywhere)
 8. [Admin Panel Redesign](#8-admin-panel-redesign)
 9. [System Fix — gpusync adm Group](#9-system-fix--gpusync-adm-group)
-10. [Architecture Delta — How the System Changed](#10-architecture-delta--how-the-system-changed)
-11. [Session A Reference](#11-session-a-reference)
-12. [Commits This Session](#12-commits-this-session)
+10. [Architecture Delta](#10-architecture-delta)
+11. [Daemon Verb Reference](#11-daemon-verb-reference)
+12. [Commits](#12-commits)
 13. [Active State](#13-active-state)
 
 ---
 
-## 1. Session A — What Was Already Here
+## 1. What This Milestone Delivers
 
-At the start of Session B the following were fully deployed on `main`:
-
-| Area | State |
-|------|-------|
-| SLURM 25.11.2 | `slurmctld` + `slurmd` active |
-| Resend SMTP | `msmtp` wired, `MailProg=/usr/local/bin/iit-gpu-mailer` |
-| HTML job mailer | 6 event types, dark-header design, Resend API + msmtp fallback |
-| `iit-gpu-audit` | Unix socket daemon, SO_PEERCRED identity, SQLite |
-| Per-user file jail | browse `users/<u>/` + models + envs; upload to `users/<u>/` only |
-| `/shared/users/` | all user workspaces under this prefix |
-| Admin panel (v1) | flat 15-item list — no grouping |
-| 450 tests | passing on `main` (commit `2966aa3`) |
-
----
-
-## 2. Session B — Changes Overview
-
-| Area | Change |
-|------|--------|
-| Bug | `entry.elapsed` → `entry.time_used` in All-user job history |
-| Bug | Re-provision of an offboarded username caused UNIQUE constraint crash |
-| Bug | Mail delivery log panel returned empty (daemon lacked `adm` group) |
-| Timezone | Job folder timestamps and data file names now use GMT+5:30 |
-| Mail service | New `iitgpu/mailer.py` — welcome, login notification, offboard emails |
-| Mail service | All transactional emails BCC admin users |
-| Mail service | SLURM job emails (`iit-gpu-mailer`) also BCC admin users |
-| Daemon | New verb `users.admin_emails` — returns admin email list |
-| User lifecycle | Welcome email with credentials + SSH instructions on account creation |
-| User lifecycle | Login notification email on every TUI session start |
-| User lifecycle | Offboard notification email when account is deactivated |
-| User lifecycle | Re-provision of offboarded usernames now works correctly (upsert) |
-| Admin panel | Grouped into 4 sections with visual separators |
-| Admin panel | Maintenance notice merged into one smart entry (set/update/clear) |
+| Area | Outcome |
+|------|---------|
+| Transactional mail | `iitgpu/mailer.py` — welcome, login, offboard, and admin "new user created" notice |
+| Mail privacy | User-facing mail goes **only to the user**; admins are never silently BCC'd |
+| Admin notification | Dedicated "new user created" email sent **directly to each admin**, no credentials |
+| Daemon mail relay | `mail.send` verb holds the Resend API key; clients never see it (C1) |
+| Anti-relay | Non-admin callers can only mail their own registered address |
+| Login dedup | New-IP login notices deduplicated server-side in the daemon (M3) |
+| User lifecycle | Welcome on create, login notice per session, offboard notice on deactivate |
+| Re-provisioning | Offboarded usernames can be re-created (upsert, no UNIQUE crash) |
+| Timezone | All user-visible timestamps/filenames use GMT+5:30 |
+| Admin panel | Grouped 4-section menu with separators; consolidated maintenance entry |
+| System | `gpusync` added to `adm` so the daemon can read `/var/log/msmtp.log` |
+| Resilience | Resend API requests carry a `User-Agent` (avoids Cloudflare 1010 block) |
 
 ---
 
-## 3. Bug Fixes
+## 2. Admin Mail Privacy — The Latest Fix
 
-### 3.1 All-user job history crash — `entry.elapsed`
+### Symptom
 
-**Symptom:**
-```
-✘  Unexpected error: 'QueueEntry' object has no attribute 'elapsed'
-```
+When a new account (`dahamedge`) was created, **all** admins (`dahamadmin`,
+`indrajith`) received copies of the account's mail — not just a heads-up, but the
+user-facing welcome/credential flow itself.
 
-**Root cause:** `admin.py:745` referenced `entry.elapsed` but `QueueEntry`
-(defined in `slurm.py:45`) has always named the field `time_used`. The attribute
-name was never `elapsed` — a stale reference introduced when the admin panel was written.
+### Root cause
 
-**Fix:** `iitgpu/admin.py`
-```python
-# Before
-t.add_row(entry.job_id, entry.user, entry.name, entry.state,
-          entry.elapsed, entry.partition)
-# After
-t.add_row(entry.job_id, entry.user, entry.name, entry.state,
-          entry.time_used, entry.partition)
-```
-Commit: `70f225f`
-
----
-
-### 3.2 Mail delivery log panel always empty
-
-**Symptom:** Admin → Mail delivery log showed:
-```
-Log empty or unavailable (check daemon + /var/log/msmtp.log).
-```
-even though `/var/log/msmtp.log` had entries.
-
-**Root cause:** `/var/log/msmtp.log` is owned `root:adm 640`. The audit daemon
-runs as `gpusync` (UID 997). `gpusync` was not in the `adm` group, so every
-`Path(log_path).read_text()` call raised `PermissionError`. The handler caught
-it as `OSError` and returned an empty list, which triggered the "Log empty" message.
-
-**Fix (system-level):**
-```bash
-sudo usermod -aG adm gpusync
-sudo systemctl restart iit-gpu-audit
-```
-
-See §9 for full analysis.
-
----
-
-### 3.3 Re-provisioning an offboarded username — UNIQUE constraint
-
-**Symptom:**
-```
-⚠  user DB record failed: UNIQUE constraint failed: users.username
-```
-
-**Root cause:** `_h_users_create` did a plain `INSERT`. Offboarding only sets
-`status='offboarded'` — it does not delete the row. The UNIQUE constraint on
-`username` prevented a second INSERT for the same username.
-
-**Fix:** `deploy/audit_daemon.py` — `_h_users_create` now checks first:
+The audit daemon's `mail.send` handler (`_h_mail_send`) auto-added **every active
+admin as BCC to every email sent by an admin/root caller** whenever no explicit
+BCC was supplied:
 
 ```python
-existing = users_conn.execute(
-    "SELECT status FROM users WHERE username=?", (username,)
-).fetchone()
-if existing:
-    if existing[0] != "offboarded":
-        return False, None, f"user '{username}' already exists and is active"
-    users_conn.execute(
-        "UPDATE users SET uid=?,full_name=?,email=?,role=?,status='active',"
-        "created_at=?,created_by=?,notes=? WHERE username=?",
-        (uid_val, full_name, email, role, now, peer_user, notes, username),
-    )
+# deploy/audit_daemon.py — BEFORE
 else:
-    users_conn.execute("INSERT INTO users (...) VALUES (...)", ...)
-users_conn.commit()
+    if not to:
+        return False, None, "recipient required"
+    if not bcc:
+        rows = users_conn.execute(
+            "SELECT email FROM users WHERE role='admin' AND status='active' "
+            "AND email != ''").fetchall()
+        bcc = [r[0] for r in rows if r[0] != to]
 ```
 
-**Behaviour after fix:**
+Because account provisioning runs as an admin/root caller, the welcome email — and
+login notices, and offboard notices — were all silently copied to every admin. The
+mailer functions even passed `bcc=None` *intending* privacy, but the daemon
+overrode that intent.
 
-| Scenario | Result |
-|----------|--------|
-| New username | `INSERT` — unchanged |
-| Offboarded username | `UPDATE` — row restored to `active` with new details |
-| Active username | Rejected: `user 'X' already exists and is active` |
+### Fix
 
-Commit: `c4204ad`
+Two coordinated changes:
 
-**Note on daemon restart:** The fix was deployed but the running daemon was not
-automatically restarted because `tail -6` on the deploy output hid the restart step
-result, and the daemon remained at its old PID. Manually restarted:
-```bash
-sudo systemctl restart iit-gpu-audit
-# ExecMainStartTimestamp: 08:01:55 UTC (confirmed post-fix)
+**1. Daemon stops auto-BCCing admins** (`deploy/audit_daemon.py`):
+
+```python
+# AFTER
+else:
+    if not to:
+        return False, None, "recipient required"
+    # No auto-BCC: admins are notified via dedicated emails, never by silently
+    # copying them on user-facing mail. Only an explicit bcc (if any) is sent.
+
+ok_send, msg = _resend_send(to, subject, html, bcc or None)
 ```
+
+User-facing mail (welcome, login, offboard) now goes **only to its recipient**.
+An explicitly supplied BCC is still honoured, so the relay is not crippled.
+
+**2. Admins get their own dedicated notice** (`iitgpu/mailer.py` +
+`iitgpu/admin.py`). A new email is sent **directly to each admin** — only when a
+user is created, carrying **no password and no credentials**:
+
+```python
+# iitgpu/mailer.py
+def send_user_created_admin_notice(admin_email, username, email,
+                                   full_name="", role="", created_by=""):
+    """Admins' OWN email — sent to each admin directly, fired only on user
+    creation. No credentials: just who was created, by whom, and when."""
+    ...
+    return _send_sync(admin_email, subject, html, bcc=None, kind="admin_notice")
+```
+
+```python
+# iitgpu/admin.py — provision_user(), after the user's welcome email
+try:
+    from iitgpu import mailer as _mailer
+    created_by  = getpass.getuser()
+    admin_addrs = [a for a in daemonclient.admin_emails() if a]
+    for _addr in admin_addrs:
+        _mailer.send_user_created_admin_notice(
+            _addr, username, email, full_name, notice_role, created_by)
+    # ... audit log "admin_notice_sent"
+except Exception as exc:          # best-effort: never block provisioning
+    auditclient.log("mail_failed", detail=f"admin_notice:{username}", ...)
+```
+
+### Result
+
+| Email | Before | After |
+|-------|--------|-------|
+| Welcome / credentials | To user **+ BCC all admins** | **To user only** |
+| Login notification | To user **+ BCC all admins** | **To user only** |
+| Offboard notice | To user **+ BCC all admins** | **To user only** |
+| New user created | *(did not exist)* | **To each admin directly — no credentials, on creation only** |
+
+The "new user created" notice contains: name, username, email, role, created-by,
+and timestamp. The initial password is never emailed — it is still handed to the
+user in person, exactly as the welcome email instructs.
+
+> **Scope note:** SLURM job-lifecycle emails (`iit-gpu-mailer`, Path A in §3)
+> still BCC admins — that path builds its own recipient list and does not go
+> through `mail.send`. That behaviour is left intentionally for ops visibility;
+> if admins should also be removed from job-event BCC, that is a follow-up.
+
+Commit: `d4d223a`
 
 ---
 
-## 4. Timezone Hardening — GMT+5:30 Everywhere
-
-### Problem
-
-The login node's system clock is `Etc/UTC`. Python's `datetime.now()` (naive)
-therefore returns UTC. Two places stamped user-visible paths with naive `now()`,
-making folder names appear 5 h 30 min in the past.
-
-### Audit timestamps — already correct, no change
-
-`auditclient.py` stores `datetime.now(timezone.utc).isoformat()` — UTC ISO-8601.
-`admin.py`'s `_fmt_ts()` converts on every display:
-
-```python
-_LK = timezone(timedelta(hours=5, minutes=30))
-
-def _fmt_ts(ts_str: str) -> str:
-    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-    return dt.astimezone(_LK).strftime("%Y-%m-%d %H:%M:%S")
-```
-
-Audit log, user table "Created at", job history timestamps all already showed GMT+5:30.
-
-### Fixed: job folder names (`iitgpu/jobs.py`)
-
-```python
-# Before
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-# After
-from datetime import timezone, timedelta
-_LK = timezone(timedelta(hours=5, minutes=30))
-timestamp = datetime.now(_LK).strftime("%Y%m%d_%H%M%S")
-```
-
-Users see `finetune_20260603_154500` (LK) not `finetune_20260603_100000` (UTC).
-
-### Fixed: inline-paste data files (`iitgpu/wizard.py`)
-
-Same pattern — `datetime.now(_LK)` for the `ts_inline.txt` filename.
-
-### Rule going forward
-
-| Usage | Pattern | Reason |
-|-------|---------|--------|
-| Storage / DB timestamps | `datetime.now(timezone.utc).isoformat()` | Unambiguous; convertible to any tz |
-| Displayed timestamps | `dt.astimezone(_LK).strftime(...)` | GMT+5:30 for Sri Lanka |
-| User-visible filenames | `datetime.now(_LK).strftime(...)` | Direct LK timestamp |
-
-Commit: `a498570`
-
----
-
-## 5. Transactional Mail Service — iitgpu/mailer.py
-
-### Overview
-
-New module `iitgpu/mailer.py` handles all non-SLURM transactional emails.
-Runs within the Python process using `curl` → Resend HTTP API (same transport
-as `iit-gpu-mailer`). Every send is non-blocking (background `daemon=True` thread).
-
-### Design principles
-
-- **Non-blocking:** every send goes into a background thread — the TUI never
-  waits for network I/O.
-- **BCC admins:** every email BCC's all active admin-role users from `users.db`
-  (fetched live via `users.admin_emails`). The recipient is excluded from their
-  own BCC entry.
-- **Fail-silent:** network errors go to stderr; the caller never sees an exception.
-  A missing email address silently skips the notification.
-- **GMT+5:30 timestamps:** all displayed times use the `_LK` timezone constant.
-
-### Public API
-
-```python
-send_welcome(username, password, email, full_name="")
-send_login_notification(username, email, remote_ip)
-send_offboard(username, email, full_name="")
-```
-
-### Internal helpers
-
-```python
-_send(to, subject, html, bcc=None)   # curl → api.resend.com/emails
-_fire(to, subject, html, bcc=None)   # Thread(target=_send, daemon=True).start()
-_admin_bcc()                          # daemonclient.admin_emails() → list[str]
-_resend_key()                         # env RESEND_API_KEY > site.env > hardcoded default
-```
-
-### Welcome email — triggered by `provision_user()`
-
-Sent only when all three conditions hold: OS account created, DB record written,
-and password set successfully (`ok_pw == True`).
-
-```python
-if email and password and ok_pw:
-    Thread(target=_mailer.send_welcome,
-           args=(username, password, email, full_name),
-           daemon=True).start()
-```
-
-**Content:**
-- Username, password (plaintext), SSH command: `ssh -p 2225 username@10.35.4.100`
-- Network restriction notice (blue border): IIT-CityCampus-SpencerBuilding only
-- Security notice (red border): do not share credentials, all activity is monitored
-- Numbered getting-started steps
-- "Contact IIT Research Team" help block
-
-**Subject:** `[IIT GPU Cluster] Your account is ready — <username>`
-**Accent:** Blue `#3B82F6`
-
-### Login notification — triggered by `__main__.main()`
-
-Fires in a background thread immediately after the `session_start` audit event.
-Does not delay the splash screen.
-
-```python
-_login_user = getpass.getuser()
-_remote_ip  = os.environ.get("SSH_CLIENT", "").split()[0]
-
-def _fire_login_notification():
-    email = daemonclient.email_for(_login_user)
-    if email:
-        mailer.send_login_notification(_login_user, email, _remote_ip)
-
-Thread(target=_fire_login_notification, daemon=True).start()
-```
-
-Source IP is extracted from `$SSH_CLIENT` (set by sshd: `client_ip srcport dstport`).
-
-**Content:** Username, timestamp (GMT+5:30), source IP.
-**Subject:** `[IIT GPU Cluster] Login detected — <username>`
-**Accent:** Green `#22C55E`
-
-### Offboard notification — triggered by `offboard_user()`
-
-The user record is fetched **before** `iit-gpu-deluser` runs (the row is needed
-for email and full name; it will be marked `offboarded` but not deleted):
-
-```python
-user_record = daemonclient.get_user(username)
-# ... run iit-gpu-deluser ...
-if rc == 0 and user_record and user_record.get("email"):
-    Thread(target=_mailer.send_offboard,
-           args=(username, user_record["email"], user_record.get("full_name", "")),
-           daemon=True).start()
-```
-
-**Content:** Name, username, deactivation timestamp. "Contact IIT Research Team
-if in error" note.
-**Subject:** `[IIT GPU Cluster] Account deactivated — <username>`
-**Accent:** Grey `#6B7280`
-
----
-
-## 6. Mail Architecture — Full Picture
+## 3. Mail Architecture — Full Picture
 
 ### Two parallel mail paths
 
@@ -335,7 +165,7 @@ Job reaches terminal state
   → iit-gpu-mailer -s "SLURM Job_id=N Name=X Ended ..." user@email
       ├── parse subject → extract job_id, event type
       ├── sacct -j <job_id> → live details
-      ├── query /run/iit-gpu/audit.sock  →  users.admin_emails  →  BCC list
+      ├── query /run/iit-gpu/audit.sock → users.admin_emails → BCC list
       ├── build HTML
       └── curl POST api.resend.com/emails  (to: user, bcc: admins)
           fallback: /usr/bin/msmtp (plain text, no BCC)
@@ -343,43 +173,40 @@ Job reaches terminal state
 
 Events: `STARTED` · `ENDED` · `FAILED` · `TIMEOUT` · `REQUEUED` · `OOM`
 
-**Path B — User lifecycle (`iitgpu/mailer.py`)**
+**Path B — User lifecycle (`iitgpu/mailer.py` → daemon `mail.send`)**
 
 ```
-Account created  →  provision_user()  →  Thread  →  send_welcome()
-                                               →  Resend API  →  user + BCC admins
+Account created  →  provision_user()
+                      ├─ Thread → send_welcome()            → user only
+                      └─ send_user_created_admin_notice()   → each admin (no creds)
 
-User logs in     →  __main__.main()   →  Thread  →  send_login_notification()
-                                               →  Resend API  →  user + BCC admins
+User logs in     →  __main__.main()
+                      └─ send_login_notification()          → user only (new-IP dedup)
 
-Account removed  →  offboard_user()   →  Thread  →  send_offboard()
-                                               →  Resend API  →  user + BCC admins
+Account removed  →  offboard_user()
+                      └─ send_offboard()                    → user only
 ```
 
-### BCC mechanism
+The Resend API key lives **only on the daemon** (`secrets.env`, `0640 root:gpusync`).
+No user or admin process reads it; clients hand the built message to the daemon's
+`mail.send` verb, which enforces the trust model below.
 
-Both paths query the same daemon verb:
+### `mail.send` trust model (daemon `_h_mail_send`)
 
-```
-any caller → /run/iit-gpu/audit.sock  (srwxrwxrwx — world-writable)
-  → verb: users.admin_emails
-  → _h_users_admin_emails():
-      SELECT email FROM users
-      WHERE role='admin' AND status='active' AND email != ''
-  → returns: list[str]
-```
-
-`users.admin_emails` is a **public verb** (no admin-group check on the socket).
-This is required because `iit-gpu-mailer` runs as `slurmctld`'s system user,
-which is not a `gpuusers` member.
+| Caller | Recipient | BCC | Notes |
+|--------|-----------|-----|-------|
+| admin / root | any `to` | only an **explicit** bcc | **No auto-BCC of admins** |
+| non-admin | forced to caller's own registered address | stripped | anti-relay (C1/M2) |
+| `kind="login"` | self | — | server-side new-IP dedup (M3) |
 
 ### Complete email matrix
 
 | Email | Trigger | To | BCC | Accent |
 |-------|---------|-----|-----|--------|
-| Welcome / credentials | Account created | New user | All admins | Blue |
-| Login detected | Every TUI `session_start` | User | All admins | Green |
-| Account deactivated | Offboard | User | All admins | Grey |
+| Welcome / credentials | Account created | New user | — | Blue |
+| **New user created** | Account created | **Each admin** | — | **Violet** |
+| Login detected | Every TUI `session_start` (new IP) | User | — | Green |
+| Account deactivated | Offboard | User | — | Grey |
 | Job started | SLURM BEGIN | Job owner | All admins | Blue |
 | Job completed | SLURM END (COMPLETED) | Job owner | All admins | Green |
 | Job failed | SLURM FAIL | Job owner | All admins | Red |
@@ -387,32 +214,77 @@ which is not a `gpuusers` member.
 | Job OOM | SLURM OOM | Job owner | All admins | Red |
 | Job requeued | SLURM REQUEUE | Job owner | All admins | Purple |
 
-All emails share the same visual template:
-4 px accent top bar · dark header `#111827` · white content `#FFFFFF` ·
-monospace detail table · footer with LK timestamp and "By: IIT Research Team".
+All emails share the visual template: 4 px accent top bar · dark header `#111827` ·
+white content `#FFFFFF` · monospace detail table · footer with LK timestamp and
+"By: IIT Research Team".
 
 ---
 
-## 7. User Management — Lifecycle Hardening
+## 4. Transactional Mail Service — iitgpu/mailer.py
 
-### Full user lifecycle (after Session B)
+### Design principles
+
+- **Key never leaves the daemon:** `mailer.py` contains no API key and does no
+  HTTP. Every send routes through `_daemon_mail` → `mail.send` (C1).
+- **Privacy by default:** user-facing mail is addressed only to the user. Admins
+  are informed through their own dedicated emails, never by silent BCC.
+- **Non-blocking where safe:** login notices fire on a background thread; welcome
+  and offboard are synchronous so their success/failure is reported to the admin.
+- **Fail-closed for credentials:** if the welcome email fails, the admin is told to
+  hand credentials in person; provisioning is never silently assumed to be mailed.
+- **GMT+5:30 timestamps:** all displayed times use the `_LK` timezone constant.
+
+### Public API
+
+```python
+send_welcome(username, email, full_name="")                       -> (ok, msg)
+send_login_notification(username, email, remote_ip)               -> None  (fire-and-forget)
+send_offboard(username, email, full_name="")                      -> (ok, msg)
+send_user_created_admin_notice(admin_email, username, email,
+                               full_name="", role="", created_by="") -> (ok, msg)
+```
+
+> Note: `send_welcome` has **no password parameter** — the initial password is
+> never emailed. The welcome mail tells the user the admin will provide it in person.
+
+### Internal helpers
+
+```python
+_daemon_mail(to, subject, html, bcc=None, kind="generic", ip="")  # → daemon mail.send
+_send_sync(to, subject, html, bcc=None, kind="generic")           # must-deliver, returns (ok,msg)
+_fire(to, subject, html, bcc=None, kind="generic", ip="")         # background thread
+```
+
+### Email kinds
+
+| `kind` | Email | Recipient handling on daemon |
+|--------|-------|------------------------------|
+| `welcome` | Account ready | admin caller → to user, no BCC |
+| `admin_notice` | New user created | admin caller → to one admin, no BCC |
+| `login` | Login detected | forced to self; new-IP dedup |
+| `offboard` | Account deactivated | admin caller → to user, no BCC |
+
+---
+
+## 5. User Management — Lifecycle Hardening
+
+### Full user lifecycle
 
 ```
 Admin → "Provision user"
   → _provision_menu(): username, role, full name, email, notes, password
   → provision_user()
       ├── iit-gpu-adduser  (OS user both nodes, SLURM assoc, /shared/users/<u>/)
-      ├── daemonclient.create_user()
-      │       → daemon _h_users_create() [upsert if offboarded]
+      ├── daemonclient.create_user()  → daemon _h_users_create() [upsert if offboarded]
       ├── auditclient.log("admin_provision_user")
       ├── set_user_password() via chpasswd
-      └── Thread → mailer.send_welcome()           ← NEW
+      ├── Thread → mailer.send_welcome()                  → user only
+      └── mailer.send_user_created_admin_notice() × admins → each admin (no creds)
 
-User logs in via SSH
-  → ForceCommand: iit-gpu-manager
+User logs in via SSH (ForceCommand: iit-gpu-manager)
   → __main__.main()
       ├── auditclient.log("session_start")
-      └── Thread → mailer.send_login_notification() ← NEW
+      └── mailer.send_login_notification()                → user only (new-IP only)
 
 Admin → "Offboard user"
   → daemonclient.get_user()  [fetch record BEFORE deletion]
@@ -420,17 +292,24 @@ Admin → "Offboard user"
       ├── iit-gpu-deluser (removes OS user, SLURM assoc, optionally purges /shared)
       ├── daemonclient.offboard_user() → UPDATE status='offboarded'
       ├── auditclient.log("admin_offboard_user")
-      └── Thread → mailer.send_offboard()           ← NEW
+      └── mailer.send_offboard()                          → user only
 ```
 
-### Daemon verb changes
+### Re-provisioning an offboarded username (upsert)
 
-| Verb | Change | Auth |
-|------|--------|------|
-| `users.create` | Upserts if existing row is `offboarded` | Admin |
-| `users.admin_emails` | New — returns list of admin emails | **Public** |
+Offboarding sets `status='offboarded'` — it does not delete the row, so a plain
+`INSERT` on re-creation hit the `username` UNIQUE constraint. `_h_users_create`
+now checks first:
 
-### Users DB schema (unchanged)
+| Scenario | Result |
+|----------|--------|
+| New username | `INSERT` |
+| Offboarded username | `UPDATE` — row restored to `active` with new details |
+| Active username | Rejected: `user 'X' already exists and is active` |
+
+The previous tenure's audit trail is preserved independently in `audit_events`.
+
+### Users DB schema
 
 ```sql
 CREATE TABLE users (
@@ -442,196 +321,138 @@ CREATE TABLE users (
     status     TEXT NOT NULL CHECK (status IN ('active','offboarded')),
     created_at TEXT NOT NULL,
     created_by TEXT NOT NULL,
-    notes      TEXT NOT NULL DEFAULT ''
+    notes      TEXT NOT NULL DEFAULT '',
+    must_change_pw INTEGER NOT NULL DEFAULT 0
 );
 ```
 
-On re-provision of an offboarded username: all fields except `username` are
-overwritten. `created_at` resets to re-provision time, `created_by` to the
-acting admin. The audit trail for the previous tenure is preserved in the
-`audit_events` table independently.
+---
+
+## 6. Bug Fixes
+
+### 6.1 Admin BCC leak on user-facing mail
+See §2. Daemon no longer auto-BCCs admins; dedicated admin notice added. (`d4d223a`)
+
+### 6.2 All-user job history crash — `entry.elapsed`
+`admin.py` referenced `entry.elapsed`; `QueueEntry` only ever had `time_used`.
+Renamed the reference. (`70f225f`)
+
+### 6.3 Mail delivery log panel always empty
+`/var/log/msmtp.log` is `root:adm 640`; the daemon (`gpusync`) was not in `adm`, so
+reads raised `PermissionError` (caught as empty). Fixed by adding `gpusync` to `adm`
+(see §9).
+
+### 6.4 Re-provisioning an offboarded username — UNIQUE constraint
+`_h_users_create` now upserts (see §5). (`c4204ad`)
+
+### 6.5 Resend blocked by Cloudflare (1010)
+Resend API requests now send a `User-Agent: iit-gpu-mailer/1.0` header in both
+`deploy/audit_daemon.py` (`_resend_send`) and `deploy/iit-gpu-mailer`
+(`send_resend`). (`ada8872`)
+
+---
+
+## 7. Timezone Hardening — GMT+5:30 Everywhere
+
+The login node's clock is `Etc/UTC`, so naive `datetime.now()` returns UTC. Two
+places stamped user-visible paths with naive `now()`, making folder names look
+5 h 30 m in the past.
+
+| Usage | Pattern | Reason |
+|-------|---------|--------|
+| Storage / DB timestamps | `datetime.now(timezone.utc).isoformat()` | Unambiguous; convertible |
+| Displayed timestamps | `dt.astimezone(_LK).strftime(...)` | GMT+5:30 for Sri Lanka |
+| User-visible filenames | `datetime.now(_LK).strftime(...)` | Direct LK timestamp |
+
+Fixed: job folder names (`iitgpu/jobs.py`) and inline-paste data files
+(`iitgpu/wizard.py`) now use `_LK = timezone(timedelta(hours=5, minutes=30))`.
+Audit timestamps were already stored as UTC ISO-8601 and converted on display via
+`_fmt_ts()`. (`a498570`)
 
 ---
 
 ## 8. Admin Panel Redesign
 
-### Before (v1) — flat 15-item list
-
-All actions were presented as a single unsorted list. Unrelated operations
-(drain a node vs. view an audit log vs. provision a user) appeared adjacent
-with no visual grouping.
-
-### After (v2) — 4 grouped sections with separators
+Flat 15-item list → 4 grouped sections with `questionary.Separator` dividers:
 
 ```
-? Select action:
-──  User Management  ──────────────────────────
-  Provision user
-  Offboard user
-  View users
-──  Jobs & Usage  ─────────────────────────────
-  All-user job history
-  Cluster usage (all users)
-  Disk usage by user
-  Any user's job output
-──  Cluster Control  ──────────────────────────
-  Drain node
-  Resume node
-  QOS / limits
-  Maintenance notice
-──  Monitoring  ───────────────────────────────
-  Audit log
-  Service health
-  Mail delivery log
-───────────────────────────────────────────────
-  Back
+──  User Management  ──   Provision user · Offboard user · View users
+──  Jobs & Usage  ────   All-user job history · Cluster usage · Disk usage · Any user's job output
+──  Cluster Control  ──   Drain node · Resume node · QOS / limits · Maintenance notice
+──  Monitoring  ──────   Audit log · Service health · Mail delivery log
 ```
 
-Implemented using `questionary.Separator` objects interleaved with choice
-strings. Choices have a leading two-space indent for visual hierarchy.
-After `.ask()` the result is `.strip()`'d so the dispatch `if/elif` chain
-matches plain strings without the indent.
-
-### Section rationale
-
-| Section | Actions | Why grouped |
-|---------|---------|-------------|
-| User Management | Provision, Offboard, View users | All affect user DB + OS accounts |
-| Jobs & Usage | History, usage, disk, output | All read job/resource data |
-| Cluster Control | Drain, Resume, QOS, Maintenance | All affect scheduler behaviour |
-| Monitoring | Audit, Service health, Mail log | All read-only observability |
-
-### Maintenance notice consolidation
-
-Two separate items ("Set maintenance notice" / "Clear maintenance notice") were
-merged into one `_maintenance_menu()` function:
-
-- **No active notice** → prompts for text → sets notice.
-- **Active notice** → shows current text → `Update notice` / `Clear notice` / `Back`.
-
-Removes one top-level item and handles both states from a single entry point.
-
-### Cluster usage press-any-key fix
-
-The cluster usage block was missing a `press_any_key_to_continue` call — output
-would flash and immediately loop back to the menu. Added.
+Choices carry a leading two-space indent for hierarchy; the result is `.strip()`'d
+before dispatch. The two maintenance items were merged into one smart
+`_maintenance_menu()` (set when none active; update/clear when active). Added a
+missing `press_any_key_to_continue` after the cluster-usage view. (`0e12765`)
 
 ---
 
 ## 9. System Fix — gpusync adm Group
 
-### Problem
-
-`/var/log/msmtp.log`:
-```
--rw-r----- 1 root adm 227 Jun  3 04:46 /var/log/msmtp.log
-```
-
-`gpusync` groups before fix: `gpusync gpuusers auditadmin` — not `adm`.
-Every read by the daemon raised `PermissionError` (caught silently as `OSError`),
-returning an empty line list and triggering the "Log empty" UI message.
-
-### Fix
+`/var/log/msmtp.log` is `root:adm 640`. The audit daemon runs as `gpusync`, which
+was not in `adm`, so the mail-log viewer always reported "Log empty".
 
 ```bash
 sudo usermod -aG adm gpusync
 sudo systemctl restart iit-gpu-audit
+# gpusync groups after: gpusync gpuusers auditadmin adm
 ```
 
-`gpusync` groups after fix: `gpusync gpuusers auditadmin adm`
-
-### Why `adm` and not a custom group
-
-`adm` is the standard Debian/Ubuntu group for system log readers. All log
-files under `/var/log/` created by syslog, msmtp, etc. default to `root:adm 640`.
-Adding `gpusync` to `adm` handles `/var/log/msmtp.log` now and any future log
-files created with the same pattern, without requiring per-file `chgrp`.
-
-### Not in git
-
-System group membership is infrastructure state. It is recorded here and must
-be included in any cluster re-provisioning runbook (alongside the SLURM
-install, munge key, etc.).
+`adm` is the standard Debian/Ubuntu log-reader group, so this also covers future
+`/var/log/` files created with the same ownership. **This is infrastructure state,
+not in git** — include it in any cluster re-provisioning runbook.
 
 ---
 
-## 10. Architecture Delta — How the System Changed
+## 10. Architecture Delta
 
-### Module map (Session B additions marked ←)
+### Module map (changed files marked ←)
 
 ```
 iitgpu/
-├── __main__.py       ← login notification thread on session_start
-├── admin.py          ← grouped menu, _maintenance_menu, offboard email, press-any-key fix
-├── auditclient.py      (unchanged)
-├── config.py           (unchanged)
-├── containers.py       (unchanged)
+├── __main__.py       ← login notification on session_start
+├── admin.py          ← grouped menu, _maintenance_menu, welcome+offboard mail,
+│                        new "user created" admin notice, getpass import
 ├── daemonclient.py   ← admin_emails()
-├── dashboard.py        (unchanged)
-├── files.py            (unchanged)
-├── jobs.py           ← GMT+5:30 _LK constant, datetime.now(_LK)
-├── mailer.py         ← NEW: send_welcome, send_login_notification, send_offboard
-├── menu.py             (unchanged)
-├── models.py           (unchanged)
-├── monitor.py          (unchanged)
-├── notify.py           (unchanged)
-├── shell.py            (unchanged)
-├── slurm.py            (unchanged)
-├── splash.py           (unchanged)
-├── templates.py        (unchanged)
-├── ui.py               (unchanged)
-├── upload.py           (unchanged)
-├── validate.py         (unchanged)
-└── wizard.py         ← GMT+5:30 _LK constant, datetime.now(_LK)
+├── jobs.py           ← GMT+5:30 _LK constant
+├── mailer.py         ← welcome / login / offboard + send_user_created_admin_notice
+└── wizard.py         ← GMT+5:30 _LK constant
 
 deploy/
-├── audit_daemon.py   ← _h_users_admin_emails, upsert in _h_users_create
-└── redeploy-igm.sh     (unchanged)
-
-/usr/local/bin/
-└── iit-gpu-mailer    ← _daemon_admin_emails(), BCC in send_resend()
+├── audit_daemon.py   ← mail.send (no admin auto-BCC), users.admin_emails,
+│                        upsert in _h_users_create, User-Agent header
+└── iit-gpu-mailer    ← daemon admin_emails BCC (job path), User-Agent header
 ```
 
-### Data flow changes
+### Mail-flow delta (this milestone)
 
-**Mail flow before Session B:**
 ```
-SLURM event → iit-gpu-mailer → Resend API → job owner only
-```
+BEFORE: every admin/root-sent email → daemon auto-BCC all admins
+        → welcome/login/offboard silently copied to every admin
 
-**Mail flow after Session B:**
-```
-SLURM event   → iit-gpu-mailer → daemon(admin_emails) → Resend API → job owner + BCC admins
-Account created → mailer.send_welcome()                → Resend API → new user + BCC admins
-User logs in    → mailer.send_login_notification()     → Resend API → user    + BCC admins
-Account removed → mailer.send_offboard()               → Resend API → user    + BCC admins
+AFTER:  user-facing mail → recipient only
+        new user created → dedicated email to each admin (no credentials)
+        SLURM job events → still BCC admins (separate path, unchanged)
 ```
 
-**User DB create path before Session B:**
-```
-provision_user() → CREATE → INSERT → UNIQUE error if username exists as offboarded
-```
+---
 
-**User DB create path after Session B:**
-```
-provision_user() → CREATE → check existing row
-                              offboarded → UPDATE (re-activate, overwrite fields)
-                              active     → reject (clear error message)
-                              not found  → INSERT (unchanged)
-```
-
-### Complete daemon verb table
+## 11. Daemon Verb Reference
 
 | Verb | Auth | Description |
 |------|------|-------------|
 | `audit.log` | Any | Record an audit event |
+| `mail.send` | Any (role-gated inside) | Send transactional mail; key held by daemon; no admin auto-BCC |
 | `users.email_for` | Any (self or admin) | Get email for one user |
-| `users.admin_emails` | **Any** | Get all active admin emails (BCC) |
+| `users.admin_emails` | **Any** | Get all active admin emails (used by job-mail BCC) |
 | `users.create` | Admin | Create or re-activate user record (upsert) |
 | `users.get` | Admin | Get one user record |
 | `users.list` | Admin | List all users |
 | `users.offboard` | Admin | Mark user as offboarded |
 | `users.reconcile` | Admin | Find OS/DB mismatches |
+| `users.check_must_change_pw` | Self or admin | First-login password-change gate |
 | `audit.query` | Admin | Query audit event log |
 | `roster.view` | Admin | View combined user roster |
 | `maillog.tail` | Admin | Read `/var/log/msmtp.log` |
@@ -640,53 +461,19 @@ provision_user() → CREATE → check existing row
 
 ---
 
-## 11. Session A Reference
-
-Session A changes are preserved here for completeness. Full detail was in the
-original M05-log commit `2966aa3`.
-
-| Area | What changed |
-|------|-------------|
-| Mail — infrastructure | msmtp installed, `/etc/msmtprc` configured for Resend SMTP relay |
-| Mail — SLURM wiring | `MailProg=/usr/local/bin/iit-gpu-mailer` in `slurm.conf` |
-| Mail — HTML mailer | `deploy/iit-gpu-mailer`: 6 event types, dark-header design, sacct details |
-| Bug fix | `_run()` in `admin.py` — `stdin` + `input` conflict in `subprocess.run()` |
-| Storage | `user_dir()` helper in `config.py`; all user paths under `/shared/users/` |
-| Storage | `iit-gpu-adduser` updated; 7 workspace dirs migrated from `/shared/` root |
-| ACL access | slurmadmin (UID 1000) and daham (UID 1002): recursive `rwX` ACLs on all `/shared/*` |
-| ACL access | Default ACLs set — new files inherit grants automatically |
-| slurmadmin | Added to `gpuusers` group on login node |
-| Per-user file jail | browse: `users/<u>/` + `models/` + `envs/` (read-only outside own dir) |
-| Per-user file jail | upload: `users/<u>/` only for non-admins |
-| Per-user file jail | admins: full NFS jail access in both file manager and upload TUI |
-| Tests | `test_e2e.py` PYTHONPATH fix; two tests updated for `_run()` and `user_dir()` changes |
-
----
-
-## 12. Commits This Session
-
-### Session A
-
-| Hash | Message |
-|------|---------|
-| `60ddba7` | `fix(test): pass PYTHONPATH into selftest subprocess` |
-| `ee58565` | `feat(mail): branded HTML job notification mailer via Resend API` |
-| `bff48df` | `feat(mail): redesign emails — dark theme, accent divider line only, no icons` |
-| `a79988a` | `fix(mail): dark header + white content to survive email client overrides` |
-| `9b3c1c2` | `feat(mail): add IIT Research Team credit to footer` |
-| `e21e6e9` | `fix(users): provision error + /shared/users/ restructure` |
-| `114b299` | `feat(jail): per-user file scope — browse own dir + models/envs, upload to own dir only` |
-| `2966aa3` | `docs(log): update M05-log with per-user file jail changes (450 tests)` |
-
-### Session B
+## 12. Commits
 
 | Hash | Message |
 |------|---------|
 | `70f225f` | `fix(admin): use time_used instead of nonexistent elapsed on QueueEntry` |
 | `a498570` | `fix(tz): use GMT+5:30 for all user-visible timestamps (job folders, data files)` |
-| `646e277` | `feat(mail): welcome email on user creation, login notifications, BCC admins on all mail` |
+| `646e277` | `feat(mail): welcome email on user creation, login notifications` |
 | `c4204ad` | `fix(users): re-provision offboarded username by updating existing row instead of INSERT` |
 | `0e12765` | `feat(admin): grouped admin panel with sections, offboard email notification` |
+| `1a97623` | `security: daemon-held API key (C1), sbatch jail (H1/M1), admin_emails gate (M2), login dedup (M3), username validation (M4), fail-closed mail-user (L1)` |
+| `c027661` | `fix(provision): repair shell-user provisioning and site.env sourcing` |
+| `ada8872` | `fix(mail): set User-Agent on Resend API requests (Cloudflare 1010 block)` |
+| `d4d223a` | `fix(mail): stop admin BCC leak; send dedicated new-user notice` |
 
 ---
 
@@ -697,28 +484,29 @@ original M05-log commit `2966aa3`.
 | Service | Node | State |
 |---------|------|-------|
 | `slurmctld` | login (192.168.122.10) | active |
-| `slurmd` | GPU host (192.168.122.1) | active |
+| `slurmd` | GPU host | active |
 | `slurmdbd` | login (192.168.122.10) | active |
 | `mariadb` | login (192.168.122.10) | active |
-| `iit-gpu-audit` | login (192.168.122.10) | active (restarted 08:01:55 UTC) |
-| `iit-gpu-stats` | GPU host (192.168.122.1) | active |
+| `iit-gpu-audit` | login (192.168.122.10) | active (restarted 15:20:58 UTC, 2026-06-03) |
+| `iit-gpu-stats` | GPU host | active |
 
 ### Tests
 
 ```
-450 passed  (PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q)
+510 passed   (PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q)
 ```
 
 ### Mail delivery
 
-| Path | From | Status |
-|------|------|--------|
-| SLURM job events | iit-gpu-mailer → Resend API | Live + BCC admins |
-| Welcome (on create) | iitgpu/mailer → Resend API | Live + BCC admins |
-| Login notification | iitgpu/mailer → Resend API | Live + BCC admins |
-| Offboard notice | iitgpu/mailer → Resend API | Live + BCC admins |
-| Sender address | `admin@gpu.indrajith.net` | Resend-verified domain |
-| Mail log viewer | Admin panel → daemon → `/var/log/msmtp.log` | Live (gpusync in adm) |
+| Path | From | Recipients | Status |
+|------|------|-----------|--------|
+| SLURM job events | iit-gpu-mailer → Resend API | job owner + BCC admins | Live |
+| Welcome (on create) | iitgpu/mailer → daemon → Resend | **user only** | Live |
+| New user created | iitgpu/mailer → daemon → Resend | **each admin, no creds** | Live |
+| Login notification | iitgpu/mailer → daemon → Resend | **user only** (new IP) | Live |
+| Offboard notice | iitgpu/mailer → daemon → Resend | **user only** | Live |
+| Sender address | `admin@gpu.indrajith.net` | — | Resend-verified domain |
+| Mail log viewer | Admin panel → daemon → `/var/log/msmtp.log` | — | Live (gpusync in adm) |
 
 ### Groups (login node)
 
@@ -736,5 +524,3 @@ original M05-log commit `2966aa3`.
 └── users/
     └── <per-user workspaces — one dir per active user>
 ```
-
-slurmadmin (UID 1000): `rwx` ACL + default ACL on every `/shared/*` dir.
