@@ -1,0 +1,232 @@
+# iitgpu/mailer.py
+"""Transactional email for login notifications and welcome messages via Resend."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from datetime import datetime, timezone, timedelta
+from threading import Thread
+
+_LK = timezone(timedelta(hours=5, minutes=30))
+
+_DEFAULT_KEY  = "***REDACTED_RESEND_API_KEY***"
+_DEFAULT_FROM = "IIT GPU Gateway <admin@gpu.indrajith.net>"
+_CLUSTER_NAME = "IIT GPU Cluster"
+
+
+def _resend_key() -> str:
+    try:
+        from iitgpu.config import _get
+        return _get("RESEND_API_KEY", _DEFAULT_KEY)
+    except Exception:
+        return os.environ.get("RESEND_API_KEY", _DEFAULT_KEY)
+
+
+def _from_addr() -> str:
+    try:
+        from iitgpu.config import _get
+        return _get("RESEND_FROM", _DEFAULT_FROM)
+    except Exception:
+        return os.environ.get("RESEND_FROM", _DEFAULT_FROM)
+
+
+def _now_lk() -> str:
+    return datetime.now(_LK).strftime("%d %b %Y  %H:%M")
+
+
+def _send(to: str, subject: str, html: str, bcc: list[str] | None = None) -> None:
+    payload: dict = {
+        "from":    _from_addr(),
+        "to":      [to],
+        "subject": subject,
+        "html":    html,
+    }
+    if bcc:
+        payload["bcc"] = bcc
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST",
+             "https://api.resend.com/emails",
+             "-H", f"Authorization: Bearer {_resend_key()}",
+             "-H", "Content-Type: application/json",
+             "-d", json.dumps(payload)],
+            capture_output=True, text=True, timeout=20,
+        )
+        lines = r.stdout.strip().rsplit("\n", 1)
+        code  = lines[-1] if len(lines) > 1 else "0"
+        if not code.startswith("2"):
+            import sys
+            sys.stderr.write(f"iit-gpu mailer: HTTP {code}: {lines[0]}\n")
+    except Exception as exc:
+        import sys
+        sys.stderr.write(f"iit-gpu mailer: {exc}\n")
+
+
+def _fire(to: str, subject: str, html: str, bcc: list[str] | None = None) -> None:
+    Thread(target=_send, args=(to, subject, html, bcc), daemon=True).start()
+
+
+def _admin_bcc() -> list[str]:
+    try:
+        from iitgpu import daemonclient
+        return daemonclient.admin_emails()
+    except Exception:
+        return []
+
+
+def send_welcome(username: str, password: str, email: str,
+                 full_name: str = "") -> None:
+    from iitgpu.config import load_config
+    cfg  = load_config()
+    host = cfg.gateway_host
+    port = cfg.gateway_port
+
+    bcc          = [e for e in _admin_bcc() if e != email]
+    display_name = full_name or username
+    ssh_cmd      = f"ssh -p {port} {username}@{host}"
+    subject      = f"[IIT GPU Cluster] Your account is ready — {username}"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F4F4F5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F4F4F5;padding:40px 0">
+    <tr><td align="center">
+      <table width="580" cellpadding="0" cellspacing="0" style="max-width:580px;width:100%">
+
+        <tr><td bgcolor="#3B82F6" style="background:#3B82F6;height:4px;font-size:0;line-height:0">&nbsp;</td></tr>
+
+        <tr><td bgcolor="#111827" style="background:#111827;padding:28px 32px 26px">
+          <p style="margin:0 0 20px;color:#4B5563;font-size:11px;font-weight:600;letter-spacing:2px;text-transform:uppercase">{_CLUSTER_NAME}</p>
+          <h1 style="margin:0 0 8px;color:#F9FAFB;font-size:22px;font-weight:600;letter-spacing:-0.3px;line-height:1.3">Welcome, {display_name}</h1>
+          <p style="margin:0;color:#9CA3AF;font-size:14px;line-height:1.6">Your GPU cluster account has been created. Your login credentials are below.</p>
+        </td></tr>
+
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:28px 32px 8px">
+          <p style="margin:0 0 16px;color:#9CA3AF;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Login Credentials</p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Username</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{username}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Password</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{password}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">SSH Command</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{ssh_cmd}</td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:4px 32px 28px">
+          <div style="margin-top:20px;border-left:3px solid #3B82F6;padding:14px 18px;background:#EFF6FF">
+            <p style="margin:0 0 6px;color:#1D4ED8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Network Access Restriction</p>
+            <p style="margin:0;color:#1E40AF;font-size:13px;line-height:1.7">You can <strong>only</strong> connect from within the <strong>IIT-CityCampus-SpencerBuilding</strong> network. Access from any other network is blocked.</p>
+          </div>
+
+          <div style="margin-top:14px;border-left:3px solid #EF4444;padding:14px 18px;background:#FEF2F2">
+            <p style="margin:0 0 6px;color:#B91C1C;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Security Notice</p>
+            <p style="margin:0;color:#991B1B;font-size:13px;line-height:1.7"><strong>Do not share your credentials.</strong> Every upload, download, and job submission from your account is logged and monitored. Sharing your account violates cluster policy.</p>
+          </div>
+
+          <div style="margin-top:24px">
+            <p style="margin:0 0 10px;color:#111827;font-size:13px;font-weight:600">Getting started</p>
+            <ol style="margin:0;padding-left:20px;color:#374151;font-size:13px;line-height:2.2">
+              <li>Connect to the <strong>IIT-CityCampus-SpencerBuilding</strong> Wi-Fi or wired network.</li>
+              <li>Open a terminal and run:<br>
+                <code style="display:inline-block;margin-top:4px;background:#F3F4F6;padding:5px 10px;border-radius:4px;font-family:'SF Mono',Consolas,monospace;font-size:12px;color:#111827">{ssh_cmd}</code>
+              </li>
+              <li>Enter your password when prompted.</li>
+              <li>The GPU Manager interface will launch automatically.</li>
+            </ol>
+          </div>
+
+          <div style="margin-top:24px;padding:16px 20px;background:#F9FAFB;border-radius:6px;border:1px solid #E5E7EB">
+            <p style="margin:0 0 4px;color:#111827;font-size:13px;font-weight:600">Need help?</p>
+            <p style="margin:0;color:#6B7280;font-size:13px;line-height:1.6">For assistance with your account, job submissions, or any cluster questions, contact the <strong>IIT Research Team</strong>.</p>
+          </div>
+        </td></tr>
+
+        <tr><td bgcolor="#F4F4F5" style="background:#F4F4F5;padding:18px 32px;border-top:1px solid #E4E4E7">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="color:#A1A1AA;font-size:11px">{_CLUSTER_NAME}&nbsp;&middot;&nbsp;{_now_lk()} (GMT+5:30)</td>
+              <td align="right" style="color:#A1A1AA;font-size:11px;font-family:monospace">iit-gpu-manager</td>
+            </tr>
+            <tr><td colspan="2" style="padding-top:4px;color:#A1A1AA;font-size:11px">By: IIT Research Team</td></tr>
+          </table>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    _fire(email, subject, html, bcc or None)
+
+
+def send_login_notification(username: str, email: str, remote_ip: str) -> None:
+    bcc     = [e for e in _admin_bcc() if e != email]
+    subject = f"[IIT GPU Cluster] Login detected — {username}"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F4F4F5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F4F4F5;padding:40px 0">
+    <tr><td align="center">
+      <table width="580" cellpadding="0" cellspacing="0" style="max-width:580px;width:100%">
+
+        <tr><td bgcolor="#22C55E" style="background:#22C55E;height:4px;font-size:0;line-height:0">&nbsp;</td></tr>
+
+        <tr><td bgcolor="#111827" style="background:#111827;padding:28px 32px 26px">
+          <p style="margin:0 0 20px;color:#4B5563;font-size:11px;font-weight:600;letter-spacing:2px;text-transform:uppercase">{_CLUSTER_NAME}</p>
+          <h1 style="margin:0 0 8px;color:#F9FAFB;font-size:22px;font-weight:600;letter-spacing:-0.3px;line-height:1.3">New login to your account</h1>
+          <p style="margin:0;color:#9CA3AF;font-size:14px;line-height:1.6">A session was started on the IIT GPU Cluster under your credentials.</p>
+        </td></tr>
+
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:28px 32px 8px">
+          <p style="margin:0 0 16px;color:#9CA3AF;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Session Details</p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">User</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',monospace;border-bottom:1px solid #F3F4F6">{username}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Time</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',monospace;border-bottom:1px solid #F3F4F6">{_now_lk()} (GMT+5:30)</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Source IP</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',monospace;border-bottom:1px solid #F3F4F6">{remote_ip or "local"}</td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:4px 32px 28px">
+          <div style="margin-top:16px;padding:14px 18px;background:#F0FDF4;border-left:3px solid #22C55E">
+            <p style="margin:0;color:#166534;font-size:13px;line-height:1.7">If this was you, no action is needed. If you did not log in, contact the <strong>IIT Research Team</strong> immediately.</p>
+          </div>
+        </td></tr>
+
+        <tr><td bgcolor="#F4F4F5" style="background:#F4F4F5;padding:18px 32px;border-top:1px solid #E4E4E7">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="color:#A1A1AA;font-size:11px">{_CLUSTER_NAME}&nbsp;&middot;&nbsp;{_now_lk()} (GMT+5:30)</td>
+              <td align="right" style="color:#A1A1AA;font-size:11px;font-family:monospace">iit-gpu-manager</td>
+            </tr>
+            <tr><td colspan="2" style="padding-top:4px;color:#A1A1AA;font-size:11px">By: IIT Research Team</td></tr>
+          </table>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    _fire(email, subject, html, bcc or None)

@@ -86,3 +86,9 @@ def service_status(unit: str) -> tuple[bool, dict]:
     if resp.get("ok"):
         return True, resp.get("data", {})
     return False, {"error": resp.get("error", "daemon error")}
+
+
+def admin_emails() -> list[str]:
+    """Return email addresses of all active admin-role users (for BCC). Best-effort."""
+    resp = daemon_request("users.admin_emails", {})
+    return resp.get("data", {}).get("emails", []) if resp.get("ok") else []

@@ -154,9 +154,16 @@ def provision_user(username: str, admin: bool = False,
                     detail=username,
                     meta={"role": role or ("admin" if admin else "tool"),
                           "email": email})
+    ok_pw = False
     if password:
         ok_pw, perr = set_user_password(username, password)
         msg += "\n  ✔  password set" if ok_pw else f"\n  ⚠  password not set: {perr or 'chpasswd failed'}"
+    if email and password and ok_pw:
+        from threading import Thread
+        from iitgpu import mailer as _mailer
+        Thread(target=_mailer.send_welcome,
+               args=(username, password, email, full_name),
+               daemon=True).start()
     return True, msg
 
 

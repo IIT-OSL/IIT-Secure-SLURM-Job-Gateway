@@ -428,6 +428,13 @@ def _h_roster_view(peer_uid: int, users_conn: sqlite3.Connection,
     }, ""
 
 
+def _h_users_admin_emails(users_conn: sqlite3.Connection):
+    rows = users_conn.execute(
+        "SELECT email FROM users WHERE role='admin' AND status='active' AND email != ''"
+    ).fetchall()
+    return True, {"emails": [r[0] for r in rows]}, ""
+
+
 def _h_maillog_tail(payload: dict, peer_uid: int,
                     audit_conn: sqlite3.Connection):
     peer_user = _uid_to_username(peer_uid) or str(peer_uid)
@@ -512,6 +519,9 @@ def _dispatch(verb: str, payload: dict, peer_uid: int | None,
 
     if verb == "users.email_for":
         return _h_users_email_for(payload, peer_uid, users_conn)
+
+    if verb == "users.admin_emails":
+        return _h_users_admin_emails(users_conn)
 
     if verb in _ADMIN_VERBS:
         if not _uid_is_admin(peer_uid):

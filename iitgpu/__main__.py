@@ -91,6 +91,22 @@ def main() -> None:
     from iitgpu import auditclient
     auditclient.log("session_start")
 
+    import getpass as _gp
+    _login_user   = _gp.getuser()
+    _remote_ip    = os.environ.get("SSH_CLIENT", "").split()[0] if os.environ.get("SSH_CLIENT") else ""
+
+    def _fire_login_notification() -> None:
+        try:
+            from iitgpu import daemonclient, mailer
+            _email = daemonclient.email_for(_login_user)
+            if _email:
+                mailer.send_login_notification(_login_user, _email, _remote_ip)
+        except Exception:
+            pass
+
+    import threading as _th
+    _th.Thread(target=_fire_login_notification, daemon=True).start()
+
     try:
         if not args.no_splash:
             from iitgpu.splash import show_splash
