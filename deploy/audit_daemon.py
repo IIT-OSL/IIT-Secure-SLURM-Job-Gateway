@@ -523,8 +523,11 @@ def _h_mail_send(payload: dict, peer_uid: int,
     """Send transactional mail. The daemon holds the API key (C1 fix).
 
     Trust model:
-    - admin / root callers: may send to any recipient; admin BCC is added
-      automatically when no explicit bcc is given.
+    - admin / root callers: may send to any recipient; only an explicitly
+      supplied bcc is honoured. The daemon NEVER auto-adds admins as BCC —
+      admin notifications are sent as their own dedicated emails (e.g. the
+      "new user created" notice), so credential/welcome/login/offboard mail is
+      never silently copied to every admin.
     - non-admin callers: recipient is FORCED to their own registered address and
       BCC is stripped — this prevents both API-key theft and using the daemon as
       an open relay to spoof mail from the cluster's verified domain.
@@ -558,11 +561,8 @@ def _h_mail_send(payload: dict, peer_uid: int,
     else:
         if not to:
             return False, None, "recipient required"
-        if not bcc:
-            rows = users_conn.execute(
-                "SELECT email FROM users WHERE role='admin' AND status='active' "
-                "AND email != ''").fetchall()
-            bcc = [r[0] for r in rows if r[0] != to]
+        # No auto-BCC: admins are notified via dedicated emails, never by silently
+        # copying them on user-facing mail. Only an explicit bcc (if any) is sent.
 
     ok_send, msg = _resend_send(to, subject, html, bcc or None)
     if ok_send:

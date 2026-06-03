@@ -285,7 +285,10 @@ def test_mail_send_login_sends_on_new_ip_and_updates():
     assert row[0] == "9.9.9.9"            # IP recorded server-side
 
 
-def test_mail_send_admin_adds_admin_bcc():
+def test_mail_send_admin_never_auto_bccs_admins():
+    """Admin/root senders must NOT auto-BCC other admins — user-facing mail
+    (welcome, login, offboard) goes only to its recipient. Admins are notified
+    via their own dedicated 'new user created' email instead."""
     d, conn = _users_db()
     _insert_user(conn, "admin1", role="admin", status="active", email="a1@iit.lk")
     _insert_user(conn, "admin2", role="admin", status="active", email="a2@iit.lk")
@@ -298,7 +301,22 @@ def test_mail_send_admin_adds_admin_bcc():
         peer_uid=0, users_conn=conn)
     assert ok, err
     assert sent["to"] == "newuser@iit.lk"
-    assert set(sent["bcc"]) == {"a1@iit.lk", "a2@iit.lk"}
+    assert not sent["bcc"]                 # no admins silently copied
+
+
+def test_mail_send_admin_honours_explicit_bcc():
+    """An explicitly supplied bcc is still passed through for admin senders."""
+    d, conn = _users_db()
+    _insert_user(conn, "admin1", role="admin", status="active", email="a1@iit.lk")
+    sent = {}
+    d._uid_is_admin = lambda uid: True
+    d._uid_to_username = lambda uid: "admin1"
+    d._resend_send = lambda to, subject, html, bcc=None: (sent.update(to=to, bcc=bcc) or (True, "ok"))
+    ok, _, err = d._h_mail_send(
+        {"to": "x@iit.lk", "subject": "s", "html": "h", "bcc": ["ops@iit.lk"]},
+        peer_uid=0, users_conn=conn)
+    assert ok, err
+    assert sent["bcc"] == ["ops@iit.lk"]
 
 
 def test_mail_send_non_admin_no_email_rejected():
