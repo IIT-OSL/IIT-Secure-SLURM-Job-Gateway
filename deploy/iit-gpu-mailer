@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""iit-gpu-mailer — SLURM MailProg wrapper that sends rich HTML emails via Resend API.
+
+SLURM calls this as:  iit-gpu-mailer -s "SLURM Job_id=N Name=X ..." recipient@email
+
+The script parses the subject, queries sacct for live job details, builds a
+branded HTML email, and POSTs it to api.resend.com.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime
+
+# ── Config ────────────────────────────────────────────────────────────────────
+RESEND_API_KEY = "***REDACTED_RESEND_API_KEY***"
+FROM_ADDR      = "IIT GPU Gateway <admin@gpu.indrajith.net>"
+CLUSTER_NAME   = "IIT GPU Cluster"
+CLUSTER_URL    = "https://gpu.indrajith.net"   # update if you have a web portal
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+def parse_args(argv: list[str]) -> tuple[str, str]:
+    """Return (subject, recipient). SLURM calls us as: mailer -s SUBJECT RECIPIENT"""
+    subject = ""
+    recipient = ""
+    i = 1
+    while i < len(argv):
+        if argv[i] == "-s" and i + 1 < len(argv):
+            subject = argv[i + 1]
+            i += 2
+        else:
+            recipient = argv[i]
+            i += 1
+    return subject, recipient
+
+# ── SLURM subject parsing ─────────────────────────────────────────────────────
+def parse_slurm_subject(subject: str) -> dict:
+    """Extract job_id, job_name, event from a SLURM subject line."""
+    info: dict = {"raw_subject": subject, "job_id": "", "job_name": "", "event": "UNKNOWN",
+                  "runtime": "", "state": "", "exit_code": ""}
+
+    m = re.search(r"Job_id=(\d+)", subject)
+    if m:
+        info["job_id"] = m.group(1)
+
+    m = re.search(r"Name=(\S+)", subject)
+    if m:
+        info["job_name"] = m.group(1)
+
+    s = subject.lower()
+    if "began" in s or "started" in s:
+        info["event"] = "STARTED"
+    elif "ended" in s or "completed" in s:
+        info["event"] = "ENDED"
+        m = re.search(r"Run time\s+([\d:]+)", subject, re.I)
+        if m:
+            info["runtime"] = m.group(1)
+        m = re.search(r"ExitCode\s+(\d+)", subject, re.I)
+        if m:
+            info["exit_code"] = m.group(1)
+        info["state"] = "COMPLETED"
+    elif "failed" in s:
+        info["event"] = "FAILED"
+        m = re.search(r"Run time\s+([\d:]+)", subject, re.I)
+        if m:
+            info["runtime"] = m.group(1)
+        m = re.search(r"ExitCode\s+(\d+)", subject, re.I)
+        if m:
+            info["exit_code"] = m.group(1)
+        info["state"] = "FAILED"
+    elif "time limit" in s or "timeout" in s:
+        info["event"] = "TIMEOUT"
+        info["state"] = "TIMEOUT"
+    elif "requeue" in s:
+        info["event"] = "REQUEUED"
+        info["state"] = "REQUEUED"
+    elif "out_of_memory" in s or "out of memory" in s:
+        info["event"] = "OOM"
+        info["state"] = "OUT_OF_MEMORY"
+
+    return info
+
+# ── sacct query ───────────────────────────────────────────────────────────────
+def sacct_details(job_id: str) -> dict:
+    """Query sacct for the job. Returns a dict of fields (empty strings on failure)."""
+    fields = "JobID,JobName,User,Partition,NodeList,AllocCPUS,ReqTRES,State,ExitCode,Elapsed,Timelimit,Submit,Start,End,WorkDir,StdOut,StdErr"
+    try:
+        result = subprocess.run(
+            ["sacct", "-j", job_id, "--format", fields, "--noheader",
+             "--parsable2", "--units=G"],
+            capture_output=True, text=True, timeout=10
+        )
+        lines = [l for l in result.stdout.splitlines() if l and not l.startswith("batch")]
+        if not lines:
+            return {}
+        parts = lines[0].split("|")
+        keys = [f.split("%")[0] for f in fields.split(",")]
+        return dict(zip(keys, parts + [""] * len(keys)))
+    except Exception:
+        return {}
+
+def extract_gpu_count(req_tres: str) -> str:
+    """Extract GPU count from TRES string like cpu=4,mem=16G,node=1,gres/gpu=1"""
+    m = re.search(r"gres/gpu=(\d+)", req_tres or "")
+    return m.group(1) if m else "?"
+
+# ── HTML templates ────────────────────────────────────────────────────────────
+_PALETTES = {
+    "STARTED":   {"accent": "#2563EB", "light": "#EFF6FF", "badge_bg": "#DBEAFE", "badge_fg": "#1E40AF", "icon": "▶"},
+    "ENDED":     {"accent": "#16A34A", "light": "#F0FDF4", "badge_bg": "#DCFCE7", "badge_fg": "#15803D", "icon": "✓"},
+    "FAILED":    {"accent": "#DC2626", "light": "#FEF2F2", "badge_bg": "#FEE2E2", "badge_fg": "#B91C1C", "icon": "✗"},
+    "TIMEOUT":   {"accent": "#D97706", "light": "#FFFBEB", "badge_bg": "#FEF3C7", "badge_fg": "#B45309", "icon": "⏱"},
+    "REQUEUED":  {"accent": "#7C3AED", "light": "#F5F3FF", "badge_bg": "#EDE9FE", "badge_fg": "#6D28D9", "icon": "↺"},
+    "OOM":       {"accent": "#DC2626", "light": "#FEF2F2", "badge_bg": "#FEE2E2", "badge_fg": "#B91C1C", "icon": "⚡"},
+    "UNKNOWN":   {"accent": "#6B7280", "light": "#F9FAFB", "badge_bg": "#F3F4F6", "badge_fg": "#374151", "icon": "?"},
+}
+
+_HEADLINES = {
+    "STARTED":  "Your job is running",
+    "ENDED":    "Job completed successfully",
+    "FAILED":   "Job failed",
+    "TIMEOUT":  "Job hit its time limit",
+    "REQUEUED": "Job has been requeued",
+    "OOM":      "Job ran out of memory",
+    "UNKNOWN":  "Job status update",
+}
+
+_SUBTITLES = {
+    "STARTED":  "Your GPU job has been allocated resources and is now executing.",
+    "ENDED":    "Everything finished cleanly. Your results are ready.",
+    "FAILED":   "The job exited with an error. Check the log below for details.",
+    "TIMEOUT":  "The job was cancelled because it exceeded its requested time limit. Increase <code>--time</code> and resubmit.",
+    "REQUEUED": "The job has been placed back in the queue and will run again shortly.",
+    "OOM":      "The job was killed because it exceeded its memory allocation. Increase <code>--mem</code> and resubmit.",
+    "UNKNOWN":  "A status change was reported by the scheduler.",
+}
+
+_TIPS = {
+    "FAILED":  "Tip: check your error log path shown below. Common causes: missing input files, Python import errors, or CUDA OOM.",
+    "TIMEOUT": "Tip: use <code>seff &lt;jobid&gt;</code> to see how much CPU/memory the job actually used, then set limits accordingly.",
+    "OOM":     "Tip: run <code>seff &lt;jobid&gt;</code> to see peak memory usage and add a buffer (e.g., if peak was 14G, request <code>--mem=20G</code>).",
+    "STARTED": "Tip: monitor live GPU usage with <code>iit-gpu-manager → Dashboard</code>.",
+}
+
+def _row(label: str, value: str, accent: str) -> str:
+    if not value or value.strip() in ("", "Unknown", "None", "N/A"):
+        return ""
+    return f"""
+      <tr>
+        <td style="padding:10px 16px;color:#6B7280;font-size:13px;white-space:nowrap;border-bottom:1px solid #F3F4F6;width:140px">{label}</td>
+        <td style="padding:10px 16px;color:#111827;font-size:13px;font-family:monospace;border-bottom:1px solid #F3F4F6;word-break:break-all">{value}</td>
+      </tr>"""
+
+def build_html(info: dict, details: dict, recipient: str) -> str:
+    event   = info.get("event", "UNKNOWN")
+    pal     = _PALETTES.get(event, _PALETTES["UNKNOWN"])
+    accent  = pal["accent"]
+    light   = pal["light"]
+    bb      = pal["badge_bg"]
+    bf      = pal["badge_fg"]
+    icon    = pal["icon"]
+    headline = _HEADLINES.get(event, "Job update")
+    subtitle = _SUBTITLES.get(event, "")
+    tip      = _TIPS.get(event, "")
+
+    job_id    = info.get("job_id") or details.get("JobID", "")
+    job_name  = details.get("JobName") or info.get("job_name", "")
+    user      = details.get("User", "")
+    partition = details.get("Partition", "")
+    nodes     = details.get("NodeList", "")
+    cpus      = details.get("AllocCPUS", "")
+    gpus      = extract_gpu_count(details.get("ReqTRES", ""))
+    state     = details.get("State") or info.get("state", event)
+    exit_code = details.get("ExitCode") or info.get("exit_code", "")
+    elapsed   = details.get("Elapsed") or info.get("runtime", "")
+    timelimit = details.get("Timelimit", "")
+    submit    = details.get("Submit", "")
+    start     = details.get("Start", "")
+    end       = details.get("End", "")
+    workdir   = details.get("WorkDir", "")
+    stdout    = details.get("StdOut", "")
+    stderr    = details.get("StdErr", "")
+
+    badge_label = state if state else event
+
+    rows = (
+        _row("Job ID",      job_id,    accent) +
+        _row("Job name",    job_name,  accent) +
+        _row("User",        user,      accent) +
+        _row("Partition",   partition, accent) +
+        _row("Node(s)",     nodes,     accent) +
+        _row("CPUs",        cpus,      accent) +
+        _row("GPUs",        gpus,      accent) +
+        _row("Submitted",   submit,    accent) +
+        _row("Started",     start,     accent) +
+        _row("Ended",       end,       accent) +
+        _row("Elapsed",     elapsed,   accent) +
+        _row("Time limit",  timelimit, accent) +
+        _row("Exit code",   exit_code, accent) +
+        _row("Work dir",    workdir,   accent) +
+        _row("stdout",      stdout,    accent) +
+        _row("stderr",      stderr,    accent)
+    )
+
+    tip_block = f"""
+    <div style="margin:24px 0 0;padding:14px 16px;background:{light};border-left:4px solid {accent};border-radius:4px;font-size:13px;color:#374151;line-height:1.6">
+      {tip}
+    </div>""" if tip else ""
+
+    now = datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F3F4F6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:40px 0">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
+
+        <!-- Header -->
+        <tr><td style="background:{accent};border-radius:12px 12px 0 0;padding:28px 32px">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="color:rgba(255,255,255,0.85);font-size:12px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase">{CLUSTER_NAME}</td>
+              <td align="right">
+                <span style="background:rgba(255,255,255,0.2);color:#fff;font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;letter-spacing:0.5px">GPU JOB NOTIFICATION</span>
+              </td>
+            </tr>
+          </table>
+          <div style="margin-top:20px">
+            <span style="font-size:40px;line-height:1">{icon}</span>
+          </div>
+          <h1 style="margin:12px 0 0;color:#fff;font-size:26px;font-weight:700;letter-spacing:-0.5px">{headline}</h1>
+          <p style="margin:8px 0 0;color:rgba(255,255,255,0.8);font-size:15px">{subtitle}</p>
+        </td></tr>
+
+        <!-- Body -->
+        <tr><td style="background:#fff;padding:32px">
+
+          <!-- Status badge -->
+          <div style="margin-bottom:24px">
+            <span style="display:inline-block;background:{bb};color:{bf};font-size:12px;font-weight:700;padding:5px 14px;border-radius:20px;letter-spacing:0.5px;text-transform:uppercase">{badge_label}</span>
+          </div>
+
+          <!-- Details card -->
+          <div style="border:1px solid #E5E7EB;border-radius:8px;overflow:hidden">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              {rows}
+            </table>
+          </div>
+
+          {tip_block}
+
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#F9FAFB;border-radius:0 0 12px 12px;padding:20px 32px;border-top:1px solid #E5E7EB">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="font-size:12px;color:#9CA3AF">Sent by <strong style="color:#6B7280">{CLUSTER_NAME}</strong> · {now}</td>
+              <td align="right" style="font-size:12px;color:#9CA3AF">Manage jobs via <code>iit-gpu-manager</code></td>
+            </tr>
+          </table>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+# ── Subject line for Resend ───────────────────────────────────────────────────
+def build_subject(info: dict, details: dict) -> str:
+    event    = info.get("event", "UNKNOWN")
+    job_name = details.get("JobName") or info.get("job_name") or "job"
+    job_id   = info.get("job_id") or details.get("JobID", "")
+    labels   = {
+        "STARTED":  f'Job "{job_name}" is running',
+        "ENDED":    f'Job "{job_name}" completed ✓',
+        "FAILED":   f'Job "{job_name}" failed ✗',
+        "TIMEOUT":  f'Job "{job_name}" timed out ⏱',
+        "REQUEUED": f'Job "{job_name}" requeued ↺',
+        "OOM":      f'Job "{job_name}" ran out of memory ⚡',
+        "UNKNOWN":  f'Job update — {info.get("raw_subject", "")}',
+    }
+    suffix = f" [#{job_id}]" if job_id else ""
+    return labels.get(event, f'Job update "{job_name}"') + suffix
+
+# ── Send via Resend API (curl) ────────────────────────────────────────────────
+def send_resend(to: str, subject: str, html: str) -> None:
+    payload = json.dumps({
+        "from": FROM_ADDR,
+        "to":   [to],
+        "subject": subject,
+        "html": html,
+    })
+    result = subprocess.run(
+        [
+            "curl", "-s", "-w", "\n%{http_code}",
+            "-X", "POST", "https://api.resend.com/emails",
+            "-H", f"Authorization: Bearer {RESEND_API_KEY}",
+            "-H", "Content-Type: application/json",
+            "-d", payload,
+        ],
+        capture_output=True, text=True, timeout=20,
+    )
+    lines = result.stdout.strip().rsplit("\n", 1)
+    body = lines[0] if len(lines) > 0 else ""
+    code = lines[-1] if len(lines) > 1 else "0"
+    if not code.startswith("2"):
+        sys.stderr.write(f"iit-gpu-mailer: Resend error HTTP {code}: {body}\n")
+        sys.exit(1)
+    sys.stderr.write(f"iit-gpu-mailer: sent to {to} — HTTP {code} {body}\n")
+
+# ── Fallback: pipe to msmtp for plain-text ────────────────────────────────────
+def fallback_msmtp(to: str, subject: str, body_stdin: str) -> None:
+    try:
+        subprocess.run(["/usr/bin/msmtp", "-s", subject, to],
+                       input=body_stdin, text=True, timeout=30)
+    except Exception as exc:
+        sys.stderr.write(f"iit-gpu-mailer: msmtp fallback failed: {exc}\n")
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main() -> None:
+    subject, recipient = parse_args(sys.argv)
+    stdin_body = sys.stdin.read()
+
+    if not recipient:
+        sys.stderr.write("iit-gpu-mailer: no recipient — aborting\n")
+        sys.exit(1)
+
+    info    = parse_slurm_subject(subject)
+    details = sacct_details(info["job_id"]) if info["job_id"] else {}
+
+    html       = build_html(info, details, recipient)
+    nice_subj  = build_subject(info, details)
+
+    try:
+        send_resend(recipient, nice_subj, html)
+    except Exception as exc:
+        sys.stderr.write(f"iit-gpu-mailer: Resend failed ({exc}), falling back to msmtp\n")
+        fallback_msmtp(recipient, subject, stdin_body)
+
+if __name__ == "__main__":
+    main()
