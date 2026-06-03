@@ -9,10 +9,12 @@ import pytest
 
 
 def test_selftest_passes():
+    repo_root = str(Path(__file__).parent.parent)
+    pythonpath = os.pathsep.join(filter(None, [repo_root, os.environ.get("PYTHONPATH", "")]))
     result = subprocess.run(
         [sys.executable, "-m", "iitgpu", "--selftest"],
         capture_output=True, text=True,
-        env={**os.environ, "DEMO_MODE": "1"},
+        env={**os.environ, "DEMO_MODE": "1", "PYTHONPATH": pythonpath},
     )
     assert result.returncode == 0, f"selftest failed:\n{result.stdout}\n{result.stderr}"
     assert "All checks passed" in result.stdout
