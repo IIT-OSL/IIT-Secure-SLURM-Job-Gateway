@@ -8,6 +8,23 @@
 # The next TUI launch by any gpuusers member picks it up. No rsync, no per-user copy.
 set -euo pipefail
 
+# -- Self-modification guard (CRITICAL) ----------------------------------------
+# The "git pull" further down rewrites THIS script in place while bash is still
+# reading it. bash reads scripts incrementally, so an in-place rewrite can
+# truncate the run and silently skip the steps near the end -- most importantly
+# the audit-daemon restart. That left the live daemon running stale code (e.g.
+# the old auto-BCC mail behaviour) even though the fix was pulled. Re-exec from a
+# private temp copy that git can never touch, so the whole script always runs.
+if [ -z "${IIT_REEXEC:-}" ]; then
+    _self_copy="$(mktemp "${TMPDIR:-/tmp}/redeploy-igm.XXXXXX")"
+    cat "$0" > "$_self_copy"
+    export IIT_REEXEC=1
+    exec bash "$_self_copy" "$@"
+fi
+# We are now the temp copy; unlink it immediately (the open inode survives until
+# this process exits) so it never lingers in /tmp.
+rm -f "$0" 2>/dev/null || true
+
 INSTALL="${IIT_GPU_HOME:-/opt/iit-gpu}"
 BRANCH="${IIT_GPU_BRANCH:-main}"
 
