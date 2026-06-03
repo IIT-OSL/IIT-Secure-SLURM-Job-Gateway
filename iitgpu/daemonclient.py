@@ -18,13 +18,15 @@ def email_for(username: str) -> str | None:
 
 
 def create_user(username: str, email: str, role: str,
-                full_name: str = "", notes: str = "") -> tuple[bool, str]:
+                full_name: str = "", notes: str = "",
+                must_change_pw: bool = False) -> tuple[bool, str]:
     resp = daemon_request("users.create", {
-        "username":  username,
-        "email":     email,
-        "role":      role,
-        "full_name": full_name,
-        "notes":     notes,
+        "username":      username,
+        "email":         email,
+        "role":          role,
+        "full_name":     full_name,
+        "notes":         notes,
+        "must_change_pw": must_change_pw,
     })
     if resp.get("ok"):
         return True, f"user record created for {username}"
@@ -92,3 +94,15 @@ def admin_emails() -> list[str]:
     """Return email addresses of all active admin-role users (for BCC). Best-effort."""
     resp = daemon_request("users.admin_emails", {})
     return resp.get("data", {}).get("emails", []) if resp.get("ok") else []
+
+
+def check_must_change_pw(username: str) -> bool:
+    """True if this user is required to change their password before using the TUI."""
+    resp = daemon_request("users.check_must_change_pw", {"username": username})
+    return resp.get("data", {}).get("must_change_pw", False) if resp.get("ok") else False
+
+
+def clear_must_change_pw(username: str) -> bool:
+    """Clear the must-change-password flag after a successful change."""
+    resp = daemon_request("users.clear_must_change_pw", {"username": username})
+    return bool(resp.get("ok"))

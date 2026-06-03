@@ -145,7 +145,8 @@ def provision_user(username: str, admin: bool = False,
     if email:
         effective_role = "admin" if (admin or role == "admin") else role or "tool"
         ok_db, db_msg = daemonclient.create_user(
-            username, email, effective_role, full_name, notes)
+            username, email, effective_role, full_name, notes,
+            must_change_pw=bool(password))
         if ok_db:
             msg += "\n  ✔  user DB record created"
         else:
@@ -158,12 +159,16 @@ def provision_user(username: str, admin: bool = False,
     if password:
         ok_pw, perr = set_user_password(username, password)
         msg += "\n  ✔  password set" if ok_pw else f"\n  ⚠  password not set: {perr or 'chpasswd failed'}"
-    if email and password and ok_pw:
+        if ok_pw:
+            auditclient.log("password_change_required", detail=username)
+    if email and ok_pw:
         from threading import Thread
         from iitgpu import mailer as _mailer
+        # Trigger welcome; password is never included — user receives it in person.
         Thread(target=_mailer.send_welcome,
-               args=(username, password, email, full_name),
+               args=(username, email, full_name),
                daemon=True).start()
+        auditclient.log("welcome_sent", detail=username, meta={"email": email})
     return True, msg
 
 
@@ -428,7 +433,7 @@ def _provision_menu(style) -> None:
     email = email.strip()
     notes = questionary.text("Notes (optional):", style=style).ask() or ""
     pw = questionary.password(
-        "Password (leave blank to set later):", style=style).ask() or ""
+        "Initial password — user will be required to change on first login (leave blank to set later):", style=style).ask() or ""
     if pw:
         pw2 = questionary.password("Confirm password:", style=style).ask() or ""
         if pw != pw2:

@@ -113,18 +113,53 @@ def test_provision_user_uses_full_path_and_sudo_n():
 
 
 def test_provision_user_sets_password_via_chpasswd():
-    with patch("subprocess.run", return_value=_proc(out="done")) as r:
-        ok, msg = admin.provision_user("alice", password="s3cr3t")
+    with patch("subprocess.run", return_value=_proc(out="done")) as r, \
+         patch("iitgpu.admin.daemonclient.create_user", return_value=(True, "ok")), \
+         patch("iitgpu.admin.auditclient.log"):
+        ok, msg = admin.provision_user("alice", password="s3cr3t", email="a@b.com")
     assert ok
-    # Two subprocess.run calls: adduser then chpasswd
-    assert r.call_count == 2
-    chpasswd_call = r.call_args_list[1]
-    cmd = chpasswd_call[0][0]
-    assert "chpasswd" in cmd
-    assert cmd[0] == "sudo" and cmd[1] == "-n"
-    # Password delivered via stdin, not as a CLI arg
-    kwargs = chpasswd_call[1]
-    assert "alice:s3cr3t\n" in (kwargs.get("input") or "")
+    cmds = [c[0][0] for c in r.call_args_list]
+    assert any("iit-gpu-adduser" in " ".join(c) for c in cmds)
+    chpasswd_call = next(c for c in r.call_args_list if "chpasswd" in c[0][0])
+    assert "alice:s3cr3t\n" in (chpasswd_call[1].get("input") or "")
+
+
+def test_provision_user_welcome_sent_without_password():
+    """send_welcome must be called without the password — never passed to mailer."""
+    with patch("subprocess.run", return_value=_proc(out="done")), \
+         patch("iitgpu.admin.daemonclient.create_user", return_value=(True, "ok")), \
+         patch("iitgpu.admin.auditclient.log"), \
+         patch("iitgpu.mailer.send_welcome") as mock_welcome:
+        admin.provision_user("alice", password="s3cr3t",
+                             email="alice@iit.lk", full_name="Alice")
+        import time; time.sleep(0.05)
+    assert mock_welcome.called
+    args, kwargs = mock_welcome.call_args
+    assert "s3cr3t" not in str(args) and "s3cr3t" not in str(kwargs), \
+        "send_welcome must not receive the password"
+
+
+def test_provision_user_must_change_pw_flag_set_when_password_given():
+    """create_user must be called with must_change_pw=True when a password is set."""
+    with patch("subprocess.run", return_value=_proc(out="done")), \
+         patch("iitgpu.admin.daemonclient.create_user", return_value=(True, "ok")) as mock_cu, \
+         patch("iitgpu.admin.auditclient.log"):
+        admin.provision_user("alice", password="s3cr3t",
+                             email="alice@iit.lk", role="tool")
+    assert mock_cu.called
+    _, kwargs = mock_cu.call_args
+    assert kwargs.get("must_change_pw") is True
+
+
+def test_provision_user_must_change_pw_false_when_no_password():
+    """must_change_pw must be False when no password is provided at provision time."""
+    with patch("subprocess.run", return_value=_proc(out="done")), \
+         patch("iitgpu.admin.daemonclient.create_user", return_value=(True, "ok")) as mock_cu, \
+         patch("iitgpu.admin.auditclient.log"):
+        admin.provision_user("alice", password="", email="alice@iit.lk", role="tool")
+    assert mock_cu.called
+    _, kwargs = mock_cu.call_args
+    assert kwargs.get("must_change_pw") is False
 
 
 def test_provision_user_skips_password_on_adduser_failure():

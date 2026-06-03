@@ -73,6 +73,37 @@ def _run_selftest() -> int:
     return 0 if not failures else 1
 
 
+def _must_change_password(username: str) -> bool:
+    """True if the user's first-login password change flag is set in users.db."""
+    try:
+        from iitgpu import daemonclient
+        return daemonclient.check_must_change_pw(username)
+    except Exception:
+        return False
+
+
+def _do_password_change(username: str) -> bool:
+    """Prompt the user to change their password via passwd(1). Returns True on success."""
+    import subprocess
+    from iitgpu.ui import warn, info, ok as _ok
+    warn("Your password must be changed before you can continue.")
+    info("Enter your current password, then choose a new one:")
+    try:
+        r = subprocess.run(["passwd"], timeout=120)
+        if r.returncode == 0:
+            try:
+                from iitgpu import daemonclient, auditclient
+                daemonclient.clear_must_change_pw(username)
+                auditclient.log("password_changed", detail=username)
+            except Exception:
+                pass
+            _ok("Password changed. Starting the GPU Manager...")
+            return True
+        return False
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="iit-gpu-manager")
     parser.add_argument("--demo", action="store_true", help="Simulate SLURM (no cluster needed)")
@@ -106,6 +137,12 @@ def main() -> None:
 
     import threading as _th
     _th.Thread(target=_fire_login_notification, daemon=True).start()
+
+    if _must_change_password(_login_user):
+        if not _do_password_change(_login_user):
+            from iitgpu.ui import err as _err
+            _err("Password change failed or cancelled. Contact the IIT Research Team.")
+            sys.exit(1)
 
     try:
         if not args.no_splash:

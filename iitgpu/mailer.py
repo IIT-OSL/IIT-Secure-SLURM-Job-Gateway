@@ -75,14 +75,13 @@ def _admin_bcc() -> list[str]:
         return []
 
 
-def send_welcome(username: str, password: str, email: str,
-                 full_name: str = "") -> None:
+def send_welcome(username: str, email: str, full_name: str = "") -> None:
+    """Send welcome email. No password, no admin BCC — this email is for the user only."""
     from iitgpu.config import load_config
     cfg  = load_config()
     host = cfg.gateway_host
     port = cfg.gateway_port
 
-    bcc          = [e for e in _admin_bcc() if e != email]
     display_name = full_name or username
     ssh_cmd      = f"ssh -p {port} {username}@{host}"
     subject      = f"[IIT GPU Cluster] Your account is ready — {username}"
@@ -100,19 +99,15 @@ def send_welcome(username: str, password: str, email: str,
         <tr><td bgcolor="#111827" style="background:#111827;padding:28px 32px 26px">
           <p style="margin:0 0 20px;color:#4B5563;font-size:11px;font-weight:600;letter-spacing:2px;text-transform:uppercase">{_CLUSTER_NAME}</p>
           <h1 style="margin:0 0 8px;color:#F9FAFB;font-size:22px;font-weight:600;letter-spacing:-0.3px;line-height:1.3">Welcome, {display_name}</h1>
-          <p style="margin:0;color:#9CA3AF;font-size:14px;line-height:1.6">Your GPU cluster account has been created. Your login credentials are below.</p>
+          <p style="margin:0;color:#9CA3AF;font-size:14px;line-height:1.6">Your GPU cluster account has been created and is ready to use.</p>
         </td></tr>
 
         <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:28px 32px 8px">
-          <p style="margin:0 0 16px;color:#9CA3AF;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Login Credentials</p>
+          <p style="margin:0 0 16px;color:#9CA3AF;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Account Details</p>
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr>
               <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Username</td>
               <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{username}</td>
-            </tr>
-            <tr>
-              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Password</td>
-              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{password}</td>
             </tr>
             <tr>
               <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">SSH Command</td>
@@ -122,7 +117,12 @@ def send_welcome(username: str, password: str, email: str,
         </td></tr>
 
         <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:4px 32px 28px">
-          <div style="margin-top:20px;border-left:3px solid #3B82F6;padding:14px 18px;background:#EFF6FF">
+          <div style="margin-top:20px;border-left:3px solid #F59E0B;padding:14px 18px;background:#FFFBEB">
+            <p style="margin:0 0 6px;color:#92400E;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">First Login — Password Change Required</p>
+            <p style="margin:0;color:#78350F;font-size:13px;line-height:1.7">Your administrator has set an initial password for you. <strong>You will be required to change it the first time you log in.</strong> Your initial password will be provided by your administrator in person.</p>
+          </div>
+
+          <div style="margin-top:14px;border-left:3px solid #3B82F6;padding:14px 18px;background:#EFF6FF">
             <p style="margin:0 0 6px;color:#1D4ED8;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">Network Access Restriction</p>
             <p style="margin:0;color:#1E40AF;font-size:13px;line-height:1.7">You can <strong>only</strong> connect from within the <strong>IIT-CityCampus-SpencerBuilding</strong> network. Access from any other network is blocked.</p>
           </div>
@@ -139,8 +139,9 @@ def send_welcome(username: str, password: str, email: str,
               <li>Open a terminal and run:<br>
                 <code style="display:inline-block;margin-top:4px;background:#F3F4F6;padding:5px 10px;border-radius:4px;font-family:'SF Mono',Consolas,monospace;font-size:12px;color:#111827">{ssh_cmd}</code>
               </li>
-              <li>Enter your password when prompted.</li>
-              <li>The GPU Manager interface will launch automatically.</li>
+              <li>Enter your initial password (provided by your administrator) when prompted.</li>
+              <li>You will immediately be asked to set a new personal password.</li>
+              <li>The GPU Manager interface will launch automatically after that.</li>
             </ol>
           </div>
 
@@ -166,7 +167,8 @@ def send_welcome(username: str, password: str, email: str,
 </body>
 </html>"""
 
-    _fire(email, subject, html, bcc or None)
+    # No BCC: welcome email is private to the recipient — never share with other admins.
+    _fire(email, subject, html, None)
 
 
 def send_offboard(username: str, email: str, full_name: str = "") -> None:

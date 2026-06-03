@@ -90,21 +90,28 @@ def _init_audit_db(conn: sqlite3.Connection) -> None:
 def _init_users_db(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            username   TEXT PRIMARY KEY,
-            uid        INTEGER,
-            full_name  TEXT,
-            email      TEXT NOT NULL,
-            role       TEXT NOT NULL CHECK (role IN ('admin','tool','shell')),
-            status     TEXT NOT NULL DEFAULT 'active'
-                       CHECK (status IN ('active','offboarded')),
-            created_at TEXT NOT NULL,
-            created_by TEXT NOT NULL,
-            notes      TEXT
+            username      TEXT PRIMARY KEY,
+            uid           INTEGER,
+            full_name     TEXT,
+            email         TEXT NOT NULL,
+            role          TEXT NOT NULL CHECK (role IN ('admin','tool','shell')),
+            status        TEXT NOT NULL DEFAULT 'active'
+                          CHECK (status IN ('active','offboarded')),
+            created_at    TEXT NOT NULL,
+            created_by    TEXT NOT NULL,
+            notes         TEXT,
+            must_change_pw INTEGER NOT NULL DEFAULT 0
         )
     """)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
     conn.execute("PRAGMA journal_mode=WAL")
+    # Migrate existing DBs that predate the must_change_pw column.
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN must_change_pw INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     conn.commit()
 
 
@@ -281,7 +288,10 @@ def _h_users_create(payload: dict, peer_uid: int,
         uid_val = pwd.getpwnam(username).pw_uid
     except KeyError:
         uid_val = None
-    now = datetime.now(timezone.utc).isoformat()
+    now            = datetime.now(timezone.utc).isoformat()
+    must_change_pw = 1 if payload.get("must_change_pw") else 0
+    full_name      = payload.get("full_name", "")
+    notes          = payload.get("notes", "")
     existing = users_conn.execute(
         "SELECT status FROM users WHERE username=?", (username,)
     ).fetchone()
@@ -291,23 +301,24 @@ def _h_users_create(payload: dict, peer_uid: int,
                 return False, None, f"user '{username}' already exists and is active"
             users_conn.execute(
                 "UPDATE users SET uid=?,full_name=?,email=?,role=?,status='active',"
-                "created_at=?,created_by=?,notes=? WHERE username=?",
-                (uid_val, payload.get("full_name", ""), email, role,
-                 now, peer_user, payload.get("notes", ""), username),
+                "created_at=?,created_by=?,notes=?,must_change_pw=? WHERE username=?",
+                (uid_val, full_name, email, role,
+                 now, peer_user, notes, must_change_pw, username),
             )
         else:
             users_conn.execute(
                 "INSERT INTO users "
-                "(username,uid,full_name,email,role,status,created_at,created_by,notes) "
-                "VALUES (?,?,?,?,?,'active',?,?,?)",
-                (username, uid_val, payload.get("full_name", ""), email, role,
-                 now, peer_user, payload.get("notes", "")),
+                "(username,uid,full_name,email,role,status,created_at,created_by,notes,must_change_pw) "
+                "VALUES (?,?,?,?,?,'active',?,?,?,?)",
+                (username, uid_val, full_name, email, role,
+                 now, peer_user, notes, must_change_pw),
             )
         users_conn.commit()
     except sqlite3.IntegrityError as exc:
         return False, None, str(exc)
     _self_audit(audit_conn, peer_user, "admin_provision_user",
-                detail=username, meta={"role": role, "email": email})
+                detail=username, meta={"role": role, "email": email,
+                                       "must_change_pw": bool(must_change_pw)})
     return True, {"username": username}, ""
 
 
@@ -448,6 +459,40 @@ def _h_users_admin_emails(users_conn: sqlite3.Connection):
     return True, {"emails": [r[0] for r in rows]}, ""
 
 
+def _h_users_check_must_change_pw(payload: dict, peer_uid: int,
+                                   users_conn: sqlite3.Connection):
+    """Accessible to the user themselves or any admin."""
+    username  = payload.get("username", "").strip()
+    peer_user = _uid_to_username(peer_uid) or ""
+    if not username:
+        return False, None, "username required"
+    if peer_user != username and not _uid_is_admin(peer_uid):
+        return False, None, "permission denied"
+    row = users_conn.execute(
+        "SELECT must_change_pw FROM users WHERE username=? AND status='active'",
+        (username,)
+    ).fetchone()
+    if not row:
+        return False, None, "user not found"
+    return True, {"must_change_pw": bool(row[0])}, ""
+
+
+def _h_users_clear_must_change_pw(payload: dict, peer_uid: int,
+                                   users_conn: sqlite3.Connection):
+    """User clears their own flag after changing password."""
+    username  = payload.get("username", "").strip()
+    peer_user = _uid_to_username(peer_uid) or ""
+    if not username:
+        return False, None, "username required"
+    if peer_user != username and not _uid_is_admin(peer_uid):
+        return False, None, "permission denied"
+    users_conn.execute(
+        "UPDATE users SET must_change_pw=0 WHERE username=?", (username,)
+    )
+    users_conn.commit()
+    return True, {"username": username}, ""
+
+
 def _h_maillog_tail(payload: dict, peer_uid: int,
                     audit_conn: sqlite3.Connection):
     peer_user = _uid_to_username(peer_uid) or str(peer_uid)
@@ -535,6 +580,12 @@ def _dispatch(verb: str, payload: dict, peer_uid: int | None,
 
     if verb == "users.admin_emails":
         return _h_users_admin_emails(users_conn)
+
+    if verb == "users.check_must_change_pw":
+        return _h_users_check_must_change_pw(payload, peer_uid, users_conn)
+
+    if verb == "users.clear_must_change_pw":
+        return _h_users_clear_must_change_pw(payload, peer_uid, users_conn)
 
     if verb in _ADMIN_VERBS:
         if not _uid_is_admin(peer_uid):
