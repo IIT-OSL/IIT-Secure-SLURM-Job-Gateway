@@ -168,8 +168,8 @@ def test_run_uses_pipe_when_stdin_data_given():
     with patch("subprocess.run", return_value=_proc()) as r:
         admin._run(["cat"], stdin_data="hello\n")
     kwargs = r.call_args[1]
-    assert kwargs["stdin"] == sp.PIPE
     assert kwargs["input"] == "hello\n"
+    assert "stdin" not in kwargs
 
 
 # ── Audit log ─────────────────────────────────────────────────────────────────

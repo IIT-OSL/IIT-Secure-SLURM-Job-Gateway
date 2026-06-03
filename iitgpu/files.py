@@ -149,13 +149,15 @@ def file_manager() -> None:
     import getpass
     import questionary
     from questionary import Style
-    from iitgpu.config import load_config
+    from iitgpu.config import load_config, user_dir
     from iitgpu.ui import console, header, info, ok, err
 
     style = Style([("qmark", "fg:cyan bold"), ("pointer", "fg:cyan bold")])
     cfg = load_config()
-    start = str(Path(cfg.nfs_root) / getpass.getuser())
+    start = user_dir(cfg, getpass.getuser())
     cur = start if Path(start).exists() and in_jail(start) else cfg.nfs_root
+    # ensure users/ root is also jailed correctly
+    users_root = str(Path(cfg.nfs_root) / 'users')
 
     while True:
         if not in_jail(cur):

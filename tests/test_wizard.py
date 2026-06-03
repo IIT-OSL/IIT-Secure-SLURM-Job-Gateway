@@ -142,7 +142,7 @@ def test_generated_loader_script_is_valid_python(tmp_path, monkeypatch):
     data_dest, script_path = wiz._inline_paste(cfg, user)
 
     # Find the generated script by looking in the scripts dir
-    scripts_dir = tmp_path / user / "scripts"
+    scripts_dir = tmp_path / "users" / user / "scripts"
     scripts = list(scripts_dir.glob("*_load_data.py")) if scripts_dir.exists() else []
     assert scripts, "No loader script was generated"
     script_file = scripts[0]

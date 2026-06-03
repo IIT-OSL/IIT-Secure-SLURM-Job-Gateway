@@ -116,6 +116,10 @@ def load_config() -> Config:
     )
 
 
+def user_dir(cfg: "Config", username: str) -> str:
+    return str(Path(cfg.nfs_root) / "users" / username).replace("\\", "/")
+
+
 def jobs_dir(cfg: Config) -> str:
     return str(Path(cfg.nfs_root) / cfg.jobs_subdir).replace("\\", "/")
 

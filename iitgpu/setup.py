@@ -108,7 +108,7 @@ def _run_env_setup(cfg: Config) -> None:
 def _run_data_upload(cfg: Config) -> None:
     header("Data Upload")
     user = getpass.getuser()
-    dest_dir = Path(cfg.nfs_root) / user / "data"
+    dest_dir = Path(user_dir(cfg, user)) / "data"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_dir.chmod(0o770)
     try:
@@ -205,8 +205,8 @@ def _run_smoke_test(cfg: Config) -> None:
     # (a different user) and can't open the script without world-read permission.
     os.chmod(tmp_path, 0o644)
 
-    user_dir = Path(cfg.nfs_root) / getpass.getuser()
-    user_dir.mkdir(parents=True, exist_ok=True)
+    user_home = Path(user_dir(cfg, getpass.getuser()))
+    user_home.mkdir(parents=True, exist_ok=True)
 
     auditclient.log("smoke_test_start", detail=env.name)
     if not auditclient.log_or_block("job_submit", detail="smoke_test"):

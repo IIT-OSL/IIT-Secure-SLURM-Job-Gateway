@@ -12,7 +12,7 @@ import questionary
 from questionary import Style
 
 from iitgpu import auditclient
-from iitgpu.config import load_config, jobs_dir
+from iitgpu.config import load_config, jobs_dir, user_dir
 from iitgpu.jobs import JobSpec, make_job_folder, render_sbatch, resource_defaults
 from iitgpu.slurm import submit_job
 from iitgpu.ui import err, header, info, kv, ok, panel, warn
@@ -109,8 +109,8 @@ def _browse_data_folder(start_dir: str) -> str | None:
 
 
 def _ensure_scripts_dir(cfg, user: str) -> str | None:
-    """Create /shared/<user>/scripts/ with 0o770 + gpuusers gid, return path."""
-    scripts_dir = Path(cfg.nfs_root) / user / "scripts"
+    """Create /shared/users/<user>/scripts/ with 0o770 + gpuusers gid, return path."""
+    scripts_dir = Path(user_dir(cfg, user)) / "scripts"
     dest = str(scripts_dir)
     if not in_jail(dest):
         warn("Scripts directory is outside the allowed jail.")
@@ -126,7 +126,7 @@ def _ensure_scripts_dir(cfg, user: str) -> str | None:
 
 
 def _inline_paste(cfg, user: str) -> tuple[str | None, str | None]:
-    """Collect pasted data, write to /shared/<user>/data/<ts>_inline.txt.
+    """Collect pasted data, write to /shared/users/<user>/data/<ts>_inline.txt.
 
     Returns (data_path, script_path_or_None).
     script_path is non-None only if user agrees to use generated script as job.
@@ -147,7 +147,7 @@ def _inline_paste(cfg, user: str) -> tuple[str | None, str | None]:
         return None, None
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    data_subdir = Path(cfg.nfs_root) / user / "data"
+    data_subdir = Path(user_dir(cfg, user)) / "data"
     data_subdir.mkdir(parents=True, exist_ok=True)
     data_dest = str(data_subdir / f"{ts}_inline.txt")
 
@@ -405,7 +405,7 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
             return
 
         if data_choice.startswith("a)"):
-            _start = str(Path(cfg.nfs_root) / user)
+            _start = str(Path(user_dir(cfg, user)))
             if not Path(_start).exists():
                 _start = cfg.nfs_root
             if _prefill_dp and Path(_prefill_dp).exists() and in_jail(_prefill_dp):
@@ -424,7 +424,7 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
         elif data_choice.startswith("c)"):
             # _download_from_url(folder_path) writes files into a folder and returns None.
             # Build a per-user download staging folder, then pass it as the target.
-            _dl_folder = str(Path(cfg.nfs_root) / user / "data" / "downloads")
+            _dl_folder = str(Path(user_dir(cfg, user)) / "data" / "downloads")
             if in_jail(_dl_folder):
                 Path(_dl_folder).mkdir(parents=True, exist_ok=True)
                 from iitgpu.upload import _download_from_url
@@ -558,7 +558,7 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
 
     # Non-notebook: show script browser if not already set from inline paste
     if script_path is None:
-        _start = str(Path(cfg.nfs_root) / user)
+        _start = str(Path(user_dir(cfg, user)))
         if not Path(_start).exists():
             _start = cfg.nfs_root
         _prefill_sp = _tdefaults.get("script_path", "")

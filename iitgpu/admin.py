@@ -40,14 +40,12 @@ def _run(cmd: list[str], timeout: int = 15,
          stdin_data: str | None = None) -> tuple[int, str, str]:
     """Run a subprocess with stdin always closed (DEVNULL) unless stdin_data is given."""
     try:
-        r = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            input=stdin_data,
-        )
+        kw: dict = {"capture_output": True, "text": True, "timeout": timeout}
+        if stdin_data is not None:
+            kw["input"] = stdin_data
+        else:
+            kw["stdin"] = subprocess.DEVNULL
+        r = subprocess.run(cmd, **kw)
         return r.returncode, r.stdout, r.stderr
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, "", str(exc)
