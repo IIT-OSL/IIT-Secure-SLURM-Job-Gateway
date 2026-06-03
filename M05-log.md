@@ -3,9 +3,10 @@
 **Date:** 2026-06-03
 **Author:** Daham Dissanayake
 **Scope:** Post-M04 session — Resend SMTP mail pipeline, branded HTML job notifications,
-`/shared/users/` storage restructure, user provisioning bug fix, and full ACL grant
-for slurmadmin and daham across all `/shared` directories.
-**Tests:** 439 passing (up from 432 at M04 start)
+`/shared/users/` storage restructure, user provisioning bug fix, full ACL grant
+for slurmadmin and daham across all `/shared` directories, and per-user file
+access jail (browse + upload scoped to own folder; admins retain full access).
+**Tests:** 450 passing (up from 439 at session start)
 **Repo:** `https://github.com/DahamDissanayake/IIT-Secure-SLURM-Job-Gateway`
 **Deployed at:** `/opt/iit-gpu/` on login node (192.168.122.10)
 
@@ -22,7 +23,8 @@ for slurmadmin and daham across all `/shared` directories.
 7. [ACL Access — slurmadmin and daham](#7-acl-access--slurmadmin-and-daham)
 8. [Test Fixes](#8-test-fixes)
 9. [Commits This Session](#9-commits-this-session)
-10. [Active State](#10-active-state)
+10. [Per-User File Access Jail](#10-per-user-file-access-jail)
+11. [Active State](#11-active-state)
 
 ---
 
@@ -46,6 +48,7 @@ cleaning up the shared NFS layout.
 | Storage | 7 user workspace dirs physically moved from `/shared/` to `/shared/users/` |
 | Access | Recursive ACLs set on all `/shared/*` dirs for slurmadmin (UID 1000) and daham (UID 1002) |
 | Access | slurmadmin added to `gpuusers` group on login node |
+| Access | Per-user file jail: browse restricted to `users/<u>/` + models/envs; upload to `users/<u>/` only |
 | Tests | `test_e2e.py` PYTHONPATH fix — was failing when pytest run without env set |
 | Tests | Two tests updated to match new `_run()` and `user_dir()` behaviour |
 
@@ -403,13 +406,72 @@ scripts_dir = tmp_path / "users" / user / "scripts"
 | `a79988a` | `fix(mail): dark header + white content to survive email client overrides` |
 | `9b3c1c2` | `feat(mail): add IIT Research Team credit to footer` |
 | `e21e6e9` | `fix(users): provision error + /shared/users/ restructure` |
+| `114b299` | `feat(jail): per-user file scope — browse own dir + models/envs, upload to own dir only` |
 
 All commits pushed to `main` on `github.com/DahamDissanayake/IIT-Secure-SLURM-Job-Gateway`.
 `/opt/iit-gpu/` redeployed after each push via `bash deploy/redeploy-igm.sh`.
 
 ---
 
-## 10. Active State
+## 10. Per-User File Access Jail
+
+### Motivation
+
+Before this fix, `in_jail()` in `validate.py` allowed any path inside `/shared`
+for all users. A regular user logged in as `tuser` could browse to `/shared/users/daham/`,
+read other users' datasets, and delete files anywhere in `/shared`. The upload TUI
+listed every root subdirectory of `/shared` as a valid upload target.
+
+### Fix
+
+Three files changed + 11 new tests.
+
+#### `iitgpu/validate.py` — new helpers
+
+```python
+user_browse_roots(nfs_root, username) -> list[str]
+    # [shared/users/<u>, shared/models, shared/envs]
+
+user_upload_root(nfs_root, username) -> str
+    # shared/users/<u>
+
+in_user_browse_jail(path, nfs_root, username) -> bool
+    # True for own dir + models + envs
+
+in_user_upload_jail(path, nfs_root, username) -> bool
+    # True for own dir only
+```
+
+#### `iitgpu/files.py` — `file_manager()` is now role-aware
+
+| User type | Navigation (`_in_nav`) | Mutations (`_in_mut`) |
+|-----------|----------------------|----------------------|
+| Regular | `in_user_browse_jail` — own dir + models + envs | `in_user_upload_jail` — own dir only |
+| Admin | `in_jail` — full NFS jail | `in_jail` — full NFS jail |
+
+In read-only areas (models/envs for regular users):
+- `[ + new folder ]` row is suppressed
+- Directory action menu shows only `Open` / `Cancel` (no Rename/Delete)
+- File action menu shows only `Show size` / `Cancel`
+- Status line prints `Read-only area — browsing only`
+
+#### `iitgpu/upload.py` — `run_upload()` scopes base dir by role
+
+| User type | Base dir | Folder list |
+|-----------|----------|------------|
+| Regular | `shared/users/<username>/` | Sub-folders of own dir only; option to upload directly to root of own dir |
+| Admin | `shared/` (entire NFS root) | All subdirectories (unchanged behaviour) |
+
+#### Commit
+
+```
+114b299  feat(jail): per-user file scope — browse own dir + models/envs, upload to own dir only
+```
+
+---
+
+
+## 11. Active State
 
 ### Services
 
@@ -422,7 +484,7 @@ All commits pushed to `main` on `github.com/DahamDissanayake/IIT-Secure-SLURM-Jo
 ### Tests
 
 ```
-439 passed  (PYTHONPATH=. python3 -m pytest tests/ -q)
+450 passed  (PYTHONPATH=. python3 -m pytest tests/ -q)
 ```
 
 ### Mail delivery
