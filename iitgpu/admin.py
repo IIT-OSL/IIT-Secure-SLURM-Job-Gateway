@@ -742,7 +742,7 @@ def admin_menu() -> None:
                 info("No job history found.")
             for entry in rows:
                 t.add_row(entry.job_id, entry.user, entry.name, entry.state,
-                          entry.elapsed, entry.partition)
+                          entry.time_used, entry.partition)
             console.print(t)
             questionary.press_any_key_to_continue("").ask()
 
