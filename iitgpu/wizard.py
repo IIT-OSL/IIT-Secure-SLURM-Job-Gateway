@@ -5,7 +5,9 @@ import getpass
 import grp
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_LK = timezone(timedelta(hours=5, minutes=30))
 from pathlib import Path
 
 import questionary
@@ -146,7 +148,7 @@ def _inline_paste(cfg, user: str) -> tuple[str | None, str | None]:
         warn("No data pasted.")
         return None, None
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(_LK).strftime("%Y%m%d_%H%M%S")
     data_subdir = Path(user_dir(cfg, user)) / "data"
     data_subdir.mkdir(parents=True, exist_ok=True)
     data_dest = str(data_subdir / f"{ts}_inline.txt")
