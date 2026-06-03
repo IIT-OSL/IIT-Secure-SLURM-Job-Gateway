@@ -282,14 +282,27 @@ def _h_users_create(payload: dict, peer_uid: int,
     except KeyError:
         uid_val = None
     now = datetime.now(timezone.utc).isoformat()
+    existing = users_conn.execute(
+        "SELECT status FROM users WHERE username=?", (username,)
+    ).fetchone()
     try:
-        users_conn.execute(
-            "INSERT INTO users "
-            "(username,uid,full_name,email,role,status,created_at,created_by,notes) "
-            "VALUES (?,?,?,?,?,'active',?,?,?)",
-            (username, uid_val, payload.get("full_name", ""), email, role,
-             now, peer_user, payload.get("notes", "")),
-        )
+        if existing:
+            if existing[0] != "offboarded":
+                return False, None, f"user '{username}' already exists and is active"
+            users_conn.execute(
+                "UPDATE users SET uid=?,full_name=?,email=?,role=?,status='active',"
+                "created_at=?,created_by=?,notes=? WHERE username=?",
+                (uid_val, payload.get("full_name", ""), email, role,
+                 now, peer_user, payload.get("notes", ""), username),
+            )
+        else:
+            users_conn.execute(
+                "INSERT INTO users "
+                "(username,uid,full_name,email,role,status,created_at,created_by,notes) "
+                "VALUES (?,?,?,?,?,'active',?,?,?)",
+                (username, uid_val, payload.get("full_name", ""), email, role,
+                 now, peer_user, payload.get("notes", "")),
+            )
         users_conn.commit()
     except sqlite3.IntegrityError as exc:
         return False, None, str(exc)
