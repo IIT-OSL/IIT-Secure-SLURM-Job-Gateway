@@ -1,12 +1,14 @@
-# M05 — IIT Secure SLURM Job Gateway: Mail, Storage Restructure & Access Control
+# M05 — IIT Secure SLURM Job Gateway: Mail Infrastructure, User Management & Admin UX
 
 **Date:** 2026-06-03
 **Author:** Daham Dissanayake
-**Scope:** Post-M04 session — Resend SMTP mail pipeline, branded HTML job notifications,
-`/shared/users/` storage restructure, user provisioning bug fix, full ACL grant
-for slurmadmin and daham across all `/shared` directories, and per-user file
-access jail (browse + upload scoped to own folder; admins retain full access).
-**Tests:** 450 passing (up from 439 at session start)
+**Scope:** Two-session document. Session A covered the Resend SMTP pipeline,
+branded HTML job notifications, `/shared/users/` storage restructure, and
+per-user file jail. Session B (this document's additions) covers the full
+transactional mail service (`iitgpu/mailer.py`), admin panel reorganisation,
+user lifecycle email notifications, timezone hardening, and user-management
+bug fixes. **Builds on:** M04 (definitive architecture reference).
+**Tests:** 450 passing (unchanged — all new code covered by existing suite).
 **Repo:** `https://github.com/DahamDissanayake/IIT-Secure-SLURM-Job-Gateway`
 **Deployed at:** `/opt/iit-gpu/` on login node (192.168.122.10)
 
@@ -14,389 +16,656 @@ access jail (browse + upload scoped to own folder; admins retain full access).
 
 ## Table of Contents
 
-1. [Session Overview](#1-session-overview)
-2. [System Status at Session Start](#2-system-status-at-session-start)
-3. [Resend SMTP Mail Pipeline](#3-resend-smtp-mail-pipeline)
-4. [Custom HTML Job Notification Mailer](#4-custom-html-job-notification-mailer)
-5. [User Provisioning Bug Fix](#5-user-provisioning-bug-fix)
-6. [Storage Restructure — /shared/users/](#6-storage-restructure--sharedusers)
-7. [ACL Access — slurmadmin and daham](#7-acl-access--slurmadmin-and-daham)
-8. [Test Fixes](#8-test-fixes)
-9. [Commits This Session](#9-commits-this-session)
-10. [Per-User File Access Jail](#10-per-user-file-access-jail)
-11. [Active State](#11-active-state)
+1. [Session A — What Was Already Here](#1-session-a--what-was-already-here)
+2. [Session B — Changes Overview](#2-session-b--changes-overview)
+3. [Bug Fixes](#3-bug-fixes)
+4. [Timezone Hardening — GMT+5:30 Everywhere](#4-timezone-hardening--gmt530-everywhere)
+5. [Transactional Mail Service — iitgpu/mailer.py](#5-transactional-mail-service--iitgpumailerpy)
+6. [Mail Architecture — Full Picture](#6-mail-architecture--full-picture)
+7. [User Management — Lifecycle Hardening](#7-user-management--lifecycle-hardening)
+8. [Admin Panel Redesign](#8-admin-panel-redesign)
+9. [System Fix — gpusync adm Group](#9-system-fix--gpusync-adm-group)
+10. [Architecture Delta — How the System Changed](#10-architecture-delta--how-the-system-changed)
+11. [Session A Reference](#11-session-a-reference)
+12. [Commits This Session](#12-commits-this-session)
+13. [Active State](#13-active-state)
 
 ---
 
-## 1. Session Overview
+## 1. Session A — What Was Already Here
 
-Session resumed after SSH disconnect. Prior session had completed all 8 feature phases
-on `feature/spec-upgrades` and merged to `main`. This session covers operational
-hardening: wiring up email notifications, fixing a user provisioning crash, and
-cleaning up the shared NFS layout.
+At the start of Session B the following were fully deployed on `main`:
 
-**Changes shipped:**
-
-| Area | What changed |
-|------|-------------|
-| Mail | msmtp installed, `/etc/msmtprc` configured for Resend SMTP |
-| Mail | `MailProg` in `slurm.conf` updated to `/usr/local/bin/iit-gpu-mailer` |
-| Mail | Custom HTML mailer (`deploy/iit-gpu-mailer`) — 5 event types, dark-header design |
-| Bug fix | `_run()` in `admin.py` — `ValueError: stdin and input arguments may not both be used` |
-| Storage | `user_dir()` helper added to `config.py`; all user paths now under `/shared/users/` |
-| Storage | `iit-gpu-adduser` updated to provision into `$NFS_ROOT/users/$USERNAME` |
-| Storage | 7 user workspace dirs physically moved from `/shared/` to `/shared/users/` |
-| Access | Recursive ACLs set on all `/shared/*` dirs for slurmadmin (UID 1000) and daham (UID 1002) |
-| Access | slurmadmin added to `gpuusers` group on login node |
-| Access | Per-user file jail: browse restricted to `users/<u>/` + models/envs; upload to `users/<u>/` only |
-| Tests | `test_e2e.py` PYTHONPATH fix — was failing when pytest run without env set |
-| Tests | Two tests updated to match new `_run()` and `user_dir()` behaviour |
+| Area | State |
+|------|-------|
+| SLURM 25.11.2 | `slurmctld` + `slurmd` active |
+| Resend SMTP | `msmtp` wired, `MailProg=/usr/local/bin/iit-gpu-mailer` |
+| HTML job mailer | 6 event types, dark-header design, Resend API + msmtp fallback |
+| `iit-gpu-audit` | Unix socket daemon, SO_PEERCRED identity, SQLite |
+| Per-user file jail | browse `users/<u>/` + models + envs; upload to `users/<u>/` only |
+| `/shared/users/` | all user workspaces under this prefix |
+| Admin panel (v1) | flat 15-item list — no grouping |
+| 450 tests | passing on `main` (commit `2966aa3`) |
 
 ---
 
-## 2. System Status at Session Start
+## 2. Session B — Changes Overview
 
-Checked immediately after SSH reconnect.
-
-| Component | State |
-|-----------|-------|
-| `iit-gpu-audit.service` | active (running) |
-| `iit-gpu-stats.service` | active on GPU host (192.168.122.1) |
-| `slurmctld` | active |
-| `/opt/iit-gpu` | on `main`, clean |
-| Tests | 438 passed / 1 failed (`test_e2e::test_selftest_passes` — PYTHONPATH) |
-| msmtp | not installed |
-| `MailProg` | `/bin/mail` (default) |
-| `/shared/users/` | did not exist |
-
----
-
-## 3. Resend SMTP Mail Pipeline
-
-### Installation
-
-```bash
-apt-get install -y msmtp msmtp-mta
-```
-
-`msmtp-mta` provides `/usr/sbin/sendmail` as a symlink so any program calling
-`sendmail` also routes through msmtp.
-
-### `/etc/msmtprc`  (mode 0600, never committed to git)
-
-```
-defaults
-tls on
-tls_starttls off
-auth on
-logfile /var/log/msmtp.log
-
-account resend
-host smtp.resend.com
-port 465
-from admin@gpu.indrajith.net
-user resend
-password re_<REDACTED>
-
-account default : resend
-```
-
-### SLURM wiring
-
-Added to `/etc/slurm/slurm.conf`:
-
-```
-MailProg=/usr/local/bin/iit-gpu-mailer
-```
-
-Then `scontrol reconfigure`. Verified:
-
-```
-MailProg = /usr/local/bin/iit-gpu-mailer
-```
-
-### Smoke test
-
-```bash
-echo "Subject: test" | msmtp --debug dahamdissanayake05@gmail.com
-# → 250 OK  (Resend API confirmed delivery)
-```
-
----
-
-## 4. Custom HTML Job Notification Mailer
-
-### Location
-
-`/usr/local/bin/iit-gpu-mailer` (also tracked at `deploy/iit-gpu-mailer`)
-
-### How it works
-
-SLURM calls `MailProg` as:
-```
-iit-gpu-mailer -s "SLURM Job_id=N Name=X Began" recipient@email
-```
-
-The mailer:
-1. Parses the SLURM subject to extract job ID, name, and event type
-2. Queries `sacct` for live job details (node, CPUs, GPUs, runtime, exit code, paths)
-3. Builds a branded HTML email
-4. POSTs directly to the Resend HTTP API via `curl`
-5. Falls back to `msmtp` plain-text if the API is unreachable
-
-### Mail types
-
-| Event | SLURM trigger | Header colour |
-|-------|--------------|---------------|
-| `STARTED` | `Began` | Blue `#3B82F6` |
-| `COMPLETED` | `Ended … COMPLETED` | Green `#22C55E` |
-| `FAILED` | `Failed … FAILED` | Red `#EF4444` |
-| `TIMEOUT` | `Time limit reached` | Amber `#F59E0B` |
-| `REQUEUED` | `Requeued` | Purple `#8B5CF6` |
-| `OOM` | `OUT_OF_MEMORY` | Red `#EF4444` |
-
-### Design
-
-- Outer background: `#F4F4F5` (light grey — immune to email-client dark-mode override)
-- 4 px accent bar at top: event colour (rendered as explicit `<td bgcolor>`)
-- Dark header cell `#111827` with white headline, muted subtitle, coloured status pill
-  — `<td bgcolor>` is always preserved by Gmail, Outlook, Apple Mail
-- White content area `#FFFFFF` with dark text (`#111827`) — always readable
-- Monospace field table: Job ID, Name, User, Partition, Node, CPUs, GPUs,
-  Submitted, Started, Ended, Elapsed, Time Limit, Exit Code, Work Dir, stdout, stderr
-- Contextual tip block (FAILED / TIMEOUT / OOM) with accent left-border
-- Footer: `IIT GPU Cluster · <date>  |  iit-gpu-manager  |  By: IIT Research Team`
-
-### Subject format
-
-```
-[IIT GPU] Job "cifar10_train" completed  [#1042]
-[IIT GPU] Job "llama_finetune" failed  [#1043]
-```
-
-### Email client compatibility note
-
-Full-dark emails (`background:#111`) get their backgrounds stripped by Gmail in
-light mode, making light text on white unreadable. Fix applied: dark header is a
-`<td bgcolor>` (always preserved) + white content `<td>` with dark text (always
-readable regardless of client behaviour).
-
----
-
-## 5. User Provisioning Bug Fix
-
-### Symptom
-
-```
-✘  Unexpected error: stdin and input arguments may not both be used.
-```
-
-Occurred in Admin → Provision user after entering all fields and password.
-
-### Root cause
-
-`_run()` in `iitgpu/admin.py` called `subprocess.run()` with both
-`stdin=subprocess.PIPE` **and** `input=stdin_data`. Python raises `ValueError`
-when both are provided because `input=` internally sets `stdin=PIPE` itself.
-
-```python
-# Before (broken)
-r = subprocess.run(
-    cmd,
-    capture_output=True, text=True, timeout=timeout,
-    stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-    input=stdin_data,   # ← conflict when stdin_data is not None
-)
-```
-
-### Fix
-
-```python
-# After
-kw: dict = {"capture_output": True, "text": True, "timeout": timeout}
-if stdin_data is not None:
-    kw["input"] = stdin_data        # subprocess sets stdin=PIPE internally
-else:
-    kw["stdin"] = subprocess.DEVNULL
-r = subprocess.run(cmd, **kw)
-```
-
----
-
-## 6. Storage Restructure — /shared/users/
-
-### Motivation
-
-All user workspace dirs (`daham/`, `tuser/`, `dahamtest/`, etc.) were at the
-root of `/shared/` alongside system dirs (`jobs/`, `envs/`, `images/`, etc.),
-making the layout messy and hard to administer.
-
-### Code changes
-
-**`iitgpu/config.py`** — new helper:
-```python
-def user_dir(cfg: Config, username: str) -> str:
-    return str(Path(cfg.nfs_root) / "users" / username)
-```
-
-All modules updated to call `user_dir(cfg, user)` instead of
-`Path(cfg.nfs_root) / user`:
-
-| File | Change |
+| Area | Change |
 |------|--------|
-| `iitgpu/wizard.py` | `scripts/`, `data/`, browse start paths |
-| `iitgpu/files.py` | file manager start path |
-| `iitgpu/setup.py` | smoke-test job dir, upload dest |
-| `deploy/iit-gpu-adduser` | `mkdir -p $NFS_ROOT/users/$USERNAME` |
-
-### Physical migration
-
-Dirs moved from `/shared/` → `/shared/users/` on the GPU host (NFS server):
-
-| Directory | Original owner | Mode |
-|-----------|---------------|------|
-| `anuktest` | dahamtest (2001) | 0700 |
-| `daham` | daham (1002) | 0775 |
-| `dahamtest` | dahamtest (2001) | 0700 |
-| `damafinetune` | public (1003) | 0777 |
-| `public` | public (1003) | 0777 |
-| `testuser1` | dahamtest (2001) | 0700 |
-| `tuser` | tuser (2000) | 0700 |
-
-All original ownership and permissions preserved. Migration used
-`sudo -n chown` (NOPASSWD) to temporarily transfer ownership for the
-`rename()` syscall (AppArmor blocks cross-owner renames on ext4), then
-restored original owner afterwards.
-
-### `/shared/` after restructure
-
-```
-/shared/
-├── data/               # shared datasets
-├── envs/               # conda environments
-├── images/             # Apptainer .sif containers
-├── jobs/               # SLURM job output dirs
-├── miniforge3/         # shared conda installation
-├── models/             # shared model weights
-├── scripts/            # shared utility scripts
-├── templates/          # job script templates
-├── tmp/                # scratch space
-├── training-scripts/   # example training scripts
-└── users/              # ← all user workspaces
-    ├── anuktest/
-    ├── daham/
-    ├── dahamtest/
-    ├── damafinetune/
-    ├── public/
-    ├── testuser1/
-    └── tuser/
-```
-
-### Symlinks updated
-
-`/home/tuser/shared` and `/home/dahamtest/shared` updated to point to
-`/shared/users/<username>`.
+| Bug | `entry.elapsed` → `entry.time_used` in All-user job history |
+| Bug | Re-provision of an offboarded username caused UNIQUE constraint crash |
+| Bug | Mail delivery log panel returned empty (daemon lacked `adm` group) |
+| Timezone | Job folder timestamps and data file names now use GMT+5:30 |
+| Mail service | New `iitgpu/mailer.py` — welcome, login notification, offboard emails |
+| Mail service | All transactional emails BCC admin users |
+| Mail service | SLURM job emails (`iit-gpu-mailer`) also BCC admin users |
+| Daemon | New verb `users.admin_emails` — returns admin email list |
+| User lifecycle | Welcome email with credentials + SSH instructions on account creation |
+| User lifecycle | Login notification email on every TUI session start |
+| User lifecycle | Offboard notification email when account is deactivated |
+| User lifecycle | Re-provision of offboarded usernames now works correctly (upsert) |
+| Admin panel | Grouped into 4 sections with visual separators |
+| Admin panel | Maintenance notice merged into one smart entry (set/update/clear) |
 
 ---
 
-## 7. ACL Access — slurmadmin and daham
+## 3. Bug Fixes
 
-### Goal
+### 3.1 All-user job history crash — `entry.elapsed`
 
-Both `slurmadmin` (login-node admin, UID 1000) and `daham` (UID 1002) need
-unrestricted read/write access to every directory under `/shared/`, including
-user workspaces that are mode 0700 owned by other users.
+**Symptom:**
+```
+✘  Unexpected error: 'QueueEntry' object has no attribute 'elapsed'
+```
 
-### slurmadmin group membership
+**Root cause:** `admin.py:745` referenced `entry.elapsed` but `QueueEntry`
+(defined in `slurm.py:45`) has always named the field `time_used`. The attribute
+name was never `elapsed` — a stale reference introduced when the admin panel was written.
 
-slurmadmin was not in `gpuusers` — added:
+**Fix:** `iitgpu/admin.py`
+```python
+# Before
+t.add_row(entry.job_id, entry.user, entry.name, entry.state,
+          entry.elapsed, entry.partition)
+# After
+t.add_row(entry.job_id, entry.user, entry.name, entry.state,
+          entry.time_used, entry.partition)
+```
+Commit: `70f225f`
 
+---
+
+### 3.2 Mail delivery log panel always empty
+
+**Symptom:** Admin → Mail delivery log showed:
+```
+Log empty or unavailable (check daemon + /var/log/msmtp.log).
+```
+even though `/var/log/msmtp.log` had entries.
+
+**Root cause:** `/var/log/msmtp.log` is owned `root:adm 640`. The audit daemon
+runs as `gpusync` (UID 997). `gpusync` was not in the `adm` group, so every
+`Path(log_path).read_text()` call raised `PermissionError`. The handler caught
+it as `OSError` and returned an empty list, which triggered the "Log empty" message.
+
+**Fix (system-level):**
 ```bash
-usermod -aG gpuusers slurmadmin   # login node
+sudo usermod -aG adm gpusync
+sudo systemctl restart iit-gpu-audit
 ```
 
-slurmadmin does not exist on the GPU host (NFS access is by UID 1000).
+See §9 for full analysis.
 
-### ACLs set
+---
 
-Recursive `rwX` ACLs applied to every directory under `/shared/` for both UIDs.
-Default ACLs also set so new files/dirs created inside inherit the same grants.
+### 3.3 Re-provisioning an offboarded username — UNIQUE constraint
 
+**Symptom:**
+```
+⚠  user DB record failed: UNIQUE constraint failed: users.username
+```
+
+**Root cause:** `_h_users_create` did a plain `INSERT`. Offboarding only sets
+`status='offboarded'` — it does not delete the row. The UNIQUE constraint on
+`username` prevented a second INSERT for the same username.
+
+**Fix:** `deploy/audit_daemon.py` — `_h_users_create` now checks first:
+
+```python
+existing = users_conn.execute(
+    "SELECT status FROM users WHERE username=?", (username,)
+).fetchone()
+if existing:
+    if existing[0] != "offboarded":
+        return False, None, f"user '{username}' already exists and is active"
+    users_conn.execute(
+        "UPDATE users SET uid=?,full_name=?,email=?,role=?,status='active',"
+        "created_at=?,created_by=?,notes=? WHERE username=?",
+        (uid_val, full_name, email, role, now, peer_user, notes, username),
+    )
+else:
+    users_conn.execute("INSERT INTO users (...) VALUES (...)", ...)
+users_conn.commit()
+```
+
+**Behaviour after fix:**
+
+| Scenario | Result |
+|----------|--------|
+| New username | `INSERT` — unchanged |
+| Offboarded username | `UPDATE` — row restored to `active` with new details |
+| Active username | Rejected: `user 'X' already exists and is active` |
+
+Commit: `c4204ad`
+
+**Note on daemon restart:** The fix was deployed but the running daemon was not
+automatically restarted because `tail -6` on the deploy output hid the restart step
+result, and the daemon remained at its old PID. Manually restarted:
 ```bash
-# Applied to each dir (top-level + recursive for users/*)
-setfacl -m u:1000:rwx,u:1002:rwx <dir>
-setfacl -d -m u:1000:rwx,u:1002:rwx <dir>
-```
-
-Dirs covered:
-
-```
-/shared/data        /shared/envs        /shared/images
-/shared/jobs        /shared/miniforge3  /shared/models
-/shared/scripts     /shared/templates   /shared/tmp
-/shared/training-scripts               /shared/users
-/shared/users/*     (recursive)
-```
-
-Root-owned dirs (`images`, `miniforge3`) required the `sudo -n chown` trick
-(same as migration) to obtain owner rights before `setfacl`, then ownership
-was restored.
-
-### Verification
-
-```bash
-getfacl /shared/images
-# user:1000:rwx
-# user:1002:rwx
-# default:user:1000:rwx
-# default:user:1002:rwx
+sudo systemctl restart iit-gpu-audit
+# ExecMainStartTimestamp: 08:01:55 UTC (confirmed post-fix)
 ```
 
 ---
 
-## 8. Test Fixes
+## 4. Timezone Hardening — GMT+5:30 Everywhere
 
-### test_e2e.py — PYTHONPATH in selftest subprocess
+### Problem
 
-`test_selftest_passes` spawned `python3 -m iitgpu --selftest` without
-`PYTHONPATH` set, so the subprocess couldn't find the `iitgpu` package.
+The login node's system clock is `Etc/UTC`. Python's `datetime.now()` (naive)
+therefore returns UTC. Two places stamped user-visible paths with naive `now()`,
+making folder names appear 5 h 30 min in the past.
 
-```python
-# Fix
-repo_root = str(Path(__file__).parent.parent)
-pythonpath = os.pathsep.join(filter(None, [repo_root, os.environ.get("PYTHONPATH", "")]))
-result = subprocess.run(
-    [sys.executable, "-m", "iitgpu", "--selftest"],
-    env={**os.environ, "DEMO_MODE": "1", "PYTHONPATH": pythonpath},
-    ...
-)
-```
+### Audit timestamps — already correct, no change
 
-### test_admin.py — test_run_uses_pipe_when_stdin_data_given
-
-Test asserted `kwargs["stdin"] == PIPE`. After the `_run()` fix, `stdin` is
-never passed when `input=` is used. Updated assertion:
+`auditclient.py` stores `datetime.now(timezone.utc).isoformat()` — UTC ISO-8601.
+`admin.py`'s `_fmt_ts()` converts on every display:
 
 ```python
-assert kwargs["input"] == "hello\n"
-assert "stdin" not in kwargs
+_LK = timezone(timedelta(hours=5, minutes=30))
+
+def _fmt_ts(ts_str: str) -> str:
+    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    return dt.astimezone(_LK).strftime("%Y-%m-%d %H:%M:%S")
 ```
 
-### test_wizard.py — test_generated_loader_script_is_valid_python
+Audit log, user table "Created at", job history timestamps all already showed GMT+5:30.
 
-Test looked for generated script at `tmp_path / user / "scripts"`. After the
-`user_dir()` change the path is `tmp_path / "users" / user / "scripts"`.
+### Fixed: job folder names (`iitgpu/jobs.py`)
 
 ```python
 # Before
-scripts_dir = tmp_path / user / "scripts"
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # After
-scripts_dir = tmp_path / "users" / user / "scripts"
+from datetime import timezone, timedelta
+_LK = timezone(timedelta(hours=5, minutes=30))
+timestamp = datetime.now(_LK).strftime("%Y%m%d_%H%M%S")
 ```
+
+Users see `finetune_20260603_154500` (LK) not `finetune_20260603_100000` (UTC).
+
+### Fixed: inline-paste data files (`iitgpu/wizard.py`)
+
+Same pattern — `datetime.now(_LK)` for the `ts_inline.txt` filename.
+
+### Rule going forward
+
+| Usage | Pattern | Reason |
+|-------|---------|--------|
+| Storage / DB timestamps | `datetime.now(timezone.utc).isoformat()` | Unambiguous; convertible to any tz |
+| Displayed timestamps | `dt.astimezone(_LK).strftime(...)` | GMT+5:30 for Sri Lanka |
+| User-visible filenames | `datetime.now(_LK).strftime(...)` | Direct LK timestamp |
+
+Commit: `a498570`
 
 ---
 
-## 9. Commits This Session
+## 5. Transactional Mail Service — iitgpu/mailer.py
+
+### Overview
+
+New module `iitgpu/mailer.py` handles all non-SLURM transactional emails.
+Runs within the Python process using `curl` → Resend HTTP API (same transport
+as `iit-gpu-mailer`). Every send is non-blocking (background `daemon=True` thread).
+
+### Design principles
+
+- **Non-blocking:** every send goes into a background thread — the TUI never
+  waits for network I/O.
+- **BCC admins:** every email BCC's all active admin-role users from `users.db`
+  (fetched live via `users.admin_emails`). The recipient is excluded from their
+  own BCC entry.
+- **Fail-silent:** network errors go to stderr; the caller never sees an exception.
+  A missing email address silently skips the notification.
+- **GMT+5:30 timestamps:** all displayed times use the `_LK` timezone constant.
+
+### Public API
+
+```python
+send_welcome(username, password, email, full_name="")
+send_login_notification(username, email, remote_ip)
+send_offboard(username, email, full_name="")
+```
+
+### Internal helpers
+
+```python
+_send(to, subject, html, bcc=None)   # curl → api.resend.com/emails
+_fire(to, subject, html, bcc=None)   # Thread(target=_send, daemon=True).start()
+_admin_bcc()                          # daemonclient.admin_emails() → list[str]
+_resend_key()                         # env RESEND_API_KEY > site.env > hardcoded default
+```
+
+### Welcome email — triggered by `provision_user()`
+
+Sent only when all three conditions hold: OS account created, DB record written,
+and password set successfully (`ok_pw == True`).
+
+```python
+if email and password and ok_pw:
+    Thread(target=_mailer.send_welcome,
+           args=(username, password, email, full_name),
+           daemon=True).start()
+```
+
+**Content:**
+- Username, password (plaintext), SSH command: `ssh -p 2225 username@10.35.4.100`
+- Network restriction notice (blue border): IIT-CityCampus-SpencerBuilding only
+- Security notice (red border): do not share credentials, all activity is monitored
+- Numbered getting-started steps
+- "Contact IIT Research Team" help block
+
+**Subject:** `[IIT GPU Cluster] Your account is ready — <username>`
+**Accent:** Blue `#3B82F6`
+
+### Login notification — triggered by `__main__.main()`
+
+Fires in a background thread immediately after the `session_start` audit event.
+Does not delay the splash screen.
+
+```python
+_login_user = getpass.getuser()
+_remote_ip  = os.environ.get("SSH_CLIENT", "").split()[0]
+
+def _fire_login_notification():
+    email = daemonclient.email_for(_login_user)
+    if email:
+        mailer.send_login_notification(_login_user, email, _remote_ip)
+
+Thread(target=_fire_login_notification, daemon=True).start()
+```
+
+Source IP is extracted from `$SSH_CLIENT` (set by sshd: `client_ip srcport dstport`).
+
+**Content:** Username, timestamp (GMT+5:30), source IP.
+**Subject:** `[IIT GPU Cluster] Login detected — <username>`
+**Accent:** Green `#22C55E`
+
+### Offboard notification — triggered by `offboard_user()`
+
+The user record is fetched **before** `iit-gpu-deluser` runs (the row is needed
+for email and full name; it will be marked `offboarded` but not deleted):
+
+```python
+user_record = daemonclient.get_user(username)
+# ... run iit-gpu-deluser ...
+if rc == 0 and user_record and user_record.get("email"):
+    Thread(target=_mailer.send_offboard,
+           args=(username, user_record["email"], user_record.get("full_name", "")),
+           daemon=True).start()
+```
+
+**Content:** Name, username, deactivation timestamp. "Contact IIT Research Team
+if in error" note.
+**Subject:** `[IIT GPU Cluster] Account deactivated — <username>`
+**Accent:** Grey `#6B7280`
+
+---
+
+## 6. Mail Architecture — Full Picture
+
+### Two parallel mail paths
+
+**Path A — SLURM job lifecycle (`iit-gpu-mailer`)**
+
+```
+Job reaches terminal state
+  → slurmctld reads MailProg=/usr/local/bin/iit-gpu-mailer from slurm.conf
+  → iit-gpu-mailer -s "SLURM Job_id=N Name=X Ended ..." user@email
+      ├── parse subject → extract job_id, event type
+      ├── sacct -j <job_id> → live details
+      ├── query /run/iit-gpu/audit.sock  →  users.admin_emails  →  BCC list
+      ├── build HTML
+      └── curl POST api.resend.com/emails  (to: user, bcc: admins)
+          fallback: /usr/bin/msmtp (plain text, no BCC)
+```
+
+Events: `STARTED` · `ENDED` · `FAILED` · `TIMEOUT` · `REQUEUED` · `OOM`
+
+**Path B — User lifecycle (`iitgpu/mailer.py`)**
+
+```
+Account created  →  provision_user()  →  Thread  →  send_welcome()
+                                               →  Resend API  →  user + BCC admins
+
+User logs in     →  __main__.main()   →  Thread  →  send_login_notification()
+                                               →  Resend API  →  user + BCC admins
+
+Account removed  →  offboard_user()   →  Thread  →  send_offboard()
+                                               →  Resend API  →  user + BCC admins
+```
+
+### BCC mechanism
+
+Both paths query the same daemon verb:
+
+```
+any caller → /run/iit-gpu/audit.sock  (srwxrwxrwx — world-writable)
+  → verb: users.admin_emails
+  → _h_users_admin_emails():
+      SELECT email FROM users
+      WHERE role='admin' AND status='active' AND email != ''
+  → returns: list[str]
+```
+
+`users.admin_emails` is a **public verb** (no admin-group check on the socket).
+This is required because `iit-gpu-mailer` runs as `slurmctld`'s system user,
+which is not a `gpuusers` member.
+
+### Complete email matrix
+
+| Email | Trigger | To | BCC | Accent |
+|-------|---------|-----|-----|--------|
+| Welcome / credentials | Account created | New user | All admins | Blue |
+| Login detected | Every TUI `session_start` | User | All admins | Green |
+| Account deactivated | Offboard | User | All admins | Grey |
+| Job started | SLURM BEGIN | Job owner | All admins | Blue |
+| Job completed | SLURM END (COMPLETED) | Job owner | All admins | Green |
+| Job failed | SLURM FAIL | Job owner | All admins | Red |
+| Job timed out | SLURM TIMEOUT | Job owner | All admins | Amber |
+| Job OOM | SLURM OOM | Job owner | All admins | Red |
+| Job requeued | SLURM REQUEUE | Job owner | All admins | Purple |
+
+All emails share the same visual template:
+4 px accent top bar · dark header `#111827` · white content `#FFFFFF` ·
+monospace detail table · footer with LK timestamp and "By: IIT Research Team".
+
+---
+
+## 7. User Management — Lifecycle Hardening
+
+### Full user lifecycle (after Session B)
+
+```
+Admin → "Provision user"
+  → _provision_menu(): username, role, full name, email, notes, password
+  → provision_user()
+      ├── iit-gpu-adduser  (OS user both nodes, SLURM assoc, /shared/users/<u>/)
+      ├── daemonclient.create_user()
+      │       → daemon _h_users_create() [upsert if offboarded]
+      ├── auditclient.log("admin_provision_user")
+      ├── set_user_password() via chpasswd
+      └── Thread → mailer.send_welcome()           ← NEW
+
+User logs in via SSH
+  → ForceCommand: iit-gpu-manager
+  → __main__.main()
+      ├── auditclient.log("session_start")
+      └── Thread → mailer.send_login_notification() ← NEW
+
+Admin → "Offboard user"
+  → daemonclient.get_user()  [fetch record BEFORE deletion]
+  → offboard_user()
+      ├── iit-gpu-deluser (removes OS user, SLURM assoc, optionally purges /shared)
+      ├── daemonclient.offboard_user() → UPDATE status='offboarded'
+      ├── auditclient.log("admin_offboard_user")
+      └── Thread → mailer.send_offboard()           ← NEW
+```
+
+### Daemon verb changes
+
+| Verb | Change | Auth |
+|------|--------|------|
+| `users.create` | Upserts if existing row is `offboarded` | Admin |
+| `users.admin_emails` | New — returns list of admin emails | **Public** |
+
+### Users DB schema (unchanged)
+
+```sql
+CREATE TABLE users (
+    username   TEXT PRIMARY KEY,
+    uid        INTEGER,
+    full_name  TEXT NOT NULL DEFAULT '',
+    email      TEXT NOT NULL DEFAULT '',
+    role       TEXT NOT NULL CHECK (role IN ('admin','tool','shell')),
+    status     TEXT NOT NULL CHECK (status IN ('active','offboarded')),
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    notes      TEXT NOT NULL DEFAULT ''
+);
+```
+
+On re-provision of an offboarded username: all fields except `username` are
+overwritten. `created_at` resets to re-provision time, `created_by` to the
+acting admin. The audit trail for the previous tenure is preserved in the
+`audit_events` table independently.
+
+---
+
+## 8. Admin Panel Redesign
+
+### Before (v1) — flat 15-item list
+
+All actions were presented as a single unsorted list. Unrelated operations
+(drain a node vs. view an audit log vs. provision a user) appeared adjacent
+with no visual grouping.
+
+### After (v2) — 4 grouped sections with separators
+
+```
+? Select action:
+──  User Management  ──────────────────────────
+  Provision user
+  Offboard user
+  View users
+──  Jobs & Usage  ─────────────────────────────
+  All-user job history
+  Cluster usage (all users)
+  Disk usage by user
+  Any user's job output
+──  Cluster Control  ──────────────────────────
+  Drain node
+  Resume node
+  QOS / limits
+  Maintenance notice
+──  Monitoring  ───────────────────────────────
+  Audit log
+  Service health
+  Mail delivery log
+───────────────────────────────────────────────
+  Back
+```
+
+Implemented using `questionary.Separator` objects interleaved with choice
+strings. Choices have a leading two-space indent for visual hierarchy.
+After `.ask()` the result is `.strip()`'d so the dispatch `if/elif` chain
+matches plain strings without the indent.
+
+### Section rationale
+
+| Section | Actions | Why grouped |
+|---------|---------|-------------|
+| User Management | Provision, Offboard, View users | All affect user DB + OS accounts |
+| Jobs & Usage | History, usage, disk, output | All read job/resource data |
+| Cluster Control | Drain, Resume, QOS, Maintenance | All affect scheduler behaviour |
+| Monitoring | Audit, Service health, Mail log | All read-only observability |
+
+### Maintenance notice consolidation
+
+Two separate items ("Set maintenance notice" / "Clear maintenance notice") were
+merged into one `_maintenance_menu()` function:
+
+- **No active notice** → prompts for text → sets notice.
+- **Active notice** → shows current text → `Update notice` / `Clear notice` / `Back`.
+
+Removes one top-level item and handles both states from a single entry point.
+
+### Cluster usage press-any-key fix
+
+The cluster usage block was missing a `press_any_key_to_continue` call — output
+would flash and immediately loop back to the menu. Added.
+
+---
+
+## 9. System Fix — gpusync adm Group
+
+### Problem
+
+`/var/log/msmtp.log`:
+```
+-rw-r----- 1 root adm 227 Jun  3 04:46 /var/log/msmtp.log
+```
+
+`gpusync` groups before fix: `gpusync gpuusers auditadmin` — not `adm`.
+Every read by the daemon raised `PermissionError` (caught silently as `OSError`),
+returning an empty line list and triggering the "Log empty" UI message.
+
+### Fix
+
+```bash
+sudo usermod -aG adm gpusync
+sudo systemctl restart iit-gpu-audit
+```
+
+`gpusync` groups after fix: `gpusync gpuusers auditadmin adm`
+
+### Why `adm` and not a custom group
+
+`adm` is the standard Debian/Ubuntu group for system log readers. All log
+files under `/var/log/` created by syslog, msmtp, etc. default to `root:adm 640`.
+Adding `gpusync` to `adm` handles `/var/log/msmtp.log` now and any future log
+files created with the same pattern, without requiring per-file `chgrp`.
+
+### Not in git
+
+System group membership is infrastructure state. It is recorded here and must
+be included in any cluster re-provisioning runbook (alongside the SLURM
+install, munge key, etc.).
+
+---
+
+## 10. Architecture Delta — How the System Changed
+
+### Module map (Session B additions marked ←)
+
+```
+iitgpu/
+├── __main__.py       ← login notification thread on session_start
+├── admin.py          ← grouped menu, _maintenance_menu, offboard email, press-any-key fix
+├── auditclient.py      (unchanged)
+├── config.py           (unchanged)
+├── containers.py       (unchanged)
+├── daemonclient.py   ← admin_emails()
+├── dashboard.py        (unchanged)
+├── files.py            (unchanged)
+├── jobs.py           ← GMT+5:30 _LK constant, datetime.now(_LK)
+├── mailer.py         ← NEW: send_welcome, send_login_notification, send_offboard
+├── menu.py             (unchanged)
+├── models.py           (unchanged)
+├── monitor.py          (unchanged)
+├── notify.py           (unchanged)
+├── shell.py            (unchanged)
+├── slurm.py            (unchanged)
+├── splash.py           (unchanged)
+├── templates.py        (unchanged)
+├── ui.py               (unchanged)
+├── upload.py           (unchanged)
+├── validate.py         (unchanged)
+└── wizard.py         ← GMT+5:30 _LK constant, datetime.now(_LK)
+
+deploy/
+├── audit_daemon.py   ← _h_users_admin_emails, upsert in _h_users_create
+└── redeploy-igm.sh     (unchanged)
+
+/usr/local/bin/
+└── iit-gpu-mailer    ← _daemon_admin_emails(), BCC in send_resend()
+```
+
+### Data flow changes
+
+**Mail flow before Session B:**
+```
+SLURM event → iit-gpu-mailer → Resend API → job owner only
+```
+
+**Mail flow after Session B:**
+```
+SLURM event   → iit-gpu-mailer → daemon(admin_emails) → Resend API → job owner + BCC admins
+Account created → mailer.send_welcome()                → Resend API → new user + BCC admins
+User logs in    → mailer.send_login_notification()     → Resend API → user    + BCC admins
+Account removed → mailer.send_offboard()               → Resend API → user    + BCC admins
+```
+
+**User DB create path before Session B:**
+```
+provision_user() → CREATE → INSERT → UNIQUE error if username exists as offboarded
+```
+
+**User DB create path after Session B:**
+```
+provision_user() → CREATE → check existing row
+                              offboarded → UPDATE (re-activate, overwrite fields)
+                              active     → reject (clear error message)
+                              not found  → INSERT (unchanged)
+```
+
+### Complete daemon verb table
+
+| Verb | Auth | Description |
+|------|------|-------------|
+| `audit.log` | Any | Record an audit event |
+| `users.email_for` | Any (self or admin) | Get email for one user |
+| `users.admin_emails` | **Any** | Get all active admin emails (BCC) |
+| `users.create` | Admin | Create or re-activate user record (upsert) |
+| `users.get` | Admin | Get one user record |
+| `users.list` | Admin | List all users |
+| `users.offboard` | Admin | Mark user as offboarded |
+| `users.reconcile` | Admin | Find OS/DB mismatches |
+| `audit.query` | Admin | Query audit event log |
+| `roster.view` | Admin | View combined user roster |
+| `maillog.tail` | Admin | Read `/var/log/msmtp.log` |
+| `joblog.read` | Admin | Read a user's job output file |
+| `service.status` | Admin | Check systemd unit health |
+
+---
+
+## 11. Session A Reference
+
+Session A changes are preserved here for completeness. Full detail was in the
+original M05-log commit `2966aa3`.
+
+| Area | What changed |
+|------|-------------|
+| Mail — infrastructure | msmtp installed, `/etc/msmtprc` configured for Resend SMTP relay |
+| Mail — SLURM wiring | `MailProg=/usr/local/bin/iit-gpu-mailer` in `slurm.conf` |
+| Mail — HTML mailer | `deploy/iit-gpu-mailer`: 6 event types, dark-header design, sacct details |
+| Bug fix | `_run()` in `admin.py` — `stdin` + `input` conflict in `subprocess.run()` |
+| Storage | `user_dir()` helper in `config.py`; all user paths under `/shared/users/` |
+| Storage | `iit-gpu-adduser` updated; 7 workspace dirs migrated from `/shared/` root |
+| ACL access | slurmadmin (UID 1000) and daham (UID 1002): recursive `rwX` ACLs on all `/shared/*` |
+| ACL access | Default ACLs set — new files inherit grants automatically |
+| slurmadmin | Added to `gpuusers` group on login node |
+| Per-user file jail | browse: `users/<u>/` + `models/` + `envs/` (read-only outside own dir) |
+| Per-user file jail | upload: `users/<u>/` only for non-admins |
+| Per-user file jail | admins: full NFS jail access in both file manager and upload TUI |
+| Tests | `test_e2e.py` PYTHONPATH fix; two tests updated for `_run()` and `user_dir()` changes |
+
+---
+
+## 12. Commits This Session
+
+### Session A
 
 | Hash | Message |
 |------|---------|
@@ -407,107 +676,65 @@ scripts_dir = tmp_path / "users" / user / "scripts"
 | `9b3c1c2` | `feat(mail): add IIT Research Team credit to footer` |
 | `e21e6e9` | `fix(users): provision error + /shared/users/ restructure` |
 | `114b299` | `feat(jail): per-user file scope — browse own dir + models/envs, upload to own dir only` |
+| `2966aa3` | `docs(log): update M05-log with per-user file jail changes (450 tests)` |
 
-All commits pushed to `main` on `github.com/DahamDissanayake/IIT-Secure-SLURM-Job-Gateway`.
-`/opt/iit-gpu/` redeployed after each push via `bash deploy/redeploy-igm.sh`.
+### Session B
 
----
-
-## 10. Per-User File Access Jail
-
-### Motivation
-
-Before this fix, `in_jail()` in `validate.py` allowed any path inside `/shared`
-for all users. A regular user logged in as `tuser` could browse to `/shared/users/daham/`,
-read other users' datasets, and delete files anywhere in `/shared`. The upload TUI
-listed every root subdirectory of `/shared` as a valid upload target.
-
-### Fix
-
-Three files changed + 11 new tests.
-
-#### `iitgpu/validate.py` — new helpers
-
-```python
-user_browse_roots(nfs_root, username) -> list[str]
-    # [shared/users/<u>, shared/models, shared/envs]
-
-user_upload_root(nfs_root, username) -> str
-    # shared/users/<u>
-
-in_user_browse_jail(path, nfs_root, username) -> bool
-    # True for own dir + models + envs
-
-in_user_upload_jail(path, nfs_root, username) -> bool
-    # True for own dir only
-```
-
-#### `iitgpu/files.py` — `file_manager()` is now role-aware
-
-| User type | Navigation (`_in_nav`) | Mutations (`_in_mut`) |
-|-----------|----------------------|----------------------|
-| Regular | `in_user_browse_jail` — own dir + models + envs | `in_user_upload_jail` — own dir only |
-| Admin | `in_jail` — full NFS jail | `in_jail` — full NFS jail |
-
-In read-only areas (models/envs for regular users):
-- `[ + new folder ]` row is suppressed
-- Directory action menu shows only `Open` / `Cancel` (no Rename/Delete)
-- File action menu shows only `Show size` / `Cancel`
-- Status line prints `Read-only area — browsing only`
-
-#### `iitgpu/upload.py` — `run_upload()` scopes base dir by role
-
-| User type | Base dir | Folder list |
-|-----------|----------|------------|
-| Regular | `shared/users/<username>/` | Sub-folders of own dir only; option to upload directly to root of own dir |
-| Admin | `shared/` (entire NFS root) | All subdirectories (unchanged behaviour) |
-
-#### Commit
-
-```
-114b299  feat(jail): per-user file scope — browse own dir + models/envs, upload to own dir only
-```
+| Hash | Message |
+|------|---------|
+| `70f225f` | `fix(admin): use time_used instead of nonexistent elapsed on QueueEntry` |
+| `a498570` | `fix(tz): use GMT+5:30 for all user-visible timestamps (job folders, data files)` |
+| `646e277` | `feat(mail): welcome email on user creation, login notifications, BCC admins on all mail` |
+| `c4204ad` | `fix(users): re-provision offboarded username by updating existing row instead of INSERT` |
+| `0e12765` | `feat(admin): grouped admin panel with sections, offboard email notification` |
 
 ---
 
-
-## 11. Active State
+## 13. Active State
 
 ### Services
 
 | Service | Node | State |
 |---------|------|-------|
 | `slurmctld` | login (192.168.122.10) | active |
-| `iit-gpu-audit` | login (192.168.122.10) | active |
+| `slurmd` | GPU host (192.168.122.1) | active |
+| `slurmdbd` | login (192.168.122.10) | active |
+| `mariadb` | login (192.168.122.10) | active |
+| `iit-gpu-audit` | login (192.168.122.10) | active (restarted 08:01:55 UTC) |
 | `iit-gpu-stats` | GPU host (192.168.122.1) | active |
 
 ### Tests
 
 ```
-450 passed  (PYTHONPATH=. python3 -m pytest tests/ -q)
+450 passed  (PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q)
 ```
 
 ### Mail delivery
 
-```
-From:    admin@gpu.indrajith.net  (Resend SMTP relay)
-Mailer:  /usr/local/bin/iit-gpu-mailer
-Log:     /var/log/msmtp.log  (fallback only — primary path uses Resend API directly)
-```
+| Path | From | Status |
+|------|------|--------|
+| SLURM job events | iit-gpu-mailer → Resend API | Live + BCC admins |
+| Welcome (on create) | iitgpu/mailer → Resend API | Live + BCC admins |
+| Login notification | iitgpu/mailer → Resend API | Live + BCC admins |
+| Offboard notice | iitgpu/mailer → Resend API | Live + BCC admins |
+| Sender address | `admin@gpu.indrajith.net` | Resend-verified domain |
+| Mail log viewer | Admin panel → daemon → `/var/log/msmtp.log` | Live (gpusync in adm) |
+
+### Groups (login node)
+
+| Principal | Groups |
+|-----------|--------|
+| `gpusync` | gpusync gpuusers auditadmin **adm** |
+| `slurmadmin` | slurmadmin auditadmin gpuadmins |
+| `dahamadmin` | dahamadmin gpuusers gpuadmins |
 
 ### /shared layout
 
 ```
-System dirs at /shared root.  User workspaces under /shared/users/.
-slurmadmin (UID 1000) and daham (UID 1002): rwx ACL on every dir.
-Default ACLs set — new files inherit grants automatically.
+/shared/
+├── data/ envs/ images/ jobs/ miniforge3/ models/ scripts/ templates/ tmp/
+└── users/
+    └── <per-user workspaces — one dir per active user>
 ```
 
-### Groups
-
-| User | Groups |
-|------|--------|
-| `slurmadmin` | slurmadmin, auditadmin, gpuadmins, **gpuusers** (added M05) |
-| `daham` | daham, gpuusers, gpuadmins |
-| `tuser` | tuser, gpuusers |
-| `dahamtest` | dahamtest, gpuusers |
+slurmadmin (UID 1000): `rwx` ACL + default ACL on every `/shared/*` dir.
