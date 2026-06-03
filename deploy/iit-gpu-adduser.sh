@@ -7,11 +7,18 @@
 #   (default)     → gpuusers; forced-TUI via ForceCommand; audited
 #   --admin       → gpuusers + gpuadmins; forced-TUI + admin panel; audited
 #   --shell-user  → NO gpuusers / NO gpuadmins; real bash shell; NOT audited
-#                   Still gets a SLURM association and /shared/<user>.
+#                   Still gets a SLURM association and /shared/users/<user>.
 #
 # --admin and --shell-user are mutually exclusive.
+#
+# Creates the user on the login node AND (over SSH) the GPU host with a UID free
+# on BOTH nodes, registers their SLURM association, and makes their /shared area.
+# Group membership is the whole mechanism — the TUI itself is never copied per user.
+#
+# Site config comes from deploy/site.env (or environment). No hardcoded values.
 set -euo pipefail
 
+# ── Load site config ───────────────────────────────────────────────────────────
 SITE_ENV="${IIT_SITE_ENV:-/opt/iit-gpu/deploy/site.env}"
 [ -f "$SITE_ENV" ] && set -a && . "$SITE_ENV" && set +a
 
@@ -20,7 +27,7 @@ ADMIN_GROUP="${ADMIN_GROUP:-gpuadmins}"
 NFS_ROOT="${NFS_ROOT:-/shared}"
 SLURM_ACCOUNT="${SLURM_ACCOUNT:-default}"
 SLURM_QOS="${SLURM_QOS:-normal}"
-GPU_HOST_SSH="${GPU_HOST_SSH:-}"
+GPU_HOST_SSH="${GPU_HOST_SSH:-}"          # e.g. root-daham@192.168.122.1 (required)
 UID_MIN="${UID_MIN:-2000}"
 UID_MAX="${UID_MAX:-60000}"
 
@@ -29,6 +36,7 @@ warn() { echo "  ⚠  $*"; }
 fail() { echo "  ✘  $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
 
+# ── Args ───────────────────────────────────────────────────────────────────────
 USERNAME=""; DRY=0; ADMIN=0; SHELL_USER=0
 for a in "$@"; do
     case "$a" in
@@ -39,7 +47,6 @@ for a in "$@"; do
         *)            USERNAME="$a" ;;
     esac
 done
-
 [ -n "$USERNAME" ] || fail "usage: iit-gpu-adduser <username> [--dry-run] [--admin|--shell-user]"
 [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || fail "invalid username: $USERNAME"
 [ "$ADMIN" = 1 ] && [ "$SHELL_USER" = 1 ] && fail "--admin and --shell-user are mutually exclusive"
@@ -51,15 +58,16 @@ run() { if [ "$DRY" = 1 ]; then echo "  [dry-run] $*"; else eval "$@"; fi; }
 
 if [ "$SHELL_USER" = 1 ]; then
     step "Shell user — will NOT be added to $GPUUSERS_GROUP or $ADMIN_GROUP"
-    step "Activity will NOT be audited by the gateway tool"
+    warn "Activity will NOT be audited by the gateway tool"
 fi
 
-# ── 1. Pick a UID free on BOTH nodes ──────────────────────────────────────────
+# ── 1. Pick a UID free on BOTH nodes ───────────────────────────────────────────
 step "Finding a UID free on both nodes (>= $UID_MIN) ..."
 local_max=$(getent passwd | awk -F: -v lo="$UID_MIN" -v hi="$UID_MAX" '$3>=lo && $3<=hi {print $3}' | sort -n | tail -1)
 remote_max=$(ssh "$GPU_HOST_SSH" "getent passwd | awk -F: -v lo=$UID_MIN -v hi=$UID_MAX '\$3>=lo && \$3<=hi {print \$3}' | sort -n | tail -1")
 start=$(( ${local_max:-$((UID_MIN-1))} > ${remote_max:-$((UID_MIN-1))} ? ${local_max:-$((UID_MIN-1))} : ${remote_max:-$((UID_MIN-1))} ))
 NEW_UID=$(( start < UID_MIN ? UID_MIN : start + 1 ))
+# Ensure truly free on both
 while getent passwd "$NEW_UID" >/dev/null 2>&1 || ssh "$GPU_HOST_SSH" "getent passwd $NEW_UID >/dev/null 2>&1"; do
     NEW_UID=$((NEW_UID + 1))
 done
@@ -75,7 +83,7 @@ fi
 [ "$ADMIN" = 1 ] && run "getent group $ADMIN_GROUP >/dev/null 2>&1 && usermod -aG $ADMIN_GROUP $USERNAME || true"
 ok "login: $USERNAME created"
 
-# ── 3. Create on GPU host (same UID) ──────────────────────────────────────────
+# ── 3. Create on GPU host (same UID) ───────────────────────────────────────────
 step "Creating $USERNAME on GPU host ($GPU_HOST_SSH) ..."
 if [ "$SHELL_USER" = 0 ]; then
     run "ssh $GPU_HOST_SSH \"sudo groupadd -g $NEW_UID $USERNAME 2>/dev/null || true; \
@@ -87,24 +95,21 @@ else
 fi
 ok "GPU host: $USERNAME created (UID $NEW_UID)"
 
-# ── 4. SLURM association ───────────────────────────────────────────────────────
+# ── 4. SLURM association ────────────────────────────────────────────────────────
 step "Registering SLURM association ..."
 run "sacctmgr -i add user $USERNAME account=$SLURM_ACCOUNT qos=$SLURM_QOS 2>/dev/null || true"
 ok "SLURM: $USERNAME → account=$SLURM_ACCOUNT qos=$SLURM_QOS"
 
-# ── 5. Shared workspace ────────────────────────────────────────────────────────
-step "Creating $NFS_ROOT/$USERNAME on the NFS server (GPU host) ..."
-if [ "$SHELL_USER" = 0 ]; then
-    run "ssh $GPU_HOST_SSH \"sudo mkdir -p $NFS_ROOT/$USERNAME && \
-        sudo chown $NEW_UID:$NEW_UID $NFS_ROOT/$USERNAME && \
-        sudo chmod 0700 $NFS_ROOT/$USERNAME\""
-else
-    # Shell users get 0700 too — they are not in gpuusers so 0770 would exclude them
-    run "ssh $GPU_HOST_SSH \"sudo mkdir -p $NFS_ROOT/$USERNAME && \
-        sudo chown $NEW_UID:$NEW_UID $NFS_ROOT/$USERNAME && \
-        sudo chmod 0700 $NFS_ROOT/$USERNAME\""
-fi
-run "ln -sfn $NFS_ROOT/$USERNAME /home/$USERNAME/shared 2>/dev/null || true"
+# ── 5. Shared workspace (private 0700) + ~/shared convenience symlink ──────────
+# Create + chown ON THE GPU HOST: it is the NFS server, so root is real there.
+# With root_squash on the export, an admin chown over NFS from the login node
+# would be squashed to nobody and fail. Shell users get 0700 too — they are not
+# in gpuusers, so a group-readable mode would not help them anyway.
+step "Creating $NFS_ROOT/users/$USERNAME on the NFS server (GPU host) ..."
+run "ssh $GPU_HOST_SSH \"sudo mkdir -p $NFS_ROOT/users/$USERNAME && \
+    sudo chown $NEW_UID:$NEW_UID $NFS_ROOT/users/$USERNAME && \
+    sudo chmod 0700 $NFS_ROOT/users/$USERNAME\""
+run "ln -sfn $NFS_ROOT/users/$USERNAME /home/$USERNAME/shared 2>/dev/null || true"
 ok "workspace ready (owned $NEW_UID:$NEW_UID, 0700)"
 
 # ── 6. Verify ──────────────────────────────────────────────────────────────────

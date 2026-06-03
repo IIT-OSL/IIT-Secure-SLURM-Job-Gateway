@@ -47,6 +47,15 @@ if [ -f "$INSTALL/deploy/iit-gpu-mailer" ]; then
     ok "iit-gpu-mailer updated"
 fi
 
+# Sync user-provisioning scripts to /usr/local/bin (the admin panel calls these via sudo).
+for _s in iit-gpu-adduser iit-gpu-deluser; do
+    if [ -f "$INSTALL/deploy/${_s}.sh" ]; then
+        step "Syncing ${_s} to /usr/local/bin ..."
+        sudo install -o root -g root -m 0755 "$INSTALL/deploy/${_s}.sh" "/usr/local/bin/${_s}"
+        ok "${_s} updated"
+    fi
+done
+
 # Audit daemon — restart and VERIFY the process actually changed.
 if systemctl list-unit-files 2>/dev/null | grep -q '^iit-gpu-audit'; then
     step "Restarting iit-gpu-audit ..."

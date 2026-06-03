@@ -2,6 +2,10 @@
 # iit-gpu-deluser.sh — offboard a per-user account from both nodes.
 #
 # Usage:  sudo iit-gpu-deluser <username> [--dry-run] [--purge-data]
+#
+# Removes the user from login + GPU host and their SLURM association. By default
+# their /shared/users/<user> data is KEPT (renamed to <user>.offboarded).
+# --purge-data deletes it. Never removes 'public' or the shared service account.
 set -euo pipefail
 
 SITE_ENV="${IIT_SITE_ENV:-/opt/iit-gpu/deploy/site.env}"
@@ -35,12 +39,17 @@ run() { if [ "$DRY" = 1 ]; then echo "  [dry-run] $*"; else eval "$@"; fi; }
 step "Removing SLURM association ..."
 run "sacctmgr -i delete user $USERNAME 2>/dev/null || true"; ok "assoc removed"
 
-step "Handling /shared data (on the NFS server; root_squash-safe) ..."
+step "Handling /shared/users data (on the NFS server; root_squash-safe) ..."
+USER_DATA="${NFS_ROOT}/users/${USERNAME}"
 if [ "$PURGE" = 1 ]; then
-    run "ssh $GPU_HOST_SSH \"sudo rm -rf $NFS_ROOT/$USERNAME\""; ok "data purged"
+    # chown -R is NOPASSWD on GPU host; once root-daham owns all files, rm needs no sudo
+    run "ssh $GPU_HOST_SSH \"sudo -n chown -R root-daham:root-daham ${USER_DATA} 2>/dev/null || true; rm -rf ${USER_DATA}\""
+    ok "data purged"
 else
-    run "ssh $GPU_HOST_SSH \"sudo mv $NFS_ROOT/$USERNAME $NFS_ROOT/$USERNAME.offboarded 2>/dev/null || true\""
-    ok "data kept as $NFS_ROOT/$USERNAME.offboarded"
+    # mv within /shared/users/ (owned by root-daham) needs no sudo — just a rename
+    ARCHIVED="${USER_DATA}.offboarded"
+    run "ssh $GPU_HOST_SSH \"[ -d ${ARCHIVED} ] && rm -rf ${ARCHIVED}; mv ${USER_DATA} ${ARCHIVED} 2>/dev/null || true\""
+    ok "data archived as ${USERNAME}.offboarded"
 fi
 
 step "Removing user on GPU host ..."
