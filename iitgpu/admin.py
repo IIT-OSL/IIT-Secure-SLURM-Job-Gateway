@@ -162,13 +162,15 @@ def provision_user(username: str, admin: bool = False,
         if ok_pw:
             auditclient.log("password_change_required", detail=username)
     if email and ok_pw:
-        from threading import Thread
         from iitgpu import mailer as _mailer
-        # Trigger welcome; password is never included — user receives it in person.
-        Thread(target=_mailer.send_welcome,
-               args=(username, email, full_name),
-               daemon=True).start()
-        auditclient.log("welcome_sent", detail=username, meta={"email": email})
+        mail_ok, mail_msg = _mailer.send_welcome(username, email, full_name)
+        if mail_ok:
+            msg += "\n  ✔  welcome email sent"
+            auditclient.log("welcome_sent", detail=username, meta={"email": email})
+        else:
+            msg += f"\n  ⚠  welcome email failed: {mail_msg} — hand credentials in person"
+            auditclient.log("mail_failed", detail=f"welcome:{username}",
+                            meta={"error": mail_msg})
     return True, msg
 
 
@@ -182,13 +184,12 @@ def offboard_user(username: str, purge: bool = False) -> tuple[bool, str]:
         daemonclient.offboard_user(username)
         auditclient.log("admin_offboard_user", detail=username)
         if user_record and user_record.get("email"):
-            from threading import Thread
             from iitgpu import mailer as _mailer
-            Thread(target=_mailer.send_offboard,
-                   args=(username,
-                         user_record["email"],
-                         user_record.get("full_name", "")),
-                   daemon=True).start()
+            mail_ok, mail_msg = _mailer.send_offboard(
+                username, user_record["email"], user_record.get("full_name", ""))
+            if not mail_ok:
+                auditclient.log("mail_failed", detail=f"offboard:{username}",
+                                meta={"error": mail_msg})
     return (rc == 0), (out.strip() if rc == 0 else (err.strip() or "offboard failed"))
 
 

@@ -4,31 +4,34 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone, timedelta
 from threading import Thread
 
 _LK = timezone(timedelta(hours=5, minutes=30))
 
-_DEFAULT_KEY  = "***REDACTED_RESEND_API_KEY***"
+_RESEND_URL   = "https://api.resend.com/emails"
 _DEFAULT_FROM = "IIT GPU Gateway <admin@gpu.indrajith.net>"
 _CLUSTER_NAME = "IIT GPU Cluster"
 
 
 def _resend_key() -> str:
+    """Return the Resend API key from env / site.env. Empty string if not set."""
     try:
         from iitgpu.config import _get
-        return _get("RESEND_API_KEY", _DEFAULT_KEY)
+        key = _get("RESEND_API_KEY", "")
     except Exception:
-        return os.environ.get("RESEND_API_KEY", _DEFAULT_KEY)
+        key = os.environ.get("RESEND_API_KEY", "")
+    return key.strip()
 
 
 def _from_addr() -> str:
     try:
         from iitgpu.config import _get
-        return _get("RESEND_FROM", _DEFAULT_FROM)
+        return _get("MAIL_FROM", _DEFAULT_FROM)
     except Exception:
-        return os.environ.get("RESEND_FROM", _DEFAULT_FROM)
+        return os.environ.get("MAIL_FROM", _DEFAULT_FROM)
 
 
 def _now_lk() -> str:
@@ -36,35 +39,54 @@ def _now_lk() -> str:
 
 
 def _send(to: str, subject: str, html: str, bcc: list[str] | None = None) -> None:
-    payload: dict = {
-        "from":    _from_addr(),
-        "to":      [to],
-        "subject": subject,
-        "html":    html,
-    }
+    """Send via Resend HTTP API using stdlib urllib (no key in argv/ps).
+
+    Raises RuntimeError on HTTP error or transport failure so callers can
+    detect and surface the failure. Skips silently if no key is configured.
+    """
+    key = _resend_key()
+    if not key:
+        import sys
+        sys.stderr.write(f"iit-gpu mailer: RESEND_API_KEY not configured — skipping send to {to}\n")
+        return
+    payload: dict = {"from": _from_addr(), "to": [to], "subject": subject, "html": html}
     if bcc:
         payload["bcc"] = bcc
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        _RESEND_URL,
+        data=data,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        r = subprocess.run(
-            ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST",
-             "https://api.resend.com/emails",
-             "-H", f"Authorization: Bearer {_resend_key()}",
-             "-H", "Content-Type: application/json",
-             "-d", json.dumps(payload)],
-            capture_output=True, text=True, timeout=20,
-        )
-        lines = r.stdout.strip().rsplit("\n", 1)
-        code  = lines[-1] if len(lines) > 1 else "0"
-        if not code.startswith("2"):
-            import sys
-            sys.stderr.write(f"iit-gpu mailer: HTTP {code}: {lines[0]}\n")
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
     except Exception as exc:
-        import sys
-        sys.stderr.write(f"iit-gpu mailer: {exc}\n")
+        raise RuntimeError(str(exc)) from exc
+
+
+def _send_sync(to: str, subject: str, html: str,
+               bcc: list[str] | None = None, timeout: int = 10) -> tuple[bool, str]:
+    """Blocking send with timeout. Returns (success, message). Used for must-deliver mail."""
+    result: list = [False, f"timeout after {timeout}s — check RESEND_API_KEY"]
+    def _run() -> None:
+        try:
+            _send(to, subject, html, bcc)
+            result[0], result[1] = True, "sent"
+        except RuntimeError as exc:
+            result[1] = str(exc)
+    t = Thread(target=_run, daemon=False)
+    t.start()
+    t.join(timeout=timeout)
+    return result[0], result[1]
 
 
 def _fire(to: str, subject: str, html: str, bcc: list[str] | None = None) -> None:
-    Thread(target=_send, args=(to, subject, html, bcc), daemon=True).start()
+    """Best-effort non-blocking send. Thread is non-daemon so it finishes even on TUI exit."""
+    Thread(target=_send, args=(to, subject, html, bcc), daemon=False).start()
 
 
 def _admin_bcc() -> list[str]:
@@ -75,7 +97,7 @@ def _admin_bcc() -> list[str]:
         return []
 
 
-def send_welcome(username: str, email: str, full_name: str = "") -> None:
+def send_welcome(username: str, email: str, full_name: str = "") -> tuple[bool, str]:
     """Send welcome email. No password, no admin BCC — this email is for the user only."""
     from iitgpu.config import load_config
     cfg  = load_config()
@@ -168,10 +190,10 @@ def send_welcome(username: str, email: str, full_name: str = "") -> None:
 </html>"""
 
     # No BCC: welcome email is private to the recipient — never share with other admins.
-    _fire(email, subject, html, None)
+    return _send_sync(email, subject, html, bcc=None)
 
 
-def send_offboard(username: str, email: str, full_name: str = "") -> None:
+def send_offboard(username: str, email: str, full_name: str = "") -> tuple[bool, str]:
     bcc          = [e for e in _admin_bcc() if e != email]
     display_name = full_name or username
     subject      = f"[IIT GPU Cluster] Account deactivated — {username}"
@@ -232,7 +254,7 @@ def send_offboard(username: str, email: str, full_name: str = "") -> None:
 </body>
 </html>"""
 
-    _fire(email, subject, html, bcc or None)
+    return _send_sync(email, subject, html, bcc or None)
 
 
 def send_login_notification(username: str, email: str, remote_ip: str) -> None:

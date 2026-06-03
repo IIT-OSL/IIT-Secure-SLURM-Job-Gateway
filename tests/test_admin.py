@@ -129,7 +129,7 @@ def test_provision_user_welcome_sent_without_password():
     with patch("subprocess.run", return_value=_proc(out="done")), \
          patch("iitgpu.admin.daemonclient.create_user", return_value=(True, "ok")), \
          patch("iitgpu.admin.auditclient.log"), \
-         patch("iitgpu.mailer.send_welcome") as mock_welcome:
+         patch("iitgpu.mailer.send_welcome", return_value=(True, "sent")) as mock_welcome:
         admin.provision_user("alice", password="s3cr3t",
                              email="alice@iit.lk", full_name="Alice")
         import time; time.sleep(0.05)

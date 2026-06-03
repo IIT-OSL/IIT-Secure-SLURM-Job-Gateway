@@ -1,6 +1,6 @@
 # tests/test_mailer.py
-"""Phase 1 — credential-safety tests for iitgpu/mailer.py."""
-from unittest.mock import patch, call
+"""Phases 1-3 — credential safety and reliable delivery tests for iitgpu/mailer.py."""
+from unittest.mock import patch, MagicMock
 import pytest
 from iitgpu import mailer
 
@@ -116,3 +116,86 @@ def test_recipient_excluded_from_own_bcc_on_login():
     bcc = captured.get("bcc") or []
     assert "alice@iit.lk" not in bcc, "recipient must not appear in their own BCC"
     assert "admin@iit.lk" in bcc
+
+
+# ── Phase 2: no hardcoded key, urllib transport ───────────────────────────────
+
+def test_send_skips_when_no_api_key(capsys):
+    """_send must not attempt a network call when RESEND_API_KEY is unset."""
+    with patch("iitgpu.mailer._resend_key", return_value=""), \
+         patch("iitgpu.mailer.urllib.request.urlopen") as mock_urlopen:
+        mailer._send("a@b.com", "subj", "<html/>")
+    mock_urlopen.assert_not_called()
+
+
+def test_send_uses_urllib_not_subprocess():
+    """Transport must use urllib, never subprocess (key must not appear in argv)."""
+    import subprocess as _subprocess
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.status = 200
+    with patch("iitgpu.mailer._resend_key", return_value="re_test_key"), \
+         patch("iitgpu.mailer.urllib.request.urlopen", return_value=mock_resp), \
+         patch("iitgpu.mailer.urllib.request.Request") as mock_req_cls, \
+         patch.object(_subprocess, "run") as mock_sub:
+        mock_req_cls.return_value = MagicMock()
+        mailer._send("a@b.com", "subj", "<html/>")
+    mock_sub.assert_not_called()
+    # Key must be in header, not in any arg list
+    req_call = mock_req_cls.call_args
+    headers = req_call[1]["headers"] if req_call[1] else req_call[0][2]
+    assert "re_test_key" in headers.get("Authorization", "")
+
+
+def test_api_key_not_in_module_constants():
+    """No hardcoded production key should exist as a module-level constant."""
+    import inspect
+    src = inspect.getsource(mailer)
+    # A real Resend key starts with "re_" followed by alphanumerics
+    import re as _re
+    matches = _re.findall(r're_[A-Za-z0-9]{10,}', src)
+    assert not matches, f"Hardcoded Resend key(s) found in mailer.py: {matches}"
+
+
+# ── Phase 3: synchronous delivery for must-deliver emails ─────────────────────
+
+def test_send_welcome_returns_success_result():
+    """send_welcome must return (True, 'sent') on success."""
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.status = 200
+    with patch("iitgpu.mailer._resend_key", return_value="re_test"), \
+         patch("iitgpu.mailer.urllib.request.urlopen", return_value=mock_resp), \
+         patch("iitgpu.mailer.urllib.request.Request", return_value=MagicMock()):
+        ok, msg = mailer.send_welcome("alice", "alice@iit.lk")
+    assert ok is True
+    assert msg == "sent"
+
+
+def test_send_welcome_returns_failure_on_http_error():
+    """send_welcome must return (False, error_msg) on HTTP failure."""
+    import urllib.error as _ue
+    exc = _ue.HTTPError("url", 422, "Unprocessable", {}, None)
+    with patch("iitgpu.mailer._resend_key", return_value="re_test"), \
+         patch("iitgpu.mailer.urllib.request.urlopen", side_effect=exc), \
+         patch("iitgpu.mailer.urllib.request.Request", return_value=MagicMock()):
+        ok, msg = mailer.send_welcome("alice", "alice@iit.lk")
+    assert ok is False
+    assert "422" in msg
+
+
+def test_send_offboard_returns_tuple():
+    """send_offboard must return a (bool, str) tuple."""
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.status = 200
+    with patch("iitgpu.mailer._resend_key", return_value="re_test"), \
+         patch("iitgpu.mailer.urllib.request.urlopen", return_value=mock_resp), \
+         patch("iitgpu.mailer.urllib.request.Request", return_value=MagicMock()), \
+         patch("iitgpu.mailer._admin_bcc", return_value=[]):
+        result = mailer.send_offboard("alice", "alice@iit.lk")
+    assert isinstance(result, tuple) and len(result) == 2
+    assert isinstance(result[0], bool)
