@@ -13,13 +13,31 @@ import os
 import re
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 from datetime import datetime
 
-# ── Config ────────────────────────────────────────────────────────────────────
-RESEND_API_KEY = "***REDACTED_RESEND_API_KEY***"
-FROM_ADDR      = "IIT GPU Gateway <admin@gpu.indrajith.net>"
-CLUSTER_NAME   = "IIT GPU Cluster"
-CLUSTER_URL    = "https://gpu.indrajith.net"   # update if you have a web portal
+# ── Config — read from env / site.env; no hardcoded key ──────────────────────
+def _cfg(key: str, default: str = "") -> str:
+    if key in os.environ:
+        return os.environ[key]
+    site_env = os.environ.get("IIT_SITE_ENV", "/opt/iit-gpu/deploy/site.env")
+    try:
+        for line in open(site_env).read().splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return default
+
+RESEND_API_KEY = _cfg("RESEND_API_KEY")   # empty → fallback to msmtp
+FROM_ADDR      = _cfg("MAIL_FROM",  "IIT GPU Gateway <admin@gpu.indrajith.net>")
+CLUSTER_NAME   = _cfg("CLUSTER_NAME",  "IIT GPU Cluster")
+CLUSTER_URL    = _cfg("CLUSTER_URL",   "https://gpu.indrajith.net")
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 def parse_args(argv: list[str]) -> tuple[str, str]:
@@ -281,31 +299,64 @@ def build_subject(info: dict, details: dict) -> str:
     suffix = f" [#{job_id}]" if job_id else ""
     return labels.get(event, f'Job update "{job_name}"') + suffix
 
-# ── Send via Resend API (curl) ────────────────────────────────────────────────
+# ── Admin BCC ─────────────────────────────────────────────────────────────────
+def _daemon_admin_emails() -> list[str]:
+    """Query audit daemon for admin emails (BCC). Best-effort."""
+    import socket as _sock
+    import struct
+    sock_path = "/run/iit-gpu/audit.sock"
+    try:
+        with _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM) as s:
+            s.settimeout(2.0)
+            s.connect(sock_path)
+            req = json.dumps({"verb": "users.admin_emails", "payload": {}}).encode()
+            s.sendall(struct.pack(">I", len(req)) + req)
+            raw_len = b""
+            while len(raw_len) < 4:
+                chunk = s.recv(4 - len(raw_len))
+                if not chunk:
+                    return []
+                raw_len += chunk
+            length = struct.unpack(">I", raw_len)[0]
+            if length > 1_048_576:
+                return []
+            data = b""
+            while len(data) < length:
+                chunk = s.recv(length - len(data))
+                if not chunk:
+                    return []
+                data += chunk
+            resp = json.loads(data.decode())
+            return resp.get("data", {}).get("emails", []) if resp.get("ok") else []
+    except Exception:
+        return []
+
+
+# ── Send via Resend API (urllib — key never exposed in argv/ps) ───────────────
 def send_resend(to: str, subject: str, html: str) -> None:
-    payload = json.dumps({
-        "from": FROM_ADDR,
-        "to":   [to],
-        "subject": subject,
-        "html": html,
-    })
-    result = subprocess.run(
-        [
-            "curl", "-s", "-w", "\n%{http_code}",
-            "-X", "POST", "https://api.resend.com/emails",
-            "-H", f"Authorization: Bearer {RESEND_API_KEY}",
-            "-H", "Content-Type: application/json",
-            "-d", payload,
-        ],
-        capture_output=True, text=True, timeout=20,
+    if not RESEND_API_KEY:
+        sys.stderr.write("iit-gpu-mailer: RESEND_API_KEY not set — using msmtp fallback\n")
+        raise RuntimeError("no API key")
+    bcc = [e for e in _daemon_admin_emails() if e != to]
+    payload_dict = {
+        "from": FROM_ADDR, "to": [to], "subject": subject, "html": html,
+    }
+    if bcc:
+        payload_dict["bcc"] = bcc
+    data = json.dumps(payload_dict).encode()
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=data,
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}",
+                 "Content-Type": "application/json"},
+        method="POST",
     )
-    lines = result.stdout.strip().rsplit("\n", 1)
-    body = lines[0] if len(lines) > 0 else ""
-    code = lines[-1] if len(lines) > 1 else "0"
-    if not code.startswith("2"):
-        sys.stderr.write(f"iit-gpu-mailer: Resend error HTTP {code}: {body}\n")
-        sys.exit(1)
-    sys.stderr.write(f"iit-gpu-mailer: sent to {to} — HTTP {code} {body}\n")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            sys.stderr.write(f"iit-gpu-mailer: sent to {to} — HTTP {resp.status}\n")
+    except urllib.error.HTTPError as exc:
+        sys.stderr.write(f"iit-gpu-mailer: Resend HTTP {exc.code}: {exc.reason}\n")
+        raise
 
 # ── Fallback: pipe to msmtp for plain-text ────────────────────────────────────
 def fallback_msmtp(to: str, subject: str, body_stdin: str) -> None:

@@ -38,6 +38,15 @@ print(f'    config OK | NFS_ROOT={cfg.nfs_root} | shared_user_mode={cfg.gateway_
 " || fail "Import check failed"
 ok "Import OK"
 
+
+# Sync mailer script to /usr/local/bin (MailProg for SLURM).
+if [ -f "$INSTALL/deploy/iit-gpu-mailer" ]; then
+    step "Syncing iit-gpu-mailer to /usr/local/bin ..."
+    sudo cp "$INSTALL/deploy/iit-gpu-mailer" /usr/local/bin/iit-gpu-mailer
+    sudo chmod 755 /usr/local/bin/iit-gpu-mailer
+    ok "iit-gpu-mailer updated"
+fi
+
 # Audit daemon — restart and VERIFY the process actually changed.
 if systemctl list-unit-files 2>/dev/null | grep -q '^iit-gpu-audit'; then
     step "Restarting iit-gpu-audit ..."
