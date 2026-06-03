@@ -306,50 +306,15 @@ def build_subject(info: dict, details: dict) -> str:
     suffix = f" [#{job_id}]" if job_id else ""
     return labels.get(event, f'Job update "{job_name}"') + suffix
 
-# ── Admin BCC ─────────────────────────────────────────────────────────────────
-def _daemon_admin_emails() -> list[str]:
-    """Query audit daemon for admin emails (BCC). Best-effort."""
-    import socket as _sock
-    import struct
-    sock_path = "/run/iit-gpu/audit.sock"
-    try:
-        with _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM) as s:
-            s.settimeout(2.0)
-            s.connect(sock_path)
-            req = json.dumps({"verb": "users.admin_emails", "payload": {}}).encode()
-            s.sendall(struct.pack(">I", len(req)) + req)
-            raw_len = b""
-            while len(raw_len) < 4:
-                chunk = s.recv(4 - len(raw_len))
-                if not chunk:
-                    return []
-                raw_len += chunk
-            length = struct.unpack(">I", raw_len)[0]
-            if length > 1_048_576:
-                return []
-            data = b""
-            while len(data) < length:
-                chunk = s.recv(length - len(data))
-                if not chunk:
-                    return []
-                data += chunk
-            resp = json.loads(data.decode())
-            return resp.get("data", {}).get("emails", []) if resp.get("ok") else []
-    except Exception:
-        return []
-
-
 # ── Send via Resend API (urllib — key never exposed in argv/ps) ───────────────
 def send_resend(to: str, subject: str, html: str) -> None:
     if not RESEND_API_KEY:
         sys.stderr.write("iit-gpu-mailer: RESEND_API_KEY not set — using msmtp fallback\n")
         raise RuntimeError("no API key")
-    bcc = [e for e in _daemon_admin_emails() if e != to]
+    # Job notices go ONLY to the job owner — admins are never BCC'd.
     payload_dict = {
         "from": FROM_ADDR, "to": [to], "subject": subject, "html": html,
     }
-    if bcc:
-        payload_dict["bcc"] = bcc
     data = json.dumps(payload_dict).encode()
     req = urllib.request.Request(
         "https://api.resend.com/emails",
