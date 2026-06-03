@@ -252,6 +252,9 @@ def build_html(info: dict, details: dict, recipient: str) -> str:
               <td style="color:#A1A1AA;font-size:11px">{CLUSTER_NAME} &nbsp;·&nbsp; {now}</td>
               <td align="right" style="color:#A1A1AA;font-size:11px;font-family:monospace">iit-gpu-manager</td>
             </tr>
+            <tr>
+              <td colspan="2" style="padding-top:6px;color:#A1A1AA;font-size:11px">By: IIT Research Team</td>
+            </tr>
           </table>
         </td></tr>
 
