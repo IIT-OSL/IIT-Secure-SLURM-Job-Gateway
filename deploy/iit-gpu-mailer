@@ -108,60 +108,54 @@ def extract_gpu_count(req_tres: str) -> str:
     return m.group(1) if m else "?"
 
 # ── HTML templates ────────────────────────────────────────────────────────────
-_PALETTES = {
-    "STARTED":   {"accent": "#2563EB", "light": "#EFF6FF", "badge_bg": "#DBEAFE", "badge_fg": "#1E40AF", "icon": "▶"},
-    "ENDED":     {"accent": "#16A34A", "light": "#F0FDF4", "badge_bg": "#DCFCE7", "badge_fg": "#15803D", "icon": "✓"},
-    "FAILED":    {"accent": "#DC2626", "light": "#FEF2F2", "badge_bg": "#FEE2E2", "badge_fg": "#B91C1C", "icon": "✗"},
-    "TIMEOUT":   {"accent": "#D97706", "light": "#FFFBEB", "badge_bg": "#FEF3C7", "badge_fg": "#B45309", "icon": "⏱"},
-    "REQUEUED":  {"accent": "#7C3AED", "light": "#F5F3FF", "badge_bg": "#EDE9FE", "badge_fg": "#6D28D9", "icon": "↺"},
-    "OOM":       {"accent": "#DC2626", "light": "#FEF2F2", "badge_bg": "#FEE2E2", "badge_fg": "#B91C1C", "icon": "⚡"},
-    "UNKNOWN":   {"accent": "#6B7280", "light": "#F9FAFB", "badge_bg": "#F3F4F6", "badge_fg": "#374151", "icon": "?"},
+_ACCENTS = {
+    "STARTED":  "#3B82F6",
+    "ENDED":    "#22C55E",
+    "FAILED":   "#EF4444",
+    "TIMEOUT":  "#F59E0B",
+    "REQUEUED": "#8B5CF6",
+    "OOM":      "#EF4444",
+    "UNKNOWN":  "#6B7280",
 }
 
 _HEADLINES = {
-    "STARTED":  "Your job is running",
-    "ENDED":    "Job completed successfully",
+    "STARTED":  "Job is now running",
+    "ENDED":    "Job completed",
     "FAILED":   "Job failed",
-    "TIMEOUT":  "Job hit its time limit",
+    "TIMEOUT":  "Job exceeded time limit",
     "REQUEUED": "Job has been requeued",
     "OOM":      "Job ran out of memory",
     "UNKNOWN":  "Job status update",
 }
 
 _SUBTITLES = {
-    "STARTED":  "Your GPU job has been allocated resources and is now executing.",
-    "ENDED":    "Everything finished cleanly. Your results are ready.",
-    "FAILED":   "The job exited with an error. Check the log below for details.",
-    "TIMEOUT":  "The job was cancelled because it exceeded its requested time limit. Increase <code>--time</code> and resubmit.",
+    "STARTED":  "Your GPU job has been allocated resources and is executing.",
+    "ENDED":    "The job finished cleanly. Your output is ready.",
+    "FAILED":   "The job exited with an error. Review the log paths below.",
+    "TIMEOUT":  "The job was cancelled after reaching its requested wall time. Increase --time and resubmit.",
     "REQUEUED": "The job has been placed back in the queue and will run again shortly.",
-    "OOM":      "The job was killed because it exceeded its memory allocation. Increase <code>--mem</code> and resubmit.",
+    "OOM":      "The job was killed by the scheduler after exceeding its memory allocation. Increase --mem and resubmit.",
     "UNKNOWN":  "A status change was reported by the scheduler.",
 }
 
 _TIPS = {
-    "FAILED":  "Tip: check your error log path shown below. Common causes: missing input files, Python import errors, or CUDA OOM.",
-    "TIMEOUT": "Tip: use <code>seff &lt;jobid&gt;</code> to see how much CPU/memory the job actually used, then set limits accordingly.",
-    "OOM":     "Tip: run <code>seff &lt;jobid&gt;</code> to see peak memory usage and add a buffer (e.g., if peak was 14G, request <code>--mem=20G</code>).",
-    "STARTED": "Tip: monitor live GPU usage with <code>iit-gpu-manager → Dashboard</code>.",
+    "FAILED":  "Common causes: missing input files, Python import errors, or CUDA out-of-memory. Check the stderr path above.",
+    "TIMEOUT": "Run <code>seff &lt;jobid&gt;</code> to see actual CPU and memory usage, then size --time accordingly.",
+    "OOM":     "Run <code>seff &lt;jobid&gt;</code> to see peak memory usage. Add a buffer — if peak was 14G, request --mem=20G.",
+    "STARTED": "Monitor live GPU utilisation with <code>iit-gpu-manager</code> and select Dashboard.",
 }
 
-def _row(label: str, value: str, accent: str) -> str:
-    if not value or value.strip() in ("", "Unknown", "None", "N/A"):
+def _row(label: str, value: str) -> str:
+    if not value or value.strip() in ("", "Unknown", "None", "N/A", "?"):
         return ""
-    return f"""
-      <tr>
-        <td style="padding:10px 16px;color:#6B7280;font-size:13px;white-space:nowrap;border-bottom:1px solid #F3F4F6;width:140px">{label}</td>
-        <td style="padding:10px 16px;color:#111827;font-size:13px;font-family:monospace;border-bottom:1px solid #F3F4F6;word-break:break-all">{value}</td>
+    return f"""<tr>
+        <td style="padding:9px 0;color:#6B7280;font-size:12px;font-weight:500;text-transform:uppercase;letter-spacing:0.6px;white-space:nowrap;width:130px;vertical-align:top">{label}</td>
+        <td style="padding:9px 0 9px 16px;color:#E5E7EB;font-size:13px;font-family:'SF Mono',SFMono-Regular,'Cascadia Code',Consolas,monospace;word-break:break-all;vertical-align:top">{value}</td>
       </tr>"""
 
 def build_html(info: dict, details: dict, recipient: str) -> str:
-    event   = info.get("event", "UNKNOWN")
-    pal     = _PALETTES.get(event, _PALETTES["UNKNOWN"])
-    accent  = pal["accent"]
-    light   = pal["light"]
-    bb      = pal["badge_bg"]
-    bf      = pal["badge_fg"]
-    icon    = pal["icon"]
+    event    = info.get("event", "UNKNOWN")
+    accent   = _ACCENTS.get(event, _ACCENTS["UNKNOWN"])
     headline = _HEADLINES.get(event, "Job update")
     subtitle = _SUBTITLES.get(event, "")
     tip      = _TIPS.get(event, "")
@@ -184,84 +178,92 @@ def build_html(info: dict, details: dict, recipient: str) -> str:
     stdout    = details.get("StdOut", "")
     stderr    = details.get("StdErr", "")
 
-    badge_label = state if state else event
+    status_label = state if state else event
 
     rows = (
-        _row("Job ID",      job_id,    accent) +
-        _row("Job name",    job_name,  accent) +
-        _row("User",        user,      accent) +
-        _row("Partition",   partition, accent) +
-        _row("Node(s)",     nodes,     accent) +
-        _row("CPUs",        cpus,      accent) +
-        _row("GPUs",        gpus,      accent) +
-        _row("Submitted",   submit,    accent) +
-        _row("Started",     start,     accent) +
-        _row("Ended",       end,       accent) +
-        _row("Elapsed",     elapsed,   accent) +
-        _row("Time limit",  timelimit, accent) +
-        _row("Exit code",   exit_code, accent) +
-        _row("Work dir",    workdir,   accent) +
-        _row("stdout",      stdout,    accent) +
-        _row("stderr",      stderr,    accent)
+        _row("Job ID",      job_id) +
+        _row("Job Name",    job_name) +
+        _row("User",        user) +
+        _row("Partition",   partition) +
+        _row("Node(s)",     nodes) +
+        _row("CPUs",        cpus) +
+        _row("GPUs",        gpus) +
+        _row("Submitted",   submit) +
+        _row("Started",     start) +
+        _row("Ended",       end) +
+        _row("Elapsed",     elapsed) +
+        _row("Time Limit",  timelimit) +
+        _row("Exit Code",   exit_code) +
+        _row("Work Dir",    workdir) +
+        _row("stdout",      stdout) +
+        _row("stderr",      stderr)
     )
 
-    tip_block = f"""
-    <div style="margin:24px 0 0;padding:14px 16px;background:{light};border-left:4px solid {accent};border-radius:4px;font-size:13px;color:#374151;line-height:1.6">
-      {tip}
-    </div>""" if tip else ""
+    tip_block = f"""<tr><td colspan="2" style="padding-top:20px">
+        <div style="border-left:3px solid {accent};padding:10px 14px;background:#1E1E1E">
+          <p style="margin:0;color:#9CA3AF;font-size:12px;line-height:1.7">{tip}</p>
+        </div>
+      </td></tr>""" if tip else ""
 
-    now = datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(__import__("datetime").timezone.utc).strftime("%d %b %Y  %H:%M UTC")
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#F3F4F6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:40px 0">
+<body style="margin:0;padding:0;background:#0A0A0A;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0A0A0A;padding:40px 0">
     <tr><td align="center">
-      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
+      <table width="580" cellpadding="0" cellspacing="0" style="max-width:580px;width:100%">
+
+        <!-- Accent top bar -->
+        <tr><td style="background:{accent};height:3px;border-radius:3px 3px 0 0;font-size:0;line-height:0">&nbsp;</td></tr>
 
         <!-- Header -->
-        <tr><td style="background:{accent};border-radius:12px 12px 0 0;padding:28px 32px">
+        <tr><td style="background:#111111;padding:28px 32px 24px">
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr>
-              <td style="color:rgba(255,255,255,0.85);font-size:12px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase">{CLUSTER_NAME}</td>
-              <td align="right">
-                <span style="background:rgba(255,255,255,0.2);color:#fff;font-size:11px;font-weight:700;padding:4px 12px;border-radius:20px;letter-spacing:0.5px">GPU JOB NOTIFICATION</span>
-              </td>
+              <td style="color:#4B5563;font-size:11px;font-weight:600;letter-spacing:1.8px;text-transform:uppercase">{CLUSTER_NAME}</td>
+              <td align="right" style="color:#374151;font-size:11px;letter-spacing:0.5px">GPU JOB NOTIFICATION</td>
             </tr>
           </table>
-          <div style="margin-top:20px">
-            <span style="font-size:40px;line-height:1">{icon}</span>
-          </div>
-          <h1 style="margin:12px 0 0;color:#fff;font-size:26px;font-weight:700;letter-spacing:-0.5px">{headline}</h1>
-          <p style="margin:8px 0 0;color:rgba(255,255,255,0.8);font-size:15px">{subtitle}</p>
+          <h1 style="margin:24px 0 0;color:#F9FAFB;font-size:22px;font-weight:600;letter-spacing:-0.3px;line-height:1.3">{headline}</h1>
+          <p style="margin:8px 0 0;color:#6B7280;font-size:14px;line-height:1.6">{subtitle}</p>
         </td></tr>
 
-        <!-- Body -->
-        <tr><td style="background:#fff;padding:32px">
+        <!-- Divider -->
+        <tr><td style="background:#111111;padding:0 32px">
+          <div style="border-top:1px solid #1F2937"></div>
+        </td></tr>
 
-          <!-- Status badge -->
-          <div style="margin-bottom:24px">
-            <span style="display:inline-block;background:{bb};color:{bf};font-size:12px;font-weight:700;padding:5px 14px;border-radius:20px;letter-spacing:0.5px;text-transform:uppercase">{badge_label}</span>
-          </div>
+        <!-- Status row -->
+        <tr><td style="background:#111111;padding:16px 32px 24px">
+          <table cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="color:#4B5563;font-size:11px;font-weight:600;letter-spacing:1.8px;text-transform:uppercase;padding-right:16px">Status</td>
+              <td style="color:{accent};font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase">{status_label}</td>
+            </tr>
+          </table>
+        </td></tr>
 
-          <!-- Details card -->
-          <div style="border:1px solid #E5E7EB;border-radius:8px;overflow:hidden">
-            <table width="100%" cellpadding="0" cellspacing="0">
-              {rows}
-            </table>
-          </div>
+        <!-- Section label -->
+        <tr><td style="background:#0F0F0F;padding:14px 32px 0">
+          <p style="margin:0;color:#374151;font-size:11px;font-weight:600;letter-spacing:1.8px;text-transform:uppercase">Job Details</p>
+        </td></tr>
 
-          {tip_block}
-
+        <!-- Details table -->
+        <tr><td style="background:#0F0F0F;padding:12px 32px 28px">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            {rows}
+            {tip_block}
+          </table>
         </td></tr>
 
         <!-- Footer -->
-        <tr><td style="background:#F9FAFB;border-radius:0 0 12px 12px;padding:20px 32px;border-top:1px solid #E5E7EB">
+        <tr><td style="background:#0A0A0A;padding:20px 32px;border-top:1px solid #111111">
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr>
-              <td style="font-size:12px;color:#9CA3AF">Sent by <strong style="color:#6B7280">{CLUSTER_NAME}</strong> · {now}</td>
-              <td align="right" style="font-size:12px;color:#9CA3AF">Manage jobs via <code>iit-gpu-manager</code></td>
+              <td style="color:#374151;font-size:11px">{CLUSTER_NAME} &nbsp;·&nbsp; {now}</td>
+              <td align="right" style="color:#374151;font-size:11px;font-family:monospace">iit-gpu-manager</td>
             </tr>
           </table>
         </td></tr>
@@ -278,13 +280,13 @@ def build_subject(info: dict, details: dict) -> str:
     job_name = details.get("JobName") or info.get("job_name") or "job"
     job_id   = info.get("job_id") or details.get("JobID", "")
     labels   = {
-        "STARTED":  f'Job "{job_name}" is running',
-        "ENDED":    f'Job "{job_name}" completed ✓',
-        "FAILED":   f'Job "{job_name}" failed ✗',
-        "TIMEOUT":  f'Job "{job_name}" timed out ⏱',
-        "REQUEUED": f'Job "{job_name}" requeued ↺',
-        "OOM":      f'Job "{job_name}" ran out of memory ⚡',
-        "UNKNOWN":  f'Job update — {info.get("raw_subject", "")}',
+        "STARTED":  f'[IIT GPU] Job "{job_name}" is running',
+        "ENDED":    f'[IIT GPU] Job "{job_name}" completed',
+        "FAILED":   f'[IIT GPU] Job "{job_name}" failed',
+        "TIMEOUT":  f'[IIT GPU] Job "{job_name}" exceeded time limit',
+        "REQUEUED": f'[IIT GPU] Job "{job_name}" requeued',
+        "OOM":      f'[IIT GPU] Job "{job_name}" out of memory',
+        "UNKNOWN":  f'[IIT GPU] Job update — {info.get("raw_subject", "")}',
     }
     suffix = f" [#{job_id}]" if job_id else ""
     return labels.get(event, f'Job update "{job_name}"') + suffix
