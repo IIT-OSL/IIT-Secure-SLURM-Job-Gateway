@@ -89,6 +89,46 @@ def clean_run_command(value: str) -> str:
     return _CONTROL_RE.sub(" ", str(value))[:1000]
 
 
+
+
+# ── Per-user file-access jails (file manager + upload) ───────────────────────
+
+def user_browse_roots(nfs_root: str, username: str) -> list[str]:
+    """Directories a regular user may navigate in the file manager.
+    Includes their own data dir plus the shared read-only areas."""
+    base = str(Path(nfs_root).resolve())
+    return [
+        str(Path(base) / "users" / username),
+        str(Path(base) / "models"),
+        str(Path(base) / "envs"),
+    ]
+
+
+def user_upload_root(nfs_root: str, username: str) -> str:
+    """The only directory a regular user may write into via upload/file-manager."""
+    return str(Path(nfs_root).resolve() / "users" / username)
+
+
+def in_user_browse_jail(path: str, nfs_root: str, username: str) -> bool:
+    """True when path is inside the user's browsable area (own dir + shared models/envs)."""
+    try:
+        real = str(Path(path).resolve())
+    except (OSError, ValueError):
+        return False
+    return any(
+        real == root or real.startswith(root + os.sep)
+        for root in user_browse_roots(nfs_root, username)
+    )
+
+
+def in_user_upload_jail(path: str, nfs_root: str, username: str) -> bool:
+    """True when path is inside the user's personal upload root (shared/users/<user>)."""
+    try:
+        real = str(Path(path).resolve())
+    except (OSError, ValueError):
+        return False
+    upload_root = user_upload_root(nfs_root, username)
+    return real == upload_root or real.startswith(upload_root + os.sep)
 # ── Submit-spec validators (Phase 2) ──────────────────────────────────────────
 
 import re as _re

@@ -195,3 +195,73 @@ def test_delete_env_removes_under_envs_dir(tmp_path, monkeypatch):
     env.mkdir(parents=True)
     ok, _ = delete_env(str(env), load_config())
     assert ok and not env.exists()
+
+
+# ── Per-user jail helpers (validate.py) ───────────────────────────────────────
+
+def test_user_browse_roots_includes_own_dir_models_envs(tmp_path):
+    from iitgpu.validate import user_browse_roots
+    roots = user_browse_roots(str(tmp_path), "alice")
+    assert str(tmp_path / "users" / "alice") in roots
+    assert str(tmp_path / "models") in roots
+    assert str(tmp_path / "envs") in roots
+
+
+def test_user_upload_root_is_own_dir_only(tmp_path):
+    from iitgpu.validate import user_upload_root
+    root = user_upload_root(str(tmp_path), "alice")
+    assert root == str(tmp_path / "users" / "alice")
+
+
+def test_in_user_browse_jail_own_dir_allowed(tmp_path):
+    from iitgpu.validate import in_user_browse_jail
+    p = str(tmp_path / "users" / "alice" / "data")
+    assert in_user_browse_jail(p, str(tmp_path), "alice")
+
+
+def test_in_user_browse_jail_models_allowed(tmp_path):
+    from iitgpu.validate import in_user_browse_jail
+    p = str(tmp_path / "models" / "llama")
+    assert in_user_browse_jail(p, str(tmp_path), "alice")
+
+
+def test_in_user_browse_jail_envs_allowed(tmp_path):
+    from iitgpu.validate import in_user_browse_jail
+    p = str(tmp_path / "envs" / "torch")
+    assert in_user_browse_jail(p, str(tmp_path), "alice")
+
+
+def test_in_user_browse_jail_other_user_denied(tmp_path):
+    from iitgpu.validate import in_user_browse_jail
+    p = str(tmp_path / "users" / "bob" / "secret.txt")
+    assert not in_user_browse_jail(p, str(tmp_path), "alice")
+
+
+def test_in_user_browse_jail_nfs_root_itself_denied(tmp_path):
+    from iitgpu.validate import in_user_browse_jail
+    assert not in_user_browse_jail(str(tmp_path), str(tmp_path), "alice")
+
+
+def test_in_user_upload_jail_own_dir_allowed(tmp_path):
+    from iitgpu.validate import in_user_upload_jail
+    p = str(tmp_path / "users" / "alice" / "dataset")
+    assert in_user_upload_jail(p, str(tmp_path), "alice")
+
+
+def test_in_user_upload_jail_models_denied(tmp_path):
+    from iitgpu.validate import in_user_upload_jail
+    p = str(tmp_path / "models" / "llama")
+    assert not in_user_upload_jail(p, str(tmp_path), "alice")
+
+
+def test_in_user_upload_jail_other_user_denied(tmp_path):
+    from iitgpu.validate import in_user_upload_jail
+    p = str(tmp_path / "users" / "bob" / "data")
+    assert not in_user_upload_jail(p, str(tmp_path), "alice")
+
+
+def test_in_user_upload_jail_traversal_denied(tmp_path, monkeypatch):
+    from iitgpu.validate import in_user_upload_jail
+    (tmp_path / "users" / "alice").mkdir(parents=True)
+    evil = str(tmp_path / "users" / "alice" / ".." / ".." / "etc")
+    assert not in_user_upload_jail(evil, str(tmp_path), "alice")

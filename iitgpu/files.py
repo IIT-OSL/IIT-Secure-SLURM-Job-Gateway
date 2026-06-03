@@ -145,32 +145,53 @@ def _valid_name(name: str) -> bool:
 
 def file_manager() -> None:
     """Interactive jailed file manager: browse, mkdir, rename, delete, copy,
-    and see disk usage. Stays inside NFS_ROOT / the user area at all times."""
+    and see disk usage.
+
+    Admins can browse the entire NFS jail and mutate anything in it.
+    Regular users can browse inside shared/users/<username>/ and read from
+    shared/models and shared/envs, but mutations are confined to their own
+    folder only.
+    """
     import getpass
     import questionary
     from questionary import Style
-    from iitgpu.config import load_config, user_dir
+    from iitgpu.config import load_config, user_dir, is_admin
+    from iitgpu.validate import in_user_browse_jail, in_user_upload_jail
     from iitgpu.ui import console, header, info, ok, err
 
     style = Style([("qmark", "fg:cyan bold"), ("pointer", "fg:cyan bold")])
     cfg = load_config()
-    start = user_dir(cfg, getpass.getuser())
-    cur = start if Path(start).exists() and in_jail(start) else cfg.nfs_root
-    # ensure users/ root is also jailed correctly
-    users_root = str(Path(cfg.nfs_root) / 'users')
+    user = getpass.getuser()
+    admin = is_admin(cfg)
+
+    if admin:
+        _in_nav = in_jail
+        _in_mut = in_jail
+    else:
+        _in_nav = lambda p: in_user_browse_jail(p, cfg.nfs_root, user)
+        _in_mut = lambda p: in_user_upload_jail(p, cfg.nfs_root, user)
+
+    start = user_dir(cfg, user)
+    if not Path(start).exists():
+        Path(start).mkdir(parents=True, exist_ok=True)
+    cur = start if _in_nav(start) else (cfg.nfs_root if admin else start)
 
     while True:
-        if not in_jail(cur):
-            cur = cfg.nfs_root
+        if not _in_nav(cur):
+            cur = start
+        writable_cur = _in_mut(cur)
         total, used, free = disk_usage(cur)
         header(f"Files — {cur}")
         if total:
             info(f"Disk: {fmt_size(free)} free of {fmt_size(total)}")
+        if not writable_cur:
+            info("[dim]Read-only area — browsing only[/]")
         entries = list_dir(cur)
+        extra_rows = ["[ + new folder ]"] if writable_cur else []
         rows = ["[.. up]"] + [
             (f"[dir] {e.name}" if e.is_dir else f"      {e.name}  ({fmt_size(e.size)})")
             for e in entries
-        ] + ["[ + new folder ]", "[ refresh ]", "[ back ]"]
+        ] + extra_rows + ["[ refresh ]", "[ back ]"]
         choice = questionary.select(f"{cur}", choices=rows, style=style).ask()
         if choice is None or choice == "[ back ]":
             return
@@ -178,7 +199,7 @@ def file_manager() -> None:
             continue
         if choice == "[.. up]":
             parent = str(Path(cur).parent)
-            cur = parent if in_jail(parent) else cur
+            cur = parent if _in_nav(parent) else cur
             continue
         if choice == "[ + new folder ]":
             name = questionary.text("New folder name:", style=style).ask()
@@ -190,10 +211,12 @@ def file_manager() -> None:
         name = choice.replace("[dir] ", "").strip().split("  (")[0].strip()
         target = str(Path(cur) / name)
         if Path(target).is_dir() and choice.startswith("[dir]"):
-            nav = questionary.select(
-                f"{name}/", choices=["Open", "Rename", "Delete", "Cancel"], style=style
-            ).ask()
-            if nav == "Open" and in_jail(target):
+            dir_choices = ["Open"]
+            if _in_mut(target):
+                dir_choices += ["Rename", "Delete"]
+            dir_choices.append("Cancel")
+            nav = questionary.select(f"{name}/", choices=dir_choices, style=style).ask()
+            if nav == "Open" and _in_nav(target):
                 cur = target
             elif nav == "Rename":
                 nn = questionary.text("New name:", default=name, style=style).ask()
@@ -204,9 +227,11 @@ def file_manager() -> None:
                     good, msg = delete_path(target); (ok if good else err)(str(msg))
             continue
         # file actions
-        act = questionary.select(
-            name, choices=["Rename", "Delete", "Show size", "Cancel"], style=style
-        ).ask()
+        file_choices = ["Show size"]
+        if _in_mut(str(Path(target).parent)):
+            file_choices = ["Rename", "Delete"] + file_choices
+        file_choices.append("Cancel")
+        act = questionary.select(name, choices=file_choices, style=style).ask()
         if act == "Rename":
             nn = questionary.text("New name:", default=name, style=style).ask()
             if nn:

@@ -146,36 +146,62 @@ def _download_from_url(folder_path: str) -> None:
 
 
 def run_upload() -> None:
+    import getpass
+    from iitgpu.config import is_admin
+    from iitgpu.validate import in_user_upload_jail, user_upload_root
+
     cfg = load_config()
-    base = Path(cfg.nfs_root)
+    user = getpass.getuser()
+    admin = is_admin(cfg)
 
-    # Build list of existing accessible subdirectories
-    try:
-        _existing = sorted(
-            p.name for p in base.iterdir()
-            if p.is_dir() and in_jail(str(p))
-        ) if base.exists() else []
-    except OSError:
-        _existing = []
+    if admin:
+        # Admins see every subdirectory of NFS root
+        base = Path(cfg.nfs_root)
+        _jail_check = in_jail
+        new_folder_label = "New folder name  (will be created at shared/<name>):"
+        try:
+            _existing = sorted(
+                p.name for p in base.iterdir()
+                if p.is_dir() and in_jail(str(p))
+            ) if base.exists() else []
+        except OSError:
+            _existing = []
+        _folder_choices = (
+            [questionary.Choice(f"{n}  ({base / n})", str(base / n)) for n in _existing]
+            + [questionary.Choice("[create new folder]", "__new__"),
+               questionary.Choice("[cancel]",             "__cancel__")]
+        )
+        prompt = "Select a shared folder, or create a new one:"
+    else:
+        # Regular users are scoped to shared/users/<username>/
+        upload_root = Path(user_upload_root(cfg.nfs_root, user))
+        upload_root.mkdir(parents=True, exist_ok=True)
+        base = upload_root
+        _jail_check = lambda p: in_user_upload_jail(p, cfg.nfs_root, user)
+        new_folder_label = f"New sub-folder name  (inside {upload_root}):"
+        try:
+            _existing = sorted(
+                p.name for p in base.iterdir()
+                if p.is_dir() and _jail_check(str(p))
+            ) if base.exists() else []
+        except OSError:
+            _existing = []
+        _folder_choices = (
+            [questionary.Choice(f"{n}  ({base / n})", str(base / n)) for n in _existing]
+            + [questionary.Choice("[upload here — my data folder]", str(base)),
+               questionary.Choice("[create new sub-folder]",        "__new__"),
+               questionary.Choice("[cancel]",                        "__cancel__")]
+        )
+        prompt = f"Select a destination inside your folder ({base}):"
 
-    _folder_choices = (
-        [questionary.Choice(f"{n}  ({base / n})", str(base / n)) for n in _existing]
-        + [questionary.Choice("[create new folder]", "__new__"),
-           questionary.Choice("[cancel]",             "__cancel__")]
-    )
-
-    sel = questionary.select(
-        "Select a shared folder, or create a new one:",
-        choices=_folder_choices,
-        style=_STYLE,
-    ).ask()
+    sel = questionary.select(prompt, choices=_folder_choices, style=_STYLE).ask()
 
     if sel is None or sel == "__cancel__":
         return
 
     if sel == "__new__":
         folder_name = questionary.text(
-            "New folder name  (will be created at shared/<name>):",
+            new_folder_label,
             validate=lambda x: (
                 _validate_folder_name(x.strip())
                 or "Letters, digits, hyphens, underscores only — start with a letter or digit"
@@ -189,7 +215,7 @@ def run_upload() -> None:
     else:
         folder_path = sel
 
-    if not in_jail(folder_path):
+    if not _jail_check(folder_path):
         err("Folder path is outside the allowed directory.")
         return
 
