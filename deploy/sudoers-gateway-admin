@@ -1,20 +1,5 @@
-# /etc/sudoers.d/iit-gpu-gateway  (POST-CUTOVER, admin-only)
-#
-# Use this once GATEWAY_SHARED_USER=0 and the per-user code is deployed.
-# Normal users no longer need any sudo: they run sbatch/squeue/scancel/sacct
-# directly as themselves (per-user identity). Only admins need elevated SLURM
-# operations (node drain/resume), user provisioning, password management,
-# and QOS / accounting changes.
-#
-# Replace ADMIN_GROUP with your deploy/site.env ADMIN_GROUP value (e.g. gpuadmins).
-#
-# All code paths that call these commands pass "sudo -n" (non-interactive) and
-# redirect stdin to /dev/null, so a missing or mis-matching rule fails fast
-# with a clear error instead of hanging for a terminal prompt.
+Defaults:%gpuadmins !lecture, !use_pty, timestamp_timeout=0
 
-Defaults:%gpuadmins !lecture, timestamp_timeout=0
-
-# Cluster operations admins may run as root:
 %gpuadmins ALL=(root) NOPASSWD: \
     /usr/bin/scontrol update *, \
     /usr/bin/scontrol reconfigure, \
