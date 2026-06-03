@@ -106,34 +106,6 @@ def test_offboard_no_bcc():
     assert not store["bcc"]
 
 
-# ── new-user admin notice ─────────────────────────────────────────────────────
-
-def test_admin_notice_recipient_and_kind():
-    ctx, store = _capture()
-    with ctx:
-        mailer.send_user_created_admin_notice(
-            "admin@iit.lk", "bob", "bob@iit.lk", "Bob Smith", "tool", "alice")
-    assert store["to"] == "admin@iit.lk"        # sent TO the admin, not BCC
-    assert not store["bcc"]
-    assert store["kind"] == "admin_notice"
-
-
-def test_admin_notice_carries_no_password():
-    ctx, store = _capture()
-    with ctx:
-        mailer.send_user_created_admin_notice(
-            "admin@iit.lk", "bob", "bob@iit.lk", "Bob Smith", "tool", "alice")
-    # No password label/field — the only mention is the explicit reassurance
-    # that the initial password is handed over in person, never emailed.
-    assert ">Password<" not in store["html"]
-
-
-def test_admin_notice_signature_has_no_password_param():
-    import inspect
-    assert "password" not in inspect.signature(
-        mailer.send_user_created_admin_notice).parameters
-
-
 # ── login notification ────────────────────────────────────────────────────────
 
 def test_login_kind_and_ip():

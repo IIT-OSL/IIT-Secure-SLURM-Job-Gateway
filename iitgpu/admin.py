@@ -12,7 +12,6 @@ Permission gatekeepers applied to every privileged subprocess call:
 """
 from __future__ import annotations
 
-import getpass
 import re
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -190,28 +189,9 @@ def provision_user(username: str, admin: bool = False,
             auditclient.log("mail_failed", detail=f"welcome:{username}",
                             meta={"error": mail_msg})
 
-    # Admins' OWN notice — fired only here, on user creation. Sent directly to
-    # each admin (never BCC'd on the user's welcome mail), carries no credentials.
-    try:
-        from iitgpu import mailer as _mailer
-        try:
-            created_by = getpass.getuser()
-        except Exception:
-            created_by = ""
-        admin_addrs  = [a for a in daemonclient.admin_emails() if a]
-        notice_role  = "admin" if (admin or role == "admin") else (role or "tool")
-        sent_n = 0
-        for _addr in admin_addrs:
-            n_ok, _ = _mailer.send_user_created_admin_notice(
-                _addr, username, email, full_name, notice_role, created_by)
-            sent_n += 1 if n_ok else 0
-        if admin_addrs:
-            msg += f"\n  ✔  admin notice sent ({sent_n}/{len(admin_addrs)})"
-            auditclient.log("admin_notice_sent", detail=username,
-                            meta={"admins": len(admin_addrs), "delivered": sent_n})
-    except Exception as exc:  # best-effort: never block provisioning on notice
-        auditclient.log("mail_failed", detail=f"admin_notice:{username}",
-                        meta={"error": str(exc)})
+    # Admins are NOT notified about user creation or any other user update.
+    # User-facing mail (welcome/login/offboard) goes only to the user it concerns;
+    # admins only ever receive mail about their OWN account, to their own address.
 
     return True, msg
 
