@@ -32,6 +32,13 @@ def _cluster_tz():
 _LK = _cluster_tz()
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# POSIX-safe usernames only: lowercase start, then lowercase/digits/_/-, max 32.
+# Blocks path traversal (../) and shell/sudo argument injection in provisioning.
+_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+def valid_username(username: str) -> bool:
+    return bool(_USERNAME_RE.match(username or ""))
 
 
 def _fmt_ts(ts_str: str) -> str:
@@ -140,6 +147,9 @@ def provision_user(username: str, admin: bool = False,
                    full_name: str = "",
                    notes: str = "") -> tuple[bool, str]:
     """Create user on both nodes + SLURM association, then write users.db row."""
+    if not valid_username(username):
+        return False, (f"invalid username {username!r} — must match "
+                       f"[a-z_][a-z0-9_-]{{0,31}} (no slashes, spaces, or dots)")
     cmd = ["sudo", "-n", "/usr/local/bin/iit-gpu-adduser", username]
     if admin or role == "admin":
         cmd.append("--admin")
@@ -182,6 +192,8 @@ def provision_user(username: str, admin: bool = False,
 
 
 def offboard_user(username: str, purge: bool = False) -> tuple[bool, str]:
+    if not valid_username(username):
+        return False, f"invalid username {username!r} — refusing to offboard"
     user_record = daemonclient.get_user(username)
     cmd = ["sudo", "-n", "/usr/local/bin/iit-gpu-deluser", username]
     if purge:
@@ -410,6 +422,10 @@ def _provision_menu(style) -> None:
     if not u or not u.strip():
         return
     u = u.strip()
+    if not valid_username(u):
+        err(f"Invalid username {u!r} — must match [a-z_][a-z0-9_-]{{0,31}} "
+            f"(no slashes, spaces, or dots).")
+        return
 
     role = questionary.select(
         "User type:",

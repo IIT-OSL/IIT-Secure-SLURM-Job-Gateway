@@ -352,3 +352,37 @@ def test_disk_usage_human_readable_units(tmp_path):
 
     rows = admin.disk_usage_by_user(str(tmp_path))
     assert rows[0]["human"] == "2.0 MB"
+
+# ── M4: username validation ───────────────────────────────────────────────────
+
+def test_valid_username_accepts_normal():
+    assert admin.valid_username("alice")
+    assert admin.valid_username("bob_2")
+    assert admin.valid_username("user-name")
+    assert admin.valid_username("_svc")
+
+
+def test_valid_username_rejects_dangerous():
+    assert not admin.valid_username("../etc")
+    assert not admin.valid_username("a/b")
+    assert not admin.valid_username("has space")
+    assert not admin.valid_username("Has.Dot")
+    assert not admin.valid_username("UPPER")
+    assert not admin.valid_username("")
+    assert not admin.valid_username("9startsdigit")
+    assert not admin.valid_username("x" * 40)
+
+
+def test_provision_user_rejects_bad_username():
+    with patch("subprocess.run") as r:
+        ok, msg = admin.provision_user("../../etc/passwd", password="x", email="a@b.com")
+    assert not ok
+    assert "invalid username" in msg.lower()
+    r.assert_not_called()   # never reaches sudo adduser
+
+
+def test_offboard_user_rejects_bad_username():
+    with patch("subprocess.run") as r:
+        ok, msg = admin.offboard_user("../../etc")
+    assert not ok
+    r.assert_not_called()

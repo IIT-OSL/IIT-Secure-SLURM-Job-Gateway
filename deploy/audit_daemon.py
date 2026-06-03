@@ -27,6 +27,8 @@ import socket
 import sqlite3
 import struct
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO,
@@ -41,6 +43,58 @@ USERS_DB       = STATE_DIR / "users.db"
 JSONL_PATH     = STATE_DIR / "audit.jsonl"
 # Per-user hourly job_submit cap; 0 disables rate limiting.
 JOB_RATE_LIMIT = int(os.environ.get("JOB_RATE_LIMIT", "20"))
+
+# Secrets file holding RESEND_API_KEY — readable only by root + gpusync (0640
+# root:gpusync). The daemon is the ONLY in-process mail sender, so regular users
+# never need (and never get) read access to the API key. See C1 fix.
+SECRETS_ENV    = os.environ.get("IIT_SECRETS_ENV", "/opt/iit-gpu/deploy/secrets.env")
+_RESEND_URL    = "https://api.resend.com/emails"
+
+
+def _load_secret(key: str) -> str:
+    """Read a KEY=VALUE secret from SECRETS_ENV. Env var wins. Empty if absent."""
+    if key in os.environ:
+        return os.environ[key].strip()
+    try:
+        for raw in Path(SECRETS_ENV).read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _mail_from() -> str:
+    return (_load_secret("MAIL_FROM")
+            or os.environ.get("MAIL_FROM", "GPU Cluster <no-reply@example.com>"))
+
+
+def _resend_send(to: str, subject: str, html: str,
+                 bcc: list | None = None) -> tuple[bool, str]:
+    """Send one email via the Resend HTTP API. Key never leaves the daemon."""
+    key = _load_secret("RESEND_API_KEY")
+    if not key:
+        return False, "RESEND_API_KEY not configured on the daemon"
+    payload = {"from": _mail_from(), "to": [to], "subject": subject, "html": html}
+    if bcc:
+        payload["bcc"] = bcc
+    req = urllib.request.Request(
+        _RESEND_URL, data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {key}",
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return (200 <= resp.status < 300), f"HTTP {resp.status}"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}: {exc.reason}"
+    except Exception as exc:
+        return False, str(exc)
 
 _running = True
 _MAX_MSG  = 1_048_576   # 1 MiB hard cap on any single message
@@ -463,30 +517,56 @@ def _h_users_admin_emails(users_conn: sqlite3.Connection):
     return True, {"emails": [r[0] for r in rows]}, ""
 
 
-def _h_users_update_login_ip(payload: dict, peer_uid: int,
-                              users_conn: sqlite3.Connection):
-    """Record the user's login IP. Returns {"is_new_ip": bool}.
-    Accessible to the user themselves (ForceCommand runs as them).
+def _h_mail_send(payload: dict, peer_uid: int,
+                 users_conn: sqlite3.Connection):
+    """Send transactional mail. The daemon holds the API key (C1 fix).
+
+    Trust model:
+    - admin / root callers: may send to any recipient; admin BCC is added
+      automatically when no explicit bcc is given.
+    - non-admin callers: recipient is FORCED to their own registered address and
+      BCC is stripped — this prevents both API-key theft and using the daemon as
+      an open relay to spoof mail from the cluster's verified domain.
+    - kind='login': the daemon does the new-IP dedup itself and only sends when
+      the source IP is unseen (M3 fix — no standalone IP-seeding verb).
     """
-    username  = payload.get("username", "").strip()
-    ip        = payload.get("ip", "").strip()
+    to      = (payload.get("to") or "").strip()
+    subject = payload.get("subject") or ""
+    html    = payload.get("html") or ""
+    bcc     = payload.get("bcc") or []
+    kind    = payload.get("kind") or "generic"
+    ip      = (payload.get("ip") or "").strip()
+    is_admin = _uid_is_admin(peer_uid) or peer_uid == 0
     peer_user = _uid_to_username(peer_uid) or ""
-    if not username or not ip:
-        return False, None, "username and ip required"
-    if peer_user != username and not _uid_is_admin(peer_uid):
-        return False, None, "permission denied"
-    row = users_conn.execute(
-        "SELECT last_seen_ip FROM users WHERE username=? AND status='active'",
-        (username,)
-    ).fetchone()
-    if not row:
-        return False, None, "user not found"
-    is_new = row[0] != ip
-    users_conn.execute(
-        "UPDATE users SET last_seen_ip=? WHERE username=?", (ip, username)
-    )
-    users_conn.commit()
-    return True, {"is_new_ip": is_new}, ""
+
+    if not is_admin:
+        row = users_conn.execute(
+            "SELECT email, last_seen_ip FROM users "
+            "WHERE username=? AND status='active'", (peer_user,)
+        ).fetchone()
+        if not row or not row[0]:
+            return False, None, "no registered email for sender"
+        to  = row[0]            # force recipient to self
+        bcc = []                # no relay
+        if kind == "login":
+            if row[1] == ip:
+                return True, {"sent": False, "reason": "known ip"}, ""
+            users_conn.execute(
+                "UPDATE users SET last_seen_ip=? WHERE username=?", (ip, peer_user))
+            users_conn.commit()
+    else:
+        if not to:
+            return False, None, "recipient required"
+        if not bcc:
+            rows = users_conn.execute(
+                "SELECT email FROM users WHERE role='admin' AND status='active' "
+                "AND email != ''").fetchall()
+            bcc = [r[0] for r in rows if r[0] != to]
+
+    ok_send, msg = _resend_send(to, subject, html, bcc or None)
+    if ok_send:
+        return True, {"sent": True}, ""
+    return False, None, msg
 
 
 def _h_users_check_must_change_pw(payload: dict, peer_uid: int,
@@ -608,11 +688,17 @@ def _dispatch(verb: str, payload: dict, peer_uid: int | None,
     if verb == "users.email_for":
         return _h_users_email_for(payload, peer_uid, users_conn)
 
-    if verb == "users.admin_emails":
-        return _h_users_admin_emails(users_conn)
+    if verb == "mail.send":
+        # Any local identity may request a send; the handler itself enforces
+        # self-only recipients for non-admins (anti-relay) and holds the key.
+        return _h_mail_send(payload, peer_uid, users_conn)
 
-    if verb == "users.update_login_ip":
-        return _h_users_update_login_ip(payload, peer_uid, users_conn)
+    if verb == "users.admin_emails":
+        # M2: admin emails are PII — restrict to admins and root (the SLURM
+        # mailer runs as root). No longer readable by every gpuusers member.
+        if not (_uid_is_admin(peer_uid) or peer_uid == 0):
+            return False, None, "permission denied: admin or root required"
+        return _h_users_admin_emails(users_conn)
 
     if verb == "users.check_must_change_pw":
         return _h_users_check_must_change_pw(payload, peer_uid, users_conn)

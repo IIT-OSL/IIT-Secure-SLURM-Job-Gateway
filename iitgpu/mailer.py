@@ -1,15 +1,16 @@
 # iitgpu/mailer.py
-"""Transactional email for login notifications and welcome messages via Resend."""
+"""Transactional email built client-side, SENT by the audit daemon.
+
+The Resend API key lives only on the daemon (gpusync, secrets.env 0640
+root:gpusync). No regular-user or admin process ever reads the key — they hand
+the built message to the daemon's `mail.send` verb. The daemon enforces that
+non-admin callers can only mail their own registered address (anti-relay) and
+performs new-IP dedup for login notices. See C1/M2/M3 in the security review.
+"""
 from __future__ import annotations
 
-import json
-import os
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone, timedelta
 from threading import Thread
-
-_RESEND_URL = "https://api.resend.com/emails"
 
 
 def _cluster_tz():
@@ -36,85 +37,39 @@ def _cluster_location() -> str:
         return "IIT-CityCampus-SpencerBuilding"
 
 
-def _resend_key() -> str:
-    """Return the Resend API key from env / site.env. Empty string if not set."""
-    try:
-        from iitgpu.config import _get
-        key = _get("RESEND_API_KEY", "")
-    except Exception:
-        key = os.environ.get("RESEND_API_KEY", "")
-    return key.strip()
-
-
-def _from_addr() -> str:
-    try:
-        from iitgpu.config import _get
-        return _get("MAIL_FROM", "GPU Cluster <no-reply@example.com>")
-    except Exception:
-        return os.environ.get("MAIL_FROM", "GPU Cluster <no-reply@example.com>")
-
-
 def _now_lk() -> str:
     return datetime.now(_cluster_tz()).strftime("%d %b %Y  %H:%M")
 
 
-def _send(to: str, subject: str, html: str, bcc: list[str] | None = None) -> None:
-    """Send via Resend HTTP API using stdlib urllib (no key in argv/ps).
-
-    Raises RuntimeError on HTTP error or transport failure so callers can
-    detect and surface the failure. Skips silently if no key is configured.
-    """
-    key = _resend_key()
-    if not key:
-        import sys
-        sys.stderr.write(f"iit-gpu mailer: RESEND_API_KEY not configured — skipping send to {to}\n")
-        return
-    payload: dict = {"from": _from_addr(), "to": [to], "subject": subject, "html": html}
-    if bcc:
-        payload["bcc"] = bcc
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        _RESEND_URL,
-        data=data,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        method="POST",
-    )
+def _daemon_mail(to: str, subject: str, html: str,
+                 bcc: list[str] | None = None,
+                 kind: str = "generic", ip: str = "") -> tuple[bool, str]:
+    """Hand a built message to the daemon to send. Returns (ok, message)."""
     try:
-        with urllib.request.urlopen(req, timeout=20):
-            pass
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
+        from iitgpu.auditclient import daemon_request
+        resp = daemon_request("mail.send", {
+            "to": to, "subject": subject, "html": html,
+            "bcc": bcc or [], "kind": kind, "ip": ip,
+        }, timeout=25.0)
     except Exception as exc:
-        raise RuntimeError(str(exc)) from exc
+        return False, str(exc)
+    if resp.get("ok"):
+        return True, "sent"
+    return False, resp.get("error", "mail failed")
 
 
 def _send_sync(to: str, subject: str, html: str,
-               bcc: list[str] | None = None, timeout: int = 10) -> tuple[bool, str]:
-    """Blocking send with timeout. Returns (success, message). Used for must-deliver mail."""
-    result: list = [False, f"timeout after {timeout}s — check RESEND_API_KEY"]
-    def _run() -> None:
-        try:
-            _send(to, subject, html, bcc)
-            result[0], result[1] = True, "sent"
-        except RuntimeError as exc:
-            result[1] = str(exc)
-    t = Thread(target=_run, daemon=False)
-    t.start()
-    t.join(timeout=timeout)
-    return result[0], result[1]
+               bcc: list[str] | None = None,
+               kind: str = "generic") -> tuple[bool, str]:
+    """Must-deliver send via the daemon. Returns (success, message)."""
+    return _daemon_mail(to, subject, html, bcc, kind=kind)
 
 
-def _fire(to: str, subject: str, html: str, bcc: list[str] | None = None) -> None:
-    """Best-effort non-blocking send. Thread is non-daemon so it finishes even on TUI exit."""
-    Thread(target=_send, args=(to, subject, html, bcc), daemon=False).start()
-
-
-def _admin_bcc() -> list[str]:
-    try:
-        from iitgpu import daemonclient
-        return daemonclient.admin_emails()
-    except Exception:
-        return []
+def _fire(to: str, subject: str, html: str, bcc: list[str] | None = None,
+          kind: str = "generic", ip: str = "") -> None:
+    """Best-effort non-blocking send (non-daemon thread, survives TUI exit)."""
+    Thread(target=_daemon_mail, args=(to, subject, html, bcc, kind, ip),
+           daemon=False).start()
 
 
 def send_welcome(username: str, email: str, full_name: str = "") -> tuple[bool, str]:
@@ -210,11 +165,11 @@ def send_welcome(username: str, email: str, full_name: str = "") -> tuple[bool, 
 </html>"""
 
     # No BCC: welcome email is private to the recipient — never share with other admins.
-    return _send_sync(email, subject, html, bcc=None)
+    return _send_sync(email, subject, html, bcc=None, kind="welcome")
 
 
 def send_offboard(username: str, email: str, full_name: str = "") -> tuple[bool, str]:
-    bcc          = [e for e in _admin_bcc() if e != email]
+    # Daemon auto-adds admin BCC for admin senders; pass none explicitly.
     display_name = full_name or username
     subject      = f"[{_cluster_name()}] Account deactivated — {username}"
 
@@ -274,11 +229,10 @@ def send_offboard(username: str, email: str, full_name: str = "") -> tuple[bool,
 </body>
 </html>"""
 
-    return _send_sync(email, subject, html, bcc or None)
+    return _send_sync(email, subject, html, bcc=None, kind="offboard")
 
 
 def send_login_notification(username: str, email: str, remote_ip: str) -> None:
-    bcc     = [e for e in _admin_bcc() if e != email]
     subject = f"[{_cluster_name()}] Login detected — {username}"
 
     html = f"""<!DOCTYPE html>
@@ -337,4 +291,6 @@ def send_login_notification(username: str, email: str, remote_ip: str) -> None:
 </body>
 </html>"""
 
-    _fire(email, subject, html, bcc or None)
+    # Login notice: daemon forces recipient to the caller's own address and does
+    # new-IP dedup server-side (only sends when remote_ip is unseen).
+    _fire(email, subject, html, bcc=None, kind="login", ip=remote_ip or "local")

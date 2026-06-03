@@ -234,3 +234,86 @@ def test_job_folder_uses_lk_time(tmp_path, monkeypatch):
         folder = make_job_folder(str(tmp_path), spec)
     # Folder name should contain LK timestamp
     assert "20260603_120000" in folder
+
+
+# ── mail.send (C1/M2/M3) ──────────────────────────────────────────────────────
+
+def test_mail_send_non_admin_forced_to_own_address():
+    """A non-admin sender can only mail their OWN registered address (anti-relay)."""
+    d, conn = _users_db()
+    _insert_user(conn, "alice", role="tool", status="active", email="alice@iit.lk")
+    sent = {}
+    d._uid_to_username = lambda uid: "alice"
+    d._uid_is_admin = lambda uid: False
+    d._resend_send = lambda to, subject, html, bcc=None: (sent.update(to=to, bcc=bcc) or (True, "HTTP 200"))
+    ok, data, err = d._h_mail_send(
+        {"to": "attacker@evil.com", "subject": "x", "html": "y", "kind": "generic"},
+        peer_uid=9000, users_conn=conn)
+    assert ok, err
+    assert sent["to"] == "alice@iit.lk"   # recipient overridden to self
+    assert not sent["bcc"]                 # no relay BCC
+
+
+def test_mail_send_login_dedup_skips_known_ip():
+    d, conn = _users_db()
+    _insert_user(conn, "bob", email="bob@iit.lk")
+    conn.execute("UPDATE users SET last_seen_ip='1.2.3.4' WHERE username='bob'")
+    conn.commit()
+    d._uid_to_username = lambda uid: "bob"
+    d._uid_is_admin = lambda uid: False
+    calls = []
+    d._resend_send = lambda *a, **k: calls.append(a) or (True, "ok")
+    ok, data, _ = d._h_mail_send(
+        {"kind": "login", "ip": "1.2.3.4", "subject": "s", "html": "h"},
+        peer_uid=9000, users_conn=conn)
+    assert ok
+    assert data["sent"] is False          # known IP → not sent
+    assert calls == []
+
+
+def test_mail_send_login_sends_on_new_ip_and_updates():
+    d, conn = _users_db()
+    _insert_user(conn, "carol", email="carol@iit.lk")
+    d._uid_to_username = lambda uid: "carol"
+    d._uid_is_admin = lambda uid: False
+    d._resend_send = lambda *a, **k: (True, "ok")
+    ok, data, _ = d._h_mail_send(
+        {"kind": "login", "ip": "9.9.9.9", "subject": "s", "html": "h"},
+        peer_uid=9000, users_conn=conn)
+    assert ok and data["sent"] is True
+    row = conn.execute("SELECT last_seen_ip FROM users WHERE username='carol'").fetchone()
+    assert row[0] == "9.9.9.9"            # IP recorded server-side
+
+
+def test_mail_send_admin_adds_admin_bcc():
+    d, conn = _users_db()
+    _insert_user(conn, "admin1", role="admin", status="active", email="a1@iit.lk")
+    _insert_user(conn, "admin2", role="admin", status="active", email="a2@iit.lk")
+    sent = {}
+    d._uid_is_admin = lambda uid: True
+    d._uid_to_username = lambda uid: "admin1"
+    d._resend_send = lambda to, subject, html, bcc=None: (sent.update(to=to, bcc=bcc) or (True, "ok"))
+    ok, _, err = d._h_mail_send(
+        {"to": "newuser@iit.lk", "subject": "welcome", "html": "h"},
+        peer_uid=0, users_conn=conn)
+    assert ok, err
+    assert sent["to"] == "newuser@iit.lk"
+    assert set(sent["bcc"]) == {"a1@iit.lk", "a2@iit.lk"}
+
+
+def test_mail_send_non_admin_no_email_rejected():
+    d, conn = _users_db()
+    _insert_user(conn, "dave", email="")
+    d._uid_to_username = lambda uid: "dave"
+    d._uid_is_admin = lambda uid: False
+    ok, data, err = d._h_mail_send(
+        {"subject": "s", "html": "h"}, peer_uid=9000, users_conn=conn)
+    assert not ok
+    assert "no registered email" in err
+
+
+def test_login_ip_dedup_cannot_be_preseeded_by_separate_verb():
+    """M3: there must be no standalone verb to set last_seen_ip."""
+    d = _load_daemon()
+    assert not hasattr(d, "_h_users_update_login_ip"), \
+        "standalone update_login_ip verb must be removed (M3)"

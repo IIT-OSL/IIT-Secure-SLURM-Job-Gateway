@@ -128,17 +128,19 @@ def log_or_block(action: str, detail: str = "", job_id: str = "",
     return True
 
 
-def daemon_request(verb: str, payload: dict) -> dict:
+def daemon_request(verb: str, payload: dict, timeout: float | None = None) -> dict:
     """Send a request to the daemon and return its JSON response dict.
 
     Returns {"ok": False, "error": "..."} on any connection or decode failure.
+    `timeout` overrides the default short socket timeout — needed for verbs like
+    mail.send where the daemon performs an outbound HTTP call before replying.
     """
     req  = {"verb": verb, "payload": payload}
     data = json.dumps(req).encode()
     sock_path = os.environ.get("AUDIT_SOCKET", AUDIT_SOCKET)
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(_CONN_TIMEOUT)
+            sock.settimeout(timeout if timeout is not None else _CONN_TIMEOUT)
             sock.connect(sock_path)
             _send_framed(sock, data)
             raw_len = _recv_exactly(sock, 4)

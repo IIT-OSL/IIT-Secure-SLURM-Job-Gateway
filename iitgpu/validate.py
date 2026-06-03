@@ -159,75 +159,117 @@ def clean_dependency(value: str) -> str | None:
     return v if _DEP_RE.match(v) else None
 
 
-_SBATCH_RE = re.compile(r'^#SBATCH\s+--?([\w-]+)(?:[=\s](.*))?$')
-_PATH_DIRECTIVES = {"output", "error", "chdir", "open-mode"}
 _IDENTITY_DIRECTIVES = {"uid", "gid", "get-user-env"}
+# Flags that take a value; everything else is treated as a boolean flag so that
+# the token AFTER it is parsed as its own directive (not swallowed as a value).
+_VALUE_FLAGS = {
+    "output", "error", "chdir", "mail-user", "gres", "gpus", "gpus-per-task",
+    "cpus-per-task", "mem", "mem-per-cpu", "mem-per-gpu", "job-name", "partition",
+    "time", "account", "qos", "nodes", "ntasks", "ntasks-per-node", "array",
+    "dependency", "nice", "uid", "gid", "open-mode", "mail-type", "comment",
+    "export", "constraint", "exclude", "nodelist", "reservation", "wckey",
+    "begin", "deadline", "signal", "switches", "distribution",
+}
+
+
+def _parse_sbatch_directives(text: str) -> list[tuple[str, str]]:
+    """Return every (key, value) directive across all #SBATCH lines.
+
+    Critically, this handles MULTIPLE flags on one #SBATCH line
+    (e.g. `#SBATCH --nice=0 --output=/x`), which SLURM honours. A naive
+    "first flag only" parser would let the second flag bypass validation.
+    Only lines whose first non-space char is '#SBATCH' are parsed — SLURM
+    ignores indented #SBATCH lines, and so do we.
+    """
+    out: list[tuple[str, str]] = []
+    for raw_line in text.splitlines():
+        # SLURM only honours #SBATCH at column 0 (no leading whitespace).
+        if not raw_line.startswith("#SBATCH"):
+            continue
+        body = raw_line[len("#SBATCH"):].strip()
+        tokens = body.split()
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if not tok.startswith("-"):
+                i += 1
+                continue
+            flag = tok.lstrip("-")
+            # --key=value form
+            if "=" in flag:
+                key, _, val = flag.partition("=")
+                out.append((key.lower(), val.strip().strip('"').strip("'")))
+                i += 1
+                continue
+            key = flag.lower()
+            # --key value form: consume next token as value if this flag takes one
+            if key in _VALUE_FLAGS and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                out.append((key, tokens[i + 1].strip().strip('"').strip("'")))
+                i += 2
+            else:
+                out.append((key, ""))
+                i += 1
+    return out
+
 
 def validate_sbatch(text: str, username: str, cfg=None) -> list[str]:
     """Parse a sbatch script and return a list of error strings (empty = valid).
 
     Checks enforced:
-    - --output / --error / --chdir paths must resolve inside the NFS jail.
-    - --mail-user must be the user's own registered address (if daemon reachable).
+    - --output / --error / --chdir paths must resolve inside the USER'S OWN jail
+      (their workspace + shared read areas), not just the broad NFS root.
+    - --mail-user must be the user's own registered address. Fail-closed: if the
+      daemon is unreachable, any non-empty --mail-user is rejected.
     - --uid / --gid / --get-user-env directives are forbidden.
-    - Resource directives outside QOS limits produce a friendly pre-flight error.
+    - Resource directives outside cluster limits produce a friendly pre-flight error.
     """
     if cfg is None:
         from iitgpu.config import load_config
         cfg = load_config()
 
+    nfs_root = cfg.nfs_root
     errors: list[str] = []
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("#SBATCH"):
-            continue
-        m = _SBATCH_RE.match(line)
-        if not m:
-            continue
-        key = m.group(1).lower().rstrip("=")
-        val = (m.group(2) or "").strip().strip('"').strip("'")
-
-        # ── Path jail check ────────────────────────────────────────────────
+    for key, val in _parse_sbatch_directives(text):
+        # ── Path jail check (per-user) ─────────────────────────────────────
         if key in ("output", "error", "chdir"):
-            # Strip SLURM format specifiers (%j, %A, etc.) before resolving
             val_clean = re.sub(r'%[a-zA-Z]', '0', val)
             if val_clean:
-                parent = str(Path(val_clean).parent) if key != "chdir" else val_clean
-                if not in_jail(parent):
+                target = str(Path(val_clean).parent) if key != "chdir" else val_clean
+                if not in_user_upload_jail(target, nfs_root, username):
                     errors.append(
-                        f"--{key} path is outside the allowed directory: {val!r}"
+                        f"--{key} path is outside your personal workspace: {val!r}"
                     )
 
-        # ── mail-user must be user's own address ───────────────────────────
-        elif key == "mail-user":
-            if val:
-                try:
-                    from iitgpu import daemonclient
-                    registered = daemonclient.email_for(username)
-                    if registered and val.strip().lower() != registered.strip().lower():
-                        errors.append(
-                            f"--mail-user must be your registered address "
-                            f"({registered}); got: {val!r}"
-                        )
-                except Exception:
-                    pass  # daemon unavailable — skip check, SLURM enforces nothing here
+        # ── mail-user must be user's own address (fail-closed) ─────────────
+        elif key == "mail-user" and val:
+            registered = None
+            try:
+                from iitgpu import daemonclient
+                registered = daemonclient.email_for(username)
+            except Exception:
+                registered = None
+            if not registered:
+                errors.append(
+                    f"--mail-user cannot be verified right now; remove it and retry: {val!r}"
+                )
+            elif val.strip().lower() != registered.strip().lower():
+                errors.append(
+                    f"--mail-user must be your registered address "
+                    f"({registered}); got: {val!r}"
+                )
 
         # ── Identity escape directives ─────────────────────────────────────
         elif key in _IDENTITY_DIRECTIVES:
-            errors.append(
-                f"--{key} is not permitted in submitted scripts"
-            )
+            errors.append(f"--{key} is not permitted in submitted scripts")
 
         # ── Resource pre-flight ────────────────────────────────────────────
         elif key in ("gres", "gpus", "gpus-per-task"):
             try:
-                # parse "gpu:N" or plain "N"
                 n = int(val.split(":")[-1])
                 if n > MAX_GPUS:
                     errors.append(
-                        f"--{key} requests {n} GPUs; cluster limit is {MAX_GPUS}"
-                    )
+                        f"--{key} requests {n} GPUs; cluster limit is {MAX_GPUS}")
             except (ValueError, IndexError):
                 pass
 
@@ -235,8 +277,7 @@ def validate_sbatch(text: str, username: str, cfg=None) -> list[str]:
             try:
                 if int(val) > MAX_CPUS:
                     errors.append(
-                        f"--cpus-per-task {val} exceeds cluster limit of {MAX_CPUS}"
-                    )
+                        f"--cpus-per-task {val} exceeds cluster limit of {MAX_CPUS}")
             except ValueError:
                 pass
 
@@ -247,8 +288,7 @@ def validate_sbatch(text: str, username: str, cfg=None) -> list[str]:
                 mem_gb = num // 1024 if unit == "M" else num if unit == "G" else num * 1024
                 if mem_gb > MAX_MEM_GB:
                     errors.append(
-                        f"--mem {val} exceeds cluster limit of {MAX_MEM_GB}G"
-                    )
+                        f"--mem {val} exceeds cluster limit of {MAX_MEM_GB}G")
             except (ValueError, IndexError):
                 pass
 

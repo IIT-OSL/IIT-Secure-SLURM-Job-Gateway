@@ -96,12 +96,6 @@ def admin_emails() -> list[str]:
     return resp.get("data", {}).get("emails", []) if resp.get("ok") else []
 
 
-def update_login_ip(username: str, ip: str) -> bool:
-    """Record the login IP; returns True if this is a new/unseen IP for the user."""
-    resp = daemon_request("users.update_login_ip", {"username": username, "ip": ip})
-    return resp.get("data", {}).get("is_new_ip", True) if resp.get("ok") else True
-
-
 def check_must_change_pw(username: str) -> bool:
     """True if this user is required to change their password before using the TUI."""
     resp = daemon_request("users.check_must_change_pw", {"username": username})

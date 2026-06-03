@@ -17,27 +17,34 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 
-# ── Config — read from env / site.env; no hardcoded key ──────────────────────
+# ── Config — read from env / secrets.env / site.env; no hardcoded key ────────
+# This mailer runs as the SLURM (root) user, so it can read secrets.env
+# (0640 root:gpusync) directly. Regular users cannot. The API key is NEVER in
+# site.env (world/group readable) — only in secrets.env.
 def _cfg(key: str, default: str = "") -> str:
     if key in os.environ:
         return os.environ[key]
-    site_env = os.environ.get("IIT_SITE_ENV", "/opt/iit-gpu/deploy/site.env")
-    try:
-        for line in open(site_env).read().splitlines():
-            line = line.strip()
-            if line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            if k.strip() == key:
-                return v.strip().strip('"').strip("'")
-    except OSError:
-        pass
+    files = [
+        os.environ.get("IIT_SECRETS_ENV", "/opt/iit-gpu/deploy/secrets.env"),
+        os.environ.get("IIT_SITE_ENV",    "/opt/iit-gpu/deploy/site.env"),
+    ]
+    for path in files:
+        try:
+            for line in open(path).read().splitlines():
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == key:
+                    return v.strip().strip('"').strip("'")
+        except OSError:
+            continue
     return default
 
 RESEND_API_KEY = _cfg("RESEND_API_KEY")   # empty → fallback to msmtp
-FROM_ADDR      = _cfg("MAIL_FROM",  "IIT GPU Gateway <admin@gpu.indrajith.net>")
+FROM_ADDR      = _cfg("MAIL_FROM",  "GPU Cluster <no-reply@example.com>")
 CLUSTER_NAME   = _cfg("CLUSTER_NAME",  "IIT GPU Cluster")
-CLUSTER_URL    = _cfg("CLUSTER_URL",   "https://gpu.indrajith.net")
+CLUSTER_URL    = _cfg("CLUSTER_URL",   "https://example.com")
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 def parse_args(argv: list[str]) -> tuple[str, str]:

@@ -148,80 +148,141 @@ def test_clean_run_command_truncates_at_1000():
 
 # ── validate_sbatch ───────────────────────────────────────────────────────────
 
-def _call(text, username="alice", nfs="/shared"):
-    import os
-    os.environ.setdefault("NFS_ROOT", nfs)
-    from iitgpu.validate import validate_sbatch
-    return validate_sbatch(text, username)
+def _user_dir(tmp_path, user="alice"):
+    """Create and return the user's own workspace under tmp_path NFS root."""
+    d = tmp_path / "users" / user
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _v(text, tmp_path, username="alice", email="alice@iit.lk"):
+    """Run validate_sbatch with NFS_ROOT set and email_for mocked."""
+    from unittest.mock import patch
+    import importlib, iitgpu.validate as v
+    os.environ["NFS_ROOT"] = str(tmp_path)
+    importlib.reload(v)
+    with patch("iitgpu.daemonclient.email_for", return_value=email):
+        return v.validate_sbatch(text, username)
 
 
 def test_validate_sbatch_clean_script_passes(tmp_path):
-    folder = str(tmp_path)
+    ud = _user_dir(tmp_path)
     script = f"""#!/bin/bash
 #SBATCH --job-name=test
-#SBATCH --output={folder}/slurm-%j.out
-#SBATCH --error={folder}/slurm-%j.err
-#SBATCH --chdir={folder}
+#SBATCH --output={ud}/slurm-%j.out
+#SBATCH --error={ud}/slurm-%j.err
+#SBATCH --chdir={ud}
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 python train.py
 """
-    import os; os.environ["NFS_ROOT"] = str(tmp_path.parent)
-    from iitgpu.validate import validate_sbatch
-    errors = validate_sbatch(script, "alice")
-    assert errors == []
+    assert _v(script, tmp_path) == []
 
 
 def test_validate_sbatch_rejects_output_outside_jail(tmp_path):
-    script = "#SBATCH --output=/etc/malicious.out\n"
-    import os; os.environ["NFS_ROOT"] = str(tmp_path)
-    from iitgpu.validate import validate_sbatch
-    errors = validate_sbatch(script, "alice")
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --output=/etc/malicious.out\n", tmp_path)
     assert any("--output" in e for e in errors)
 
 
 def test_validate_sbatch_rejects_chdir_outside_jail(tmp_path):
-    script = "#SBATCH --chdir=/etc\n"
-    import os; os.environ["NFS_ROOT"] = str(tmp_path)
-    from iitgpu.validate import validate_sbatch
-    errors = validate_sbatch(script, "alice")
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --chdir=/etc\n", tmp_path)
     assert any("--chdir" in e for e in errors)
 
 
+def test_validate_sbatch_rejects_cross_user_output(tmp_path):
+    """M1: alice must not be able to target bob's workspace (per-user jail)."""
+    _user_dir(tmp_path, "alice")
+    bob = _user_dir(tmp_path, "bob")
+    errors = _v(f"#SBATCH --output={bob}/stolen.out\n", tmp_path, username="alice")
+    assert any("--output" in e for e in errors), \
+        "cross-user output path must be rejected by per-user jail"
+
+
+def test_validate_sbatch_multiflag_bypass_blocked(tmp_path):
+    """H1: a dangerous flag hidden after a benign one on the same line must be caught."""
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --nice=100 --output=/etc/cron.d/evil\n", tmp_path)
+    assert any("--output" in e for e in errors), \
+        "multi-directive line must not bypass the path check"
+
+
+def test_validate_sbatch_multiflag_uid_blocked(tmp_path):
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --job-name=ok --uid=0\n", tmp_path)
+    assert any("--uid" in e for e in errors)
+
+
 def test_validate_sbatch_rejects_uid_directive(tmp_path):
-    script = "#SBATCH --uid=0\n"
-    import os; os.environ["NFS_ROOT"] = str(tmp_path)
-    from iitgpu.validate import validate_sbatch
-    errors = validate_sbatch(script, "alice")
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --uid=0\n", tmp_path)
     assert any("--uid" in e for e in errors)
 
 
 def test_validate_sbatch_rejects_gid_directive(tmp_path):
-    script = "#SBATCH --gid=0\n"
-    import os; os.environ["NFS_ROOT"] = str(tmp_path)
-    from iitgpu.validate import validate_sbatch
-    errors = validate_sbatch(script, "alice")
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --gid=0\n", tmp_path)
     assert any("--gid" in e for e in errors)
 
 
+def test_validate_sbatch_mail_user_fail_closed_when_daemon_down(tmp_path):
+    """L1: if the daemon can't confirm the address, a non-empty --mail-user is rejected."""
+    from unittest.mock import patch
+    import importlib, iitgpu.validate as v
+    os.environ["NFS_ROOT"] = str(tmp_path)
+    _user_dir(tmp_path)
+    importlib.reload(v)
+    with patch("iitgpu.daemonclient.email_for", side_effect=Exception("daemon down")):
+        errors = v.validate_sbatch("#SBATCH --mail-user=attacker@evil.com\n", "alice")
+    assert any("mail-user" in e for e in errors)
+
+
+def test_validate_sbatch_mail_user_own_address_ok(tmp_path):
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --mail-user=alice@iit.lk\n", tmp_path,
+                username="alice", email="alice@iit.lk")
+    assert errors == []
+
+
+def test_validate_sbatch_mail_user_foreign_rejected(tmp_path):
+    _user_dir(tmp_path)
+    errors = _v("#SBATCH --mail-user=someone@else.com\n", tmp_path,
+                username="alice", email="alice@iit.lk")
+    assert any("mail-user" in e for e in errors)
+
+
 def test_validate_sbatch_rejects_excess_gpus(tmp_path):
-    import os; os.environ.update({"NFS_ROOT": str(tmp_path), "MAX_GPUS": "2"})
+    os.environ.update({"NFS_ROOT": str(tmp_path), "MAX_GPUS": "2"})
+    _user_dir(tmp_path)
     import importlib, iitgpu.validate as v; importlib.reload(v)
-    errors = v.validate_sbatch("#SBATCH --gres=gpu:8\n", "alice")
+    from unittest.mock import patch
+    with patch("iitgpu.daemonclient.email_for", return_value="alice@iit.lk"):
+        errors = v.validate_sbatch("#SBATCH --gres=gpu:8\n", "alice")
     assert any("GPU" in e for e in errors)
+    os.environ.pop("MAX_GPUS", None)
 
 
 def test_validate_sbatch_rejects_excess_cpus(tmp_path):
-    import os; os.environ.update({"NFS_ROOT": str(tmp_path), "MAX_CPUS": "4"})
+    os.environ.update({"NFS_ROOT": str(tmp_path), "MAX_CPUS": "4"})
+    _user_dir(tmp_path)
     import importlib, iitgpu.validate as v; importlib.reload(v)
-    errors = v.validate_sbatch("#SBATCH --cpus-per-task=32\n", "alice")
+    from unittest.mock import patch
+    with patch("iitgpu.daemonclient.email_for", return_value="alice@iit.lk"):
+        errors = v.validate_sbatch("#SBATCH --cpus-per-task=32\n", "alice")
     assert any("cpus" in e.lower() for e in errors)
+    os.environ.pop("MAX_CPUS", None)
 
 
 def test_validate_sbatch_no_false_positives_on_comments(tmp_path):
     """Lines that are plain comments (not #SBATCH) must not trigger errors."""
-    import os; os.environ["NFS_ROOT"] = str(tmp_path)
-    from iitgpu.validate import validate_sbatch
+    _user_dir(tmp_path)
     script = "# This is a comment mentioning --uid and --gid\npython x.py\n"
-    assert validate_sbatch(script, "alice") == []
+    assert _v(script, tmp_path) == []
+
+
+def test_validate_sbatch_ignores_indented_sbatch(tmp_path):
+    """Indented #SBATCH is ignored by SLURM and by us (no false positive)."""
+    _user_dir(tmp_path)
+    assert _v("   #SBATCH --output=/etc/x\n", tmp_path) == []

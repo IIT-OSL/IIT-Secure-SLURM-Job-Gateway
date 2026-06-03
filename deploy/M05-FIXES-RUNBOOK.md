@@ -97,3 +97,40 @@ entirely — the user cannot connect at all, not even to change it.
 - **Phase 5** — Re-provision workspace prompt
 - **Phase 6** — sbatch validator sudoers if needed
 - **Phase 7** — Login-notice deduplication (last-seen IPs)
+
+---
+
+## Security hardening (post-review) — manual steps
+
+### [LOGIN] Create the daemon-only secrets file (C1)
+
+The Resend API key must NOT live in site.env (group-readable by all users).
+Move it into secrets.env, readable only by root + gpusync:
+
+```bash
+sudo cp /opt/iit-gpu/deploy/secrets.env.example /opt/iit-gpu/deploy/secrets.env
+sudoedit /opt/iit-gpu/deploy/secrets.env          # set RESEND_API_KEY=...
+sudo chown root:gpusync /opt/iit-gpu/deploy/secrets.env
+sudo chmod 640 /opt/iit-gpu/deploy/secrets.env
+
+# Remove the key from site.env (it is now ignored there):
+sudo sed -i '/^RESEND_API_KEY=/d' /opt/iit-gpu/deploy/site.env
+
+# Restart the daemon so it loads the key:
+sudo systemctl restart iit-gpu-audit
+
+# Verify a regular user CANNOT read it:
+sudo -u <some_gpuuser> cat /opt/iit-gpu/deploy/secrets.env   # must be Permission denied
+```
+
+### [LOGIN] Tighten the working-copy site.env (L5)
+
+```bash
+sudo chmod 600 /home/slurmadmin/IIT-Secure-SLURM-Job-Gateway/deploy/site.env
+```
+
+### Notes
+- All TUI mail now flows through the daemon's `mail.send` verb; the key never
+  enters a user or admin process.
+- The SLURM `iit-gpu-mailer` runs as root and reads secrets.env directly.
+- `users.admin_emails` is now restricted to admins + root (was world-readable).

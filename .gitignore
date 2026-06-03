@@ -71,3 +71,6 @@ deploy/site.env
 *.sif
 .apptainer_tmp/
 .apptainer_cache/
+
+# Secrets (API keys) — daemon-only, never commit
+deploy/secrets.env

@@ -132,10 +132,9 @@ def main() -> None:
             _email = daemonclient.email_for(_login_user)
             if not _email:
                 return
-            # Only notify on new/unseen source IP to avoid flooding on repeat logins.
-            _is_new_ip = daemonclient.update_login_ip(_login_user, _remote_ip or "local")
-            if _is_new_ip:
-                mailer.send_login_notification(_login_user, _email, _remote_ip)
+            # The daemon does new-IP dedup server-side and only sends when the
+            # source IP is unseen — no client-side IP bookkeeping (M3).
+            mailer.send_login_notification(_login_user, _email, _remote_ip)
         except Exception:
             pass
 
