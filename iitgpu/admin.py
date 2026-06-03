@@ -590,13 +590,17 @@ def _view_users(style) -> None:
     t.add_column("Created at")
     t.add_column("Created by")
     t.add_column("Flags",      style="yellow")
-    for u in users:
+    # Active users first; offboarded/inactive sink to the bottom (stable within group).
+    ordered = sorted(users, key=lambda u: u.get("status", "") != "active")
+    for u in ordered:
         flags = []
         if u["username"] in db_only:
             flags.append("DB-only")
+        status = u.get("status", "")
+        status_cell = f"[green]{status}[/]" if status == "active" else status
         t.add_row(
             u["username"], u.get("full_name", ""), u.get("email", ""),
-            u["role"], u["status"], _fmt_ts(u.get("created_at", "")),
+            u["role"], status_cell, _fmt_ts(u.get("created_at", "")),
             u.get("created_by", ""), ", ".join(flags))
     console.print(t)
 
