@@ -355,6 +355,7 @@ def send_resend(to: str, subject: str, html: str) -> None:
         "https://api.resend.com/emails",
         data=data,
         headers={"Authorization": f"Bearer {RESEND_API_KEY}",
+                 "User-Agent": "iit-gpu-mailer/1.0",
                  "Content-Type": "application/json"},
         method="POST",
     )

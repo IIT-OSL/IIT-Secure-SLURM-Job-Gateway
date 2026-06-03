@@ -85,6 +85,7 @@ def _resend_send(to: str, subject: str, html: str,
     req = urllib.request.Request(
         _RESEND_URL, data=json.dumps(payload).encode(),
         headers={"Authorization": f"Bearer {key}",
+                 "User-Agent": "iit-gpu-mailer/1.0",
                  "Content-Type": "application/json"},
         method="POST",
     )
