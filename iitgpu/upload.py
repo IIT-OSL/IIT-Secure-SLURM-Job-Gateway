@@ -147,52 +147,37 @@ def _download_from_url(folder_path: str) -> None:
 
 def run_upload() -> None:
     import getpass
-    from iitgpu.config import is_admin
     from iitgpu.validate import in_user_upload_jail, user_upload_root
 
     cfg = load_config()
     user = getpass.getuser()
-    admin = is_admin(cfg)
 
-    if admin:
-        # Admins see every subdirectory of NFS root
-        base = Path(cfg.nfs_root)
-        _jail_check = in_jail
-        new_folder_label = "New folder name  (will be created at shared/<name>):"
-        try:
-            _existing = sorted(
-                p.name for p in base.iterdir()
-                if p.is_dir() and in_jail(str(p))
-            ) if base.exists() else []
-        except OSError:
-            _existing = []
-        _folder_choices = (
-            [questionary.Choice(f"{n}  ({base / n})", str(base / n)) for n in _existing]
-            + [questionary.Choice("[create new folder]", "__new__"),
-               questionary.Choice("[cancel]",             "__cancel__")]
-        )
-        prompt = "Select a shared folder, or create a new one:"
-    else:
-        # Regular users are scoped to shared/users/<username>/
-        upload_root = Path(user_upload_root(cfg.nfs_root, user))
-        upload_root.mkdir(parents=True, exist_ok=True)
-        base = upload_root
-        _jail_check = lambda p: in_user_upload_jail(p, cfg.nfs_root, user)
-        new_folder_label = f"New sub-folder name  (inside {upload_root}):"
-        try:
-            _existing = sorted(
-                p.name for p in base.iterdir()
-                if p.is_dir() and _jail_check(str(p))
-            ) if base.exists() else []
-        except OSError:
-            _existing = []
-        _folder_choices = (
-            [questionary.Choice(f"{n}  ({base / n})", str(base / n)) for n in _existing]
-            + [questionary.Choice("[upload here — my data folder]", str(base)),
-               questionary.Choice("[create new sub-folder]",        "__new__"),
-               questionary.Choice("[cancel]",                        "__cancel__")]
-        )
-        prompt = f"Select a destination inside your folder ({base}):"
+    # Uploads always land in the user's own isolated folder
+    # (shared/users/<username>) — admins included. "Upload my data" belongs in
+    # the personal folder; starting at the shared root exposed every folder and
+    # let non-writable parents like shared/users be selected, which then failed
+    # with "could not create or access". Admins who genuinely need to place
+    # files elsewhere in /shared can do so from the file manager (Browse my
+    # files), which retains full-jail access.
+    upload_root = Path(user_upload_root(cfg.nfs_root, user))
+    upload_root.mkdir(parents=True, exist_ok=True)
+    base = upload_root
+    _jail_check = lambda p: in_user_upload_jail(p, cfg.nfs_root, user)
+    new_folder_label = f"New sub-folder name  (inside {upload_root}):"
+    try:
+        _existing = sorted(
+            p.name for p in base.iterdir()
+            if p.is_dir() and _jail_check(str(p))
+        ) if base.exists() else []
+    except OSError:
+        _existing = []
+    _folder_choices = (
+        [questionary.Choice(f"{n}  ({base / n})", str(base / n)) for n in _existing]
+        + [questionary.Choice("[upload here — my data folder]", str(base)),
+           questionary.Choice("[create new sub-folder]",        "__new__"),
+           questionary.Choice("[cancel]",                        "__cancel__")]
+    )
+    prompt = f"Select a destination inside your folder ({base}):"
 
     sel = questionary.select(prompt, choices=_folder_choices, style=_STYLE).ask()
 

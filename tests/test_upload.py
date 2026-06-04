@@ -172,8 +172,15 @@ class TestRunUpload:
         m.ask.return_value = value
         return m
 
+    def _udir(self, tmp_path):
+        """The user's own upload folder (shared/users/<username>) — uploads are
+        always scoped here, for admins and regular users alike."""
+        import getpass
+        from iitgpu.validate import user_upload_root
+        return Path(user_upload_root(str(tmp_path), getpass.getuser()))
+
     def test_cancel_exits_without_creating_anything(self, tmp_path, monkeypatch):
-        """Selecting [cancel] returns without creating any folder."""
+        """Selecting [cancel] returns without creating any data folder."""
         monkeypatch.setenv("NFS_ROOT", str(tmp_path))
         monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
 
@@ -184,8 +191,8 @@ class TestRunUpload:
 
         from iitgpu.upload import run_upload
         run_upload()
-        # Nothing created inside tmp_path
-        assert list(tmp_path.iterdir()) == []
+        # The user's own folder is prepared but left empty — no data folder made.
+        assert list(self._udir(tmp_path).iterdir()) == []
 
     def test_select_existing_folder_uses_it_directly(self, tmp_path, monkeypatch):
         """Picking an existing folder skips the name-entry prompt entirely."""
@@ -193,8 +200,8 @@ class TestRunUpload:
         monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
         monkeypatch.setattr("iitgpu.auditclient.log", lambda *a, **kw: None)
 
-        existing = tmp_path / "my-dataset"
-        existing.mkdir()
+        existing = self._udir(tmp_path) / "my-dataset"
+        existing.mkdir(parents=True)
 
         # First select: pick the existing folder path; second: "back"
         sel_responses = iter([str(existing), "back"])
@@ -207,11 +214,12 @@ class TestRunUpload:
         run_upload()
 
         assert existing.is_dir()
-        # No new folder should have been created
-        assert list(tmp_path.iterdir()) == [existing]
+        # No new folder should have been created beside it
+        assert list(self._udir(tmp_path).iterdir()) == [existing]
 
     def test_create_new_folder_prompts_for_name_and_creates_dir(self, tmp_path, monkeypatch):
-        """Choosing [create new folder] prompts for a name and creates the directory."""
+        """Choosing [create new folder] prompts for a name and creates the directory
+        inside the user's own folder."""
         monkeypatch.setenv("NFS_ROOT", str(tmp_path))
         monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
         monkeypatch.setattr("iitgpu.auditclient.log", lambda *a, **kw: None)
@@ -230,15 +238,16 @@ class TestRunUpload:
         from iitgpu.upload import run_upload
         run_upload()
 
-        assert (tmp_path / "newdataset").is_dir()
+        assert (self._udir(tmp_path) / "newdataset").is_dir()
 
     def test_existing_folders_appear_in_choices(self, tmp_path, monkeypatch):
-        """Existing subdirectories of nfs_root are listed as selectable choices."""
+        """Existing subdirectories of the user's own folder are listed as choices."""
         monkeypatch.setenv("NFS_ROOT", str(tmp_path))
         monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
 
-        (tmp_path / "alpha").mkdir()
-        (tmp_path / "beta").mkdir()
+        udir = self._udir(tmp_path)
+        (udir / "alpha").mkdir(parents=True)
+        (udir / "beta").mkdir(parents=True)
 
         choices_seen: list = []
 
@@ -255,8 +264,8 @@ class TestRunUpload:
         from iitgpu.upload import run_upload
         run_upload()
 
-        assert str(tmp_path / "alpha") in choices_seen
-        assert str(tmp_path / "beta") in choices_seen
+        assert str(udir / "alpha") in choices_seen
+        assert str(udir / "beta") in choices_seen
         assert "__new__" in choices_seen
         assert "__cancel__" in choices_seen
 
@@ -294,8 +303,8 @@ class TestRunUpload:
             lambda action, **kw: logged.append((action, kw)),
         )
 
-        existing = tmp_path / "my-dataset"
-        existing.mkdir()
+        existing = self._udir(tmp_path) / "my-dataset"
+        existing.mkdir(parents=True)
 
         sel_responses = iter([str(existing), "back"])
         monkeypatch.setattr(
@@ -307,6 +316,42 @@ class TestRunUpload:
         run_upload()
 
         assert any(action == "data_folder_open" for action, _ in logged)
+
+    def test_admin_upload_is_still_scoped_to_own_folder(self, tmp_path, monkeypatch):
+        """Regression: even an admin must land in their own shared/users/<user>
+        folder — the upload picker must never offer the shared root or other
+        top-level shared dirs (which include non-writable parents like users)."""
+        monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
+        # Force admin: it must not change the upload scope.
+        monkeypatch.setattr("iitgpu.config.is_admin", lambda *a, **kw: True)
+
+        # Sibling top-level shared dirs that must NOT appear as upload targets.
+        for sib in ("jobs", "models", "envs", "users"):
+            (tmp_path / sib).mkdir(parents=True, exist_ok=True)
+
+        choices_seen: list = []
+
+        def fake_select(prompt, choices, **kw):
+            choices_seen.extend(
+                c.value if hasattr(c, "value") else c for c in choices
+            )
+            m = MagicMock()
+            m.ask.return_value = "__cancel__"
+            return m
+
+        monkeypatch.setattr("questionary.select", fake_select)
+
+        from iitgpu.upload import run_upload
+        run_upload()
+
+        udir = str(self._udir(tmp_path))
+        # The only real-path choice is the user's own folder ("upload here").
+        assert udir in choices_seen
+        for sib in ("jobs", "models", "envs", "users"):
+            assert str(tmp_path / sib) not in choices_seen
+        # And the shared root itself is never an option.
+        assert str(tmp_path) not in choices_seen
 
 
 # ---------------------------------------------------------------------------
