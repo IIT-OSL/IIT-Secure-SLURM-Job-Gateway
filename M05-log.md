@@ -1,9 +1,9 @@
 # M05 — IIT Secure SLURM Job Gateway: Mail Infrastructure, User Management & Admin UX
 
-**Date:** 2026-06-03
+**Date:** 2026-06-03 · post-M05 fixes 2026-06-04
 **Author:** Daham Dissanayake
-**Status:** Deployed on `main` (commit `d4d223a`) · live at `/opt/iit-gpu/` on the login node (192.168.122.10)
-**Tests:** 510 passing — `PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q`
+**Status:** Deployed on `main` (commit `7cd0ca5`) · live at `/opt/iit-gpu/` on the login node (192.168.122.10)
+**Tests:** 514 passing — `PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q`
 **Repo:** `https://github.com/DahamDissanayake/IIT-Secure-SLURM-Job-Gateway`
 **Builds on:** M04 (definitive architecture reference)
 
@@ -350,6 +350,36 @@ Resend API requests now send a `User-Agent: iit-gpu-mailer/1.0` header in both
 `deploy/audit_daemon.py` (`_resend_send`) and `deploy/iit-gpu-mailer`
 (`send_resend`). (`ada8872`)
 
+### 6.6 SLURM job-status email never delivered (post-M05, 2026-06-04)
+Login/welcome mail worked, but job notices (BEGIN/END/FAIL) were never received.
+`slurmctld` runs `MailProg` (`/usr/local/bin/iit-gpu-mailer`) as **`SlurmUser` =
+`slurm`**, *not* root — and `slurm` was only in `slurm,gpuusers`, so it could not
+read the Resend key in `secrets.env` (`0640 root:gpusync`). It fell back to msmtp,
+which also failed twice: `slurm` cannot read `/etc/msmtprc` (`0600 root:root`),
+**and** the fallback ran `msmtp -s …` (`-s` is a mailx/sendmail option msmtp
+rejects: `invalid option -- 's'`). Both paths failed silently. Fix: add `slurm`
+to `gpusync` (codified in `install.sh` + `redeploy-igm.sh`, idempotent with a
+`slurmctld` restart) so MailProg can read the key, and rewrite the msmtp fallback
+to pipe a proper RFC-822 message (Subject header on stdin, recipient as a
+positional arg, no `-s`). The mailer's stale "runs as root" comment was corrected.
+Verified live: a job with `--mail-type=BEGIN,END` logged
+`MailProg output was 'iit-gpu-mailer: sent to … — HTTP 200'` for both events.
+(`265f69d`)
+
+### 6.7 File pickers ignored the per-user jail (post-M05, 2026-06-04)
+Two file-selection flows started at `/shared` and exposed every user's data
+instead of the caller's own `shared/users/<user>` folder:
+- **Job wizard** (`iitgpu/wizard.py`): `_browse_data_folder` / `_browse_script`
+  used the global jail and fell back to `/shared` when the user dir was missing.
+  They now take a `jail` predicate; regular users open in (and are confined to)
+  their own area + read-only `models/envs`, admins keep the full NFS jail —
+  mirroring `files.py`. (`265f69d`)
+- **"Upload data"** (`iitgpu/upload.py` `run_upload`, via My Workspace): the
+  admin branch listed every top-level `/shared` dir, so selecting a non-writable
+  parent like `/shared/users` failed with "Could not create or access". Now
+  always scopes to `shared/users/<username>` for **everyone, admins included**
+  (admins use *Browse my files* for wider access). (`74e33f3`)
+
 ---
 
 ## 7. Timezone Hardening — GMT+5:30 Everywhere
@@ -475,6 +505,14 @@ AFTER:  user-facing mail → recipient only
 | `ada8872` | `fix(mail): set User-Agent on Resend API requests (Cloudflare 1010 block)` |
 | `d4d223a` | `fix(mail): stop admin BCC leak; send dedicated new-user notice` |
 
+**Post-M05 fixes (2026-06-04):**
+
+| Hash | Message |
+|------|---------|
+| `265f69d` | `fix(mail+wizard): deliver job-status email & open upload picker in user folder` |
+| `74e33f3` | `fix(upload): always scope "Upload data" to the user's own folder` |
+| `7cd0ca5` | `docs(M05): document mail + file-picker fixes` |
+
 ---
 
 ## 13. Active State
@@ -493,14 +531,14 @@ AFTER:  user-facing mail → recipient only
 ### Tests
 
 ```
-510 passed   (PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q)
+514 passed   (PYTHONPATH=/opt/iit-gpu python3 -m pytest tests/ -q)
 ```
 
 ### Mail delivery
 
 | Path | From | Recipients | Status |
 |------|------|-----------|--------|
-| SLURM job events | iit-gpu-mailer → Resend API | job owner + BCC admins | Live |
+| SLURM job events | iit-gpu-mailer (runs as `slurm`) → Resend API | **job owner only** | Live (needs `slurm` in `gpusync`, §6.6) |
 | Welcome (on create) | iitgpu/mailer → daemon → Resend | **user only** | Live |
 | New user created | iitgpu/mailer → daemon → Resend | **each admin, no creds** | Live |
 | Login notification | iitgpu/mailer → daemon → Resend | **user only** (new IP) | Live |
@@ -513,6 +551,7 @@ AFTER:  user-facing mail → recipient only
 | Principal | Groups |
 |-----------|--------|
 | `gpusync` | gpusync gpuusers auditadmin **adm** |
+| `slurm` (SlurmUser) | slurm gpuusers **gpusync** ← so MailProg can read the Resend key (§6.6) |
 | `slurmadmin` | slurmadmin auditadmin gpuadmins |
 | `dahamadmin` | dahamadmin gpuusers gpuadmins |
 
