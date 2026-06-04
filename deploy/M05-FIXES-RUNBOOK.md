@@ -100,6 +100,82 @@ entirely — the user cannot connect at all, not even to change it.
 
 ---
 
+## Mail & file-picker fixes (2026-06-04, commits 265f69d + 74e33f3)
+
+Three post-deploy bug fixes. Only the first needs a **manual step** (a group
+change + `slurmctld` restart); the other two are code-only and ship with the
+normal `redeploy-igm.sh`.
+
+### [LOGIN] Job-status email never delivered — add `slurm` to `gpusync` (REQUIRED)
+
+**Symptom:** login/welcome mail worked, but SLURM job notices (BEGIN/END/FAIL)
+were never received.
+
+**Root cause:** `slurmctld` runs `MailProg` (`/usr/local/bin/iit-gpu-mailer`) as
+**`SlurmUser` = `slurm`**, *not* root. `slurm` was only in `slurm,gpuusers`, so
+it could **not** read the Resend key in `secrets.env` (`0640 root:gpusync`). The
+mailer then fell back to msmtp, which also failed twice: `slurm` cannot read
+`/etc/msmtprc` (`0600 root:root`), **and** the fallback passed `msmtp -s …`
+(`-s` is a mailx/sendmail option msmtp rejects: `invalid option -- 's'`). Both
+paths failed silently.
+
+`deploy/install.sh` and `deploy/redeploy-igm.sh` now add the membership
+automatically, and `redeploy-igm.sh` restarts `slurmctld` only when it actually
+adds it. On a host that pre-dates this change, apply it once by hand:
+
+```bash
+# Add the SlurmUser to gpusync so MailProg can read the send-only Resend key:
+sudo usermod -aG gpusync slurm
+
+# slurmctld caches its supplementary groups at start — restart so it picks up
+# gpusync (running jobs are unaffected; this only restarts the controller):
+sudo systemctl restart slurmctld
+
+# Verify membership and that the controller is back up:
+id -nG slurm | tr ' ' '\n' | grep -qx gpusync && echo "slurm in gpusync: OK"
+systemctl is-active slurmctld
+```
+
+**Verify end-to-end** (raises controller debug briefly, then restores it):
+
+```bash
+sudo scontrol setdebug debug2
+sbatch --wrap 'hostname; sleep 2' \
+  --partition=gpu --mail-user=you@example.com --mail-type=BEGIN,END
+# Watch for: MailProg output was 'iit-gpu-mailer: sent to … — HTTP 200'
+sudo journalctl -u slurmctld --since '-1 min' | grep -i 'mail\|MailProg'
+sudo scontrol setdebug info
+```
+
+> **GOTCHA:** MailProg runs as `slurm`, not root. Any secret or config it needs
+> must be readable by the `slurm` user. The mailer's old "runs as root" comment
+> was wrong and has been corrected.
+
+> **NOTE:** `redeploy-igm.sh` re-execs from a pre-pull temp copy of itself, so a
+> brand-new block added to that script first runs on the *next* deploy. The live
+> `slurm`-in-`gpusync` membership above persists regardless.
+
+### Code-only (no manual step) — file-picker scoping
+
+- **Job wizard data/script picker (`iitgpu/wizard.py`):** `_browse_data_folder`
+  / `_browse_script` now take a `jail` predicate and the wizard opens regular
+  users in their own `shared/users/<user>` area (admins keep the full NFS jail),
+  instead of starting at `/shared` and falling back there when the user dir was
+  missing.
+- **"Upload data" picker (`iitgpu/upload.py` `run_upload`):** always scopes to
+  the user's own `shared/users/<username>` folder for **everyone, admins
+  included** (it no longer lists every top-level `/shared` dir, where selecting a
+  non-writable parent like `/shared/users` failed with "Could not create or
+  access"). Admins who need other `/shared` locations use *Browse my files*.
+
+Picked up by the normal redeploy:
+
+```bash
+bash /opt/iit-gpu/deploy/redeploy-igm.sh
+```
+
+---
+
 ## Security hardening (post-review) — manual steps
 
 ### [LOGIN] Create the daemon-only secrets file (C1)
@@ -132,5 +208,7 @@ sudo chmod 600 /home/slurmadmin/IIT-Secure-SLURM-Job-Gateway/deploy/site.env
 ### Notes
 - All TUI mail now flows through the daemon's `mail.send` verb; the key never
   enters a user or admin process.
-- The SLURM `iit-gpu-mailer` runs as root and reads secrets.env directly.
+- The SLURM `iit-gpu-mailer` (MailProg) runs as **`SlurmUser` = `slurm`**, not
+  root, and reads secrets.env directly — which requires `slurm` to be in the
+  `gpusync` group (see "Mail & file-picker fixes" above).
 - `users.admin_emails` is now restricted to admins + root (was world-readable).
