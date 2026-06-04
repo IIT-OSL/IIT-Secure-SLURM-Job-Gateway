@@ -129,3 +129,41 @@ def test_login_local_fallback_ip():
     with ctx, patch("iitgpu.mailer.Thread", _SyncThread):
         mailer.send_login_notification("alice", "alice@iit.lk", "")
     assert store["ip"] == "local"
+
+
+# ── Regression: standalone SLURM MailProg (deploy/iit-gpu-mailer) fallback ────
+# slurmctld runs this as the `slurm` user. Its msmtp fallback once passed `-s`,
+# which msmtp rejects ("invalid option -- 's'"), so when Resend was unreachable
+# no mail went out at all. The fallback must pipe a full RFC-822 message to
+# msmtp with the recipient as a positional arg and NO `-s` flag.
+
+def _load_job_mailer():
+    import importlib.util, pathlib
+    from importlib.machinery import SourceFileLoader
+    p = pathlib.Path(__file__).resolve().parent.parent / "deploy" / "iit-gpu-mailer"
+    loader = SourceFileLoader("iit_gpu_jobmailer", str(p))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_job_mailer_fallback_does_not_pass_dash_s():
+    jm = _load_job_mailer()
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["input"] = kw.get("input", "")
+        class R: returncode = 0
+        return R()
+
+    with patch.object(jm.subprocess, "run", side_effect=fake_run):
+        jm.fallback_msmtp("user@example.com", "My Subject", "the body")
+
+    argv = captured["argv"]
+    assert "-s" not in argv, "msmtp has no -s flag; fallback must not pass it"
+    assert argv[-1] == "user@example.com", "recipient must be the positional arg"
+    # Subject must travel in the message headers piped on stdin instead.
+    assert "Subject: My Subject" in captured["input"]
+    assert "the body" in captured["input"]

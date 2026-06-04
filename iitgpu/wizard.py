@@ -45,8 +45,13 @@ _TASK_LABELS: dict[str, str] = {
 }
 
 
-def _browse_script(start_dir: str) -> str | None:
-    """Jailed file browser that only shows .py and .sh files (plus dirs)."""
+def _browse_script(start_dir: str, jail=in_jail) -> str | None:
+    """Jailed file browser that only shows .py and .sh files (plus dirs).
+
+    `jail` is the navigation predicate: the global `in_jail` for admins, or the
+    caller's per-user browse jail for regular users so they stay confined to
+    their own shared/users/<user> area (plus shared read-only models/envs).
+    """
     current = start_dir
     while True:
         entries = safe_listdir(current)
@@ -63,27 +68,31 @@ def _browse_script(start_dir: str) -> str | None:
             return None
         if choice == "[.. up]":
             parent = str(Path(current).parent)
-            if in_jail(parent):
+            if jail(parent):
                 current = parent
             else:
                 warn("Already at root of allowed paths.")
             continue
         if choice.startswith("[dir] "):
             candidate = str(Path(current) / choice[6:])
-            if in_jail(candidate):
+            if jail(candidate):
                 current = candidate
             else:
                 warn("Access denied.")
             continue
         chosen = str(Path(current) / choice)
-        if in_jail(chosen):
+        if jail(chosen):
             return chosen
         warn("Access denied.")
         return None
 
 
-def _browse_data_folder(start_dir: str) -> str | None:
-    """Jailed folder browser (directories only, for picking a data directory)."""
+def _browse_data_folder(start_dir: str, jail=in_jail) -> str | None:
+    """Jailed folder browser (directories only, for picking a data directory).
+
+    `jail` is the navigation predicate (see `_browse_script`): regular users are
+    confined to their own area; admins get the full global jail.
+    """
     current = start_dir
     while True:
         entries = safe_listdir(current)
@@ -96,20 +105,20 @@ def _browse_data_folder(start_dir: str) -> str | None:
         if choice is None or choice == "[cancel]":
             return None
         if choice == "[select this folder]":
-            if in_jail(current):
+            if jail(current):
                 return current
             warn("Access denied.")
             return None
         if choice == "[.. up]":
             parent = str(Path(current).parent)
-            if in_jail(parent):
+            if jail(parent):
                 current = parent
             else:
                 warn("Already at root of allowed paths.")
             continue
         if choice.startswith("[dir] "):
             candidate = str(Path(current) / choice[6:])
-            if in_jail(candidate):
+            if jail(candidate):
                 current = candidate
             else:
                 warn("Access denied.")
@@ -338,6 +347,31 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
     cfg = load_config()
     jdir = jobs_dir(cfg)
     user = getpass.getuser()
+
+    # Role-aware file-browser jail (mirrors files.py). Regular users browse and
+    # pick data/scripts from their own shared/users/<user> area (plus read-only
+    # shared models/envs); admins get the full NFS jail. Used as the navigation
+    # predicate for _browse_data_folder / _browse_script below.
+    from iitgpu.config import is_admin
+    from iitgpu.validate import in_user_browse_jail
+    _admin = is_admin(cfg)
+    _browse_jail = (
+        in_jail if _admin
+        else (lambda p: in_user_browse_jail(p, cfg.nfs_root, user))
+    )
+
+    def _user_browse_start() -> str:
+        """The user's own folder, created if missing, so the browser always opens
+        inside shared/users/<user> instead of falling back to the NFS root."""
+        if _admin:
+            return cfg.nfs_root
+        start = user_dir(cfg, user)
+        try:
+            Path(start).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return start if _browse_jail(start) else cfg.nfs_root
+        return start
+
     header("New Job")
 
     # ── Step 0: Optional template load (skip when prefilling from rerun) ─────
@@ -530,15 +564,13 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
             return
 
         if data_choice.startswith("a)"):
-            _start = str(Path(user_dir(cfg, user)))
-            if not Path(_start).exists():
-                _start = cfg.nfs_root
-            if _prefill_dp and Path(_prefill_dp).exists() and in_jail(_prefill_dp):
+            _start = _user_browse_start()
+            if _prefill_dp and Path(_prefill_dp).exists() and _browse_jail(_prefill_dp):
                 _start = (
                     _prefill_dp if Path(_prefill_dp).is_dir()
                     else str(Path(_prefill_dp).parent)
                 )
-            _picked = _browse_data_folder(_start)
+            _picked = _browse_data_folder(_start, _browse_jail)
             if _picked:
                 data_path = _picked
 
@@ -683,15 +715,13 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
 
     # Non-notebook: show script browser if not already set from inline paste
     if script_path is None:
-        _start = str(Path(user_dir(cfg, user)))
-        if not Path(_start).exists():
-            _start = cfg.nfs_root
+        _start = _user_browse_start()
         _prefill_sp = _tdefaults.get("script_path", "")
-        if _prefill_sp and Path(_prefill_sp).exists() and in_jail(_prefill_sp):
+        if _prefill_sp and Path(_prefill_sp).exists() and _browse_jail(_prefill_sp):
             _start = str(Path(_prefill_sp).parent)
 
         info("Step 5 — Select your job script (.py or .sh):")
-        script_path = _browse_script(_start)
+        script_path = _browse_script(_start, _browse_jail)
         if script_path is None:
             return
 

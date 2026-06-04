@@ -116,6 +116,18 @@ usermod -aG auditadmin slurmadmin
 usermod -aG gpuusers gpusync
 install -d -o gpusync -g auditadmin -m 0750 "${STATE_DIR}"
 
+# ── SLURM job-completion email (MailProg) ─────────────────────────────────────
+# slurmctld invokes MailProg (/usr/local/bin/iit-gpu-mailer) as SlurmUser — the
+# `slurm` account, not root. The mailer reads the Resend API key from
+# deploy/secrets.env (0640 root:gpusync), so `slurm` MUST be in the gpusync group
+# or every BEGIN/END/FAIL job email is silently dropped (key read fails →
+# msmtp fallback, which also can't read its restricted config). Add the
+# membership here; restart slurmctld afterwards so it picks up the new group.
+if id slurm &>/dev/null; then
+    usermod -aG gpusync slurm
+    systemctl restart slurmctld 2>/dev/null || true
+fi
+
 # ── Launcher ──────────────────────────────────────────────────────────────────
 echo "==> Installing launcher at ${BIN_PATH}..."
 # The launcher uses env -i to sanitise the environment. Conda's bin dir must be

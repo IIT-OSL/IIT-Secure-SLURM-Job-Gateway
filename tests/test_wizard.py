@@ -339,3 +339,72 @@ def test_mail_user_not_set_when_no_email_in_db(tmp_path):
     folder = make_job_folder(str(tmp_path), spec)
     sbatch = render_sbatch(spec, folder)
     assert "--mail-user" not in sbatch
+
+
+# ─── Regression: wizard file browsers honour a per-user jail (issue: data/script
+#     picker must start in & stay confined to shared/users/<user>) ─────────────
+
+def _select_returning(value):
+    """Build a questionary.select stand-in that returns `value` once then cancels."""
+    seq = iter([value, "[cancel]"])
+    return lambda *a, **kw: MagicMock(ask=lambda: next(seq))
+
+
+def test_browse_data_folder_uses_supplied_jail(tmp_path, monkeypatch):
+    """A regular user's browse jail must gate selection — picking a folder inside
+    their own area is allowed; the same browser must refuse paths outside it."""
+    import iitgpu.wizard as wiz
+    from iitgpu.validate import in_user_browse_jail
+
+    nfs = str(tmp_path)
+    alice_dir = Path(nfs) / "users" / "alice"
+    bob_dir = Path(nfs) / "users" / "bob"
+    alice_dir.mkdir(parents=True)
+    bob_dir.mkdir(parents=True)
+
+    jail = lambda p: in_user_browse_jail(p, nfs, "alice")
+
+    # Selecting alice's own dir → allowed.
+    monkeypatch.setattr("questionary.select", _select_returning("[select this folder]"))
+    assert wiz._browse_data_folder(str(alice_dir), jail) == str(alice_dir)
+
+    # Selecting bob's dir with alice's jail → denied (returns None).
+    monkeypatch.setattr("questionary.select", _select_returning("[select this folder]"))
+    assert wiz._browse_data_folder(str(bob_dir), jail) is None
+
+
+def test_browse_script_uses_supplied_jail(tmp_path, monkeypatch):
+    """The script picker must likewise refuse a file outside the user's jail."""
+    import iitgpu.wizard as wiz
+    from iitgpu.validate import in_user_browse_jail
+
+    nfs = str(tmp_path)
+    alice_dir = Path(nfs) / "users" / "alice"
+    bob_dir = Path(nfs) / "users" / "bob"
+    alice_dir.mkdir(parents=True)
+    bob_dir.mkdir(parents=True)
+    (alice_dir / "train.py").write_text("print('hi')\n")
+    (bob_dir / "secret.py").write_text("print('nope')\n")
+
+    jail = lambda p: in_user_browse_jail(p, nfs, "alice")
+
+    # Pick alice's own script → returned.
+    monkeypatch.setattr("questionary.select", _select_returning("train.py"))
+    assert wiz._browse_script(str(alice_dir), jail) == str(alice_dir / "train.py")
+
+    # Pick bob's script while jailed to alice → denied.
+    monkeypatch.setattr("questionary.select", _select_returning("secret.py"))
+    assert wiz._browse_script(str(bob_dir), jail) is None
+
+
+def test_browse_helpers_default_jail_is_global_in_jail():
+    """Default jail param stays the global in_jail so admin callers are unaffected.
+    (Identity-free check: other tests may reload modules, which would rebind the
+    function object while keeping the same semantics.)"""
+    import inspect
+    import iitgpu.wizard as wiz
+
+    for fn in (wiz._browse_data_folder, wiz._browse_script):
+        default = inspect.signature(fn).parameters["jail"].default
+        assert callable(default)
+        assert getattr(default, "__name__", "") == "in_jail"

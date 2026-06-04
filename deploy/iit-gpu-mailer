@@ -18,9 +18,12 @@ import urllib.error
 from datetime import datetime
 
 # ── Config — read from env / secrets.env / site.env; no hardcoded key ────────
-# This mailer runs as the SLURM (root) user, so it can read secrets.env
-# (0640 root:gpusync) directly. Regular users cannot. The API key is NEVER in
-# site.env (world/group readable) — only in secrets.env.
+# slurmctld invokes this MailProg as SlurmUser (the `slurm` account, NOT root).
+# For it to read the Resend key in secrets.env (0640 root:gpusync), `slurm` MUST
+# be a member of the `gpusync` group — the deploy scripts ensure this. Without
+# that membership the key read fails silently and no job mail is sent. Regular
+# users cannot read the key. The API key is NEVER in site.env (world/group
+# readable) — only in secrets.env.
 def _cfg(key: str, default: str = "") -> str:
     if key in os.environ:
         return os.environ[key]
@@ -333,9 +336,15 @@ def send_resend(to: str, subject: str, html: str) -> None:
 
 # ── Fallback: pipe to msmtp for plain-text ────────────────────────────────────
 def fallback_msmtp(to: str, subject: str, body_stdin: str) -> None:
+    # NOTE: msmtp has no `-s` flag (that is a mailx/sendmail option). msmtp reads
+    # the entire RFC-822 message — headers included — from stdin and takes the
+    # recipient as a positional arg. Build a minimal message with a Subject
+    # header so the fallback actually produces a valid email instead of erroring
+    # out with "invalid option -- 's'".
+    message = f"Subject: {subject}\nTo: {to}\n\n{body_stdin}"
     try:
-        subprocess.run(["/usr/bin/msmtp", "-s", subject, to],
-                       input=body_stdin, text=True, timeout=30)
+        subprocess.run(["/usr/bin/msmtp", to],
+                       input=message, text=True, timeout=30)
     except Exception as exc:
         sys.stderr.write(f"iit-gpu-mailer: msmtp fallback failed: {exc}\n")
 

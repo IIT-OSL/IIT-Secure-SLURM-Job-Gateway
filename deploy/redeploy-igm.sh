@@ -64,6 +64,23 @@ if [ -f "$INSTALL/deploy/iit-gpu-mailer" ]; then
     ok "iit-gpu-mailer updated"
 fi
 
+# Ensure the SlurmUser (`slurm`) can read the Resend key in secrets.env.
+# slurmctld runs MailProg as `slurm`, which must be in the gpusync group or
+# every job-completion email is silently dropped. Idempotent: only restart
+# slurmctld when we actually add the membership (a fresh group needs a restart
+# for the running daemon to pick up its new supplementary groups).
+if id slurm &>/dev/null; then
+    if id -nG slurm | tr ' ' '\n' | grep -qx gpusync; then
+        ok "slurm already in gpusync (job mail can read the API key)"
+    else
+        step "Adding slurm to gpusync so MailProg can read the Resend key ..."
+        sudo usermod -aG gpusync slurm
+        sudo systemctl restart slurmctld \
+            && ok "slurm added to gpusync; slurmctld restarted" \
+            || warn "usermod done but slurmctld restart failed — restart it manually"
+    fi
+fi
+
 # Sync user-provisioning scripts to /usr/local/bin (the admin panel calls these via sudo).
 for _s in iit-gpu-adduser iit-gpu-deluser; do
     if [ -f "$INSTALL/deploy/${_s}.sh" ]; then
