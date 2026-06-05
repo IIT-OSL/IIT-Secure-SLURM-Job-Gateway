@@ -442,3 +442,38 @@ def test_notebook_script_task_type_is_offered():
     import iitgpu.wizard as wiz
     assert "notebook-script" in wiz._TASK_LABELS
     assert ".ipynb" in wiz._TASK_LABELS["notebook-script"]
+
+
+def test_valid_pkg_tokens_keeps_specs_drops_shell_metachars():
+    from iitgpu.wizard import _valid_pkg_tokens
+    assert _valid_pkg_tokens("tqdm wfdb==4.1 torch>=2.0 scikit-learn[extra]") == \
+        ["tqdm", "wfdb==4.1", "torch>=2.0", "scikit-learn[extra]"]
+    for bad in ["a;b", "$(x)", "a&&b", "../x", "a|b", "`x`"]:
+        assert _valid_pkg_tokens(bad) == [], bad
+
+
+def test_notebook_deps_prompt_autodetects_requirements(tmp_path, monkeypatch):
+    """A requirements.txt in the notebook's project root is auto-detected and,
+    when chosen, returned for pip-install before the run."""
+    import iitgpu.wizard as wiz
+    proj = tmp_path / "proj"
+    (proj / "notebooks").mkdir(parents=True)
+    nb = proj / "notebooks" / "run.ipynb"
+    nb.write_text("{}")
+    reqs = proj / "requirements.txt"
+    reqs.write_text("tqdm\n")
+
+    auto = f"Install from {reqs}  (auto-detected)"
+    monkeypatch.setattr("questionary.select",
+                        lambda *a, **k: MagicMock(ask=lambda: auto))
+    req, pkgs = wiz._notebook_deps_prompt(str(nb), lambda p: True, str(proj))
+    assert req == str(reqs) and pkgs == ""
+
+
+def test_notebook_deps_prompt_skip_returns_empty(tmp_path, monkeypatch):
+    import iitgpu.wizard as wiz
+    nb = tmp_path / "run.ipynb"
+    nb.write_text("{}")
+    monkeypatch.setattr("questionary.select",
+                        lambda *a, **k: MagicMock(ask=lambda: "Skip — my environment already has everything"))
+    assert wiz._notebook_deps_prompt(str(nb), lambda p: True, str(tmp_path)) == ("", "")

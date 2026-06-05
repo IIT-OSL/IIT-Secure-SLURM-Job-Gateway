@@ -4,6 +4,7 @@ from __future__ import annotations
 import getpass
 import grp
 import os
+import re
 import shutil
 from datetime import datetime, timezone, timedelta
 
@@ -88,6 +89,54 @@ def _browse_script(start_dir: str, jail=in_jail, exts=(".py", ".sh")) -> str | N
             return chosen
         warn("Access denied.")
         return None
+
+
+# A conservative pip package-spec matcher (name, optional extras, optional
+# version pins). Anything with shell metacharacters or spaces is rejected so a
+# package list can never inject into the generated job script.
+_PKG_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?"
+    r"([=<>!~]=?[A-Za-z0-9._*+-]+)*$"
+)
+
+
+def _valid_pkg_tokens(raw: str) -> list[str]:
+    """Keep only tokens that look like safe pip package specs."""
+    return [t for t in raw.split() if _PKG_RE.match(t)]
+
+
+def _notebook_deps_prompt(notebook_path: str, browse_jail, start_dir: str) -> tuple[str, str]:
+    """Ask how to install the notebook's Python deps before it runs. Auto-detects
+    a requirements.txt next to the notebook or in its project root. Returns
+    (requirements_path, packages_str) — at most one is non-empty."""
+    nb = Path(notebook_path)
+    candidates = [nb.parent / "requirements.txt", nb.parent.parent / "requirements.txt"]
+    found = next((str(c) for c in candidates
+                  if c.is_file() and browse_jail(str(c))), "")
+    auto = f"Install from {found}  (auto-detected)" if found else None
+    choices = ([auto] if auto else []) + [
+        "Choose a requirements.txt file",
+        "Type package names (e.g. tqdm wfdb h5py)",
+        "Skip — my environment already has everything",
+    ]
+    sel = questionary.select(
+        "Install the notebook's Python dependencies first?",
+        choices=choices, style=_STYLE,
+    ).ask()
+    if not sel or sel.startswith("Skip"):
+        return "", ""
+    if auto and sel == auto:
+        return found, ""
+    if sel.startswith("Choose"):
+        picked = _browse_script(start_dir, browse_jail, exts=(".txt",))
+        return (picked or ""), ""
+    if sel.startswith("Type"):
+        raw = questionary.text("Packages (space-separated):", style=_STYLE).ask() or ""
+        toks = _valid_pkg_tokens(raw)
+        if raw.strip() and not toks:
+            warn("No valid package names recognised — skipping dependency install.")
+        return "", " ".join(toks)
+    return "", ""
 
 
 def _browse_data_folder(start_dir: str, jail=in_jail) -> str | None:
@@ -745,6 +794,12 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
         if script_path is None:
             return
 
+    # ── Step 5a: Notebook dependencies (install before running the .ipynb) ────
+    nb_requirements = nb_packages = ""
+    if task_type == "notebook-script" and script_path:
+        nb_requirements, nb_packages = _notebook_deps_prompt(
+            script_path, _browse_jail, _user_browse_start())
+
     # ── Step 5b: Training config (train_cifar10.py special-case) ─────────────
     training_flags = ""
     if script_path and Path(script_path).name == "train_cifar10.py":
@@ -839,7 +894,9 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
     # ── Build job spec ────────────────────────────────────────────────────────
     if task_type == "notebook-script" and script_path:
         from iitgpu.jobs import notebook_run_command
-        run_cmd = notebook_run_command(script_path, in_container=bool(chosen_container))
+        run_cmd = notebook_run_command(
+            script_path, in_container=bool(chosen_container),
+            requirements=nb_requirements, packages=nb_packages)
     elif script_path and script_path.endswith(".py"):
         run_cmd = f"python {script_path}"
     elif script_path:

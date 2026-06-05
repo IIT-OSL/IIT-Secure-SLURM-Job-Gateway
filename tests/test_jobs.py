@@ -212,6 +212,36 @@ def test_notebook_run_command_quotes_path_with_spaces():
     assert "'/shared/users/alice/my notebook.ipynb'" in cmd
 
 
+def test_notebook_run_command_installs_requirements_before_running():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", requirements="/u/proj/requirements.txt")
+    assert "pip install --user" in cmd
+    assert "-r /u/proj/requirements.txt" in cmd
+    # deps must be installed BEFORE the notebook executes
+    assert cmd.index("-r /u/proj/requirements.txt") < cmd.index("nbconvert --to notebook --execute")
+
+
+def test_notebook_run_command_installs_packages():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", packages="tqdm wfdb==4.1 h5py")
+    assert "pip install --user" in cmd
+    assert "tqdm" in cmd and "wfdb==4.1" in cmd and "h5py" in cmd
+
+
+def test_notebook_run_command_quotes_unsafe_package_token():
+    """Even if a junk token slips through, it is shell-quoted (one pip arg) so it
+    cannot inject into the job script."""
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", packages="foo;rm")
+    assert "'foo;rm'" in cmd
+
+
+def test_notebook_run_command_no_dep_install_when_unspecified():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb")
+    assert "Installing notebook dependencies" not in cmd
+
+
 def test_render_sbatch_runs_notebook_command_with_env(tmp_path):
     """A notebook-script job reuses render_sbatch: conda activation + the
     nbconvert execution must both land in the generated script."""

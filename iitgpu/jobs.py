@@ -169,16 +169,24 @@ def write_sbatch(spec: JobSpec, folder: str) -> str:
     return str(path)
 
 
-def notebook_run_command(notebook_path: str, *, in_container: bool = False) -> str:
-    """Bash that runs a Jupyter notebook (.ipynb) top-to-bottom and saves results.
+def notebook_run_command(notebook_path: str, *, in_container: bool = False,
+                         requirements: str = "", packages: str = "") -> str:
+    """Bash that installs a notebook's deps, runs it top-to-bottom, saves results.
 
     Returned as a JobSpec.run_command, so render_sbatch handles the SLURM header,
-    env activation, DATA_PATH export and `cd <job folder>` around it. Every cell
-    is executed via `jupyter nbconvert --execute`; an executed copy
-    (executed.ipynb) and an HTML render land in the job folder (the script's cwd),
-    so output is viewable after the job finishes. Outside a container a missing
-    jupyter/nbconvert is self-installed into ~/.local (mirrors the interactive
-    notebook path); inside a container it must already ship in the image.
+    env activation, DATA_PATH export and `cd <job folder>` around it.
+
+    Dependencies: if *requirements* (a requirements.txt path) or *packages* (a
+    space-separated list) is given, they're pip-installed into the user site
+    (~/.local) BEFORE the run — so the notebook's imports resolve even when the
+    chosen env lacks them (the tqdm-missing failure). --user keeps shared prebuilt
+    envs (e.g. data-science) unpolluted while staying importable from any conda
+    env (user site is on sys.path unless PYTHONNOUSERSITE).
+
+    Execution: every cell runs via `jupyter nbconvert --execute`; an executed copy
+    (executed.ipynb) and an HTML render land in the job folder (the script's cwd).
+    Outside a container a missing jupyter/nbconvert is self-installed into ~/.local;
+    inside a container jupyter must already ship in the image.
     """
     nb = shlex.quote(notebook_path)
     heal = ""
@@ -193,8 +201,26 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False) -> s
             '    export PATH="$HOME/.local/bin:$PATH"\n'
             "fi\n"
         )
+    deps = ""
+    if requirements:
+        req = shlex.quote(requirements)
+        deps = (
+            f'echo "Installing notebook dependencies from {Path(requirements).name} ..."\n'
+            f"python3 -m pip install --user --no-warn-script-location -r {req} \\\n"
+            '    || { echo "Dependency install FAILED - see pip output above." >&2; exit 1; }\n'
+            'export PATH="$HOME/.local/bin:$PATH"\n'
+        )
+    elif packages:
+        toks = " ".join(shlex.quote(t) for t in packages.split())
+        deps = (
+            f'echo "Installing notebook dependencies: {packages} ..."\n'
+            f"python3 -m pip install --user --no-warn-script-location {toks} \\\n"
+            '    || { echo "Dependency install FAILED - see pip output above." >&2; exit 1; }\n'
+            'export PATH="$HOME/.local/bin:$PATH"\n'
+        )
     return (
         heal
+        + deps
         + f'echo "Executing notebook: {Path(notebook_path).name}"\n'
         + "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1 \\\n"
         + f"    --output executed.ipynb --output-dir . {nb} \\\n"
