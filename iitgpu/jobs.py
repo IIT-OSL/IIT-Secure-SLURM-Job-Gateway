@@ -248,7 +248,7 @@ def render_notebook_sbatch(
         lines += [
             "if ! command -v jupyter >/dev/null 2>&1; then",
             '    echo "JupyterLab not found in this environment - installing it (one-time)..."',
-            '    python3 -m pip install --user --quiet jupyterlab \\',
+            '    python3 -m pip install --user --quiet --no-warn-script-location jupyterlab \\',
             '        || { echo "ERROR: JupyterLab is missing and could not be installed automatically." >&2; \\',
             '             echo "       Use an environment that includes JupyterLab (e.g. the data-science prebuilt env)." >&2; exit 1; }',
             '    export PATH="$HOME/.local/bin:$PATH"',
