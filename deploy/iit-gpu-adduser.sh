@@ -77,6 +77,11 @@ ok "Chosen UID/GID: $NEW_UID"
 step "Creating $USERNAME on login node ..."
 run "groupadd -g $NEW_UID $USERNAME 2>/dev/null || true"
 run "useradd -u $NEW_UID -g $NEW_UID -m -s /bin/bash $USERNAME 2>/dev/null || true"
+# A pre-existing home from an earlier incarnation of this name can be left owned
+# by a stale UID (useradd -m won't re-chown an existing dir). The user then can't
+# read their own dotfiles -- e.g. ~/.config/conda/.condarc -- so `conda activate`
+# crashes and notebook/job env activation fails. Force home ownership to match.
+run "chown -R $NEW_UID:$NEW_UID /home/$USERNAME"
 if [ "$SHELL_USER" = 0 ]; then
     run "usermod -aG $GPUUSERS_GROUP $USERNAME"
 fi
@@ -88,10 +93,12 @@ step "Creating $USERNAME on GPU host ($GPU_HOST_SSH) ..."
 if [ "$SHELL_USER" = 0 ]; then
     run "ssh $GPU_HOST_SSH \"sudo groupadd -g $NEW_UID $USERNAME 2>/dev/null || true; \
         sudo useradd -u $NEW_UID -g $NEW_UID -m -s /bin/bash $USERNAME 2>/dev/null || true; \
+        sudo chown -R $NEW_UID:$NEW_UID /home/$USERNAME; \
         sudo usermod -aG $GPUUSERS_GROUP $USERNAME\""
 else
     run "ssh $GPU_HOST_SSH \"sudo groupadd -g $NEW_UID $USERNAME 2>/dev/null || true; \
-        sudo useradd -u $NEW_UID -g $NEW_UID -m -s /bin/bash $USERNAME 2>/dev/null || true\""
+        sudo useradd -u $NEW_UID -g $NEW_UID -m -s /bin/bash $USERNAME 2>/dev/null || true; \
+        sudo chown -R $NEW_UID:$NEW_UID /home/$USERNAME\""
 fi
 ok "GPU host: $USERNAME created (UID $NEW_UID)"
 
@@ -117,6 +124,10 @@ if [ "$DRY" = 0 ]; then
     step "Verifying ..."
     luid=$(id -u "$USERNAME"); ruid=$(ssh "$GPU_HOST_SSH" "id -u $USERNAME")
     [ "$luid" = "$ruid" ] || fail "UID mismatch: login=$luid gpu=$ruid"
+    lho=$(stat -c %u "/home/$USERNAME" 2>/dev/null || echo "?")
+    rho=$(ssh "$GPU_HOST_SSH" "stat -c %u /home/$USERNAME 2>/dev/null || echo '?'")
+    [ "$lho" = "$luid" ] || fail "login home /home/$USERNAME owned by UID $lho, expected $luid"
+    [ "$rho" = "$ruid" ] || fail "gpu home /home/$USERNAME owned by UID $rho, expected $ruid"
     if [ "$SHELL_USER" = 0 ]; then
         id "$USERNAME" | grep -q "$GPUUSERS_GROUP" || fail "$USERNAME not in $GPUUSERS_GROUP"
         ok "UID matched ($luid) · in $GPUUSERS_GROUP · forced-TUI applies via group"

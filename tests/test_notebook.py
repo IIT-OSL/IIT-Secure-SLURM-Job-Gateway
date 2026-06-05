@@ -117,3 +117,25 @@ def test_notebook_sbatch_has_sbatch_directives(tmp_path):
     assert "#SBATCH --gres=gpu:1" in script
     assert "#SBATCH --mem=32G" in script
     assert "#SBATCH --time=08:00:00" in script
+
+
+def test_notebook_sbatch_self_heals_missing_jupyter(tmp_path):
+    """A chosen env without JupyterLab must self-heal, not die with
+    'jupyter: command not found' (the original notebook-job failure)."""
+    from iitgpu.jobs import make_job_folder, render_notebook_sbatch
+    spec = _nb_spec(conda_env="/shared/envs/pytorch-2.7")
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_notebook_sbatch(spec, folder)
+    assert "command -v jupyter" in script
+    assert "pip install --user --quiet jupyterlab" in script
+    # The launch still happens after the guard.
+    assert script.index("command -v jupyter") < script.index("jupyter lab")
+
+
+def test_notebook_sbatch_no_self_heal_for_container(tmp_path):
+    """Container images are expected to ship Jupyter; no pip self-heal there."""
+    from iitgpu.jobs import make_job_folder, render_notebook_sbatch
+    spec = _nb_spec(container_image="/shared/images/data-science.sif")
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_notebook_sbatch(spec, folder)
+    assert "pip install --user --quiet jupyterlab" not in script

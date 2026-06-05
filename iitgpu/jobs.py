@@ -240,6 +240,22 @@ def render_notebook_sbatch(
             lines.append(f"source {spec.venv_path}/bin/activate")
             lines.append("")
 
+        # JupyterLab must be on PATH for the launch below. Not every environment
+        # ships it (a plain PyTorch env, say), which previously left the job
+        # dying with "jupyter: command not found". Install it into the user's
+        # site (~/.local) on the fly when missing so the notebook still comes up;
+        # fail loudly with guidance if even that cannot be done.
+        lines += [
+            "if ! command -v jupyter >/dev/null 2>&1; then",
+            '    echo "JupyterLab not found in this environment - installing it (one-time)..."',
+            '    python3 -m pip install --user --quiet jupyterlab \\',
+            '        || { echo "ERROR: JupyterLab is missing and could not be installed automatically." >&2; \\',
+            '             echo "       Use an environment that includes JupyterLab (e.g. the data-science prebuilt env)." >&2; exit 1; }',
+            '    export PATH="$HOME/.local/bin:$PATH"',
+            "fi",
+            "",
+        ]
+
         launcher = (
             f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
             f"--notebook-dir=/shared --ServerApp.token=\"$JUPYTER_TOKEN\""
