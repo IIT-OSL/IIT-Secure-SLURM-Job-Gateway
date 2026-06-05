@@ -395,7 +395,7 @@ def _run_install_prebuilt(cfg: Config) -> None:
 
     from iitgpu.envbuilder import (
         _find_conda, _run_with_progress, _run_pip_with_progress,
-        _CONDA_PHASES, _show_error_lines,
+        _CONDA_PHASES, _show_error_lines, shared_build_env,
     )
     conda_bin = _find_conda(cfg)
     if not conda_bin:
@@ -407,16 +407,12 @@ def _run_install_prebuilt(cfg: Config) -> None:
     auditclient.log("prebuilt_env_install_start", detail=name)
 
     # conda's pip step unpacks multi-GB CUDA wheels; the default TMPDIR (/tmp)
-    # is frequently a small tmpfs that overflows mid-unpack ("No space left on
-    # device"). Point TMPDIR and the pip cache at roomy shared storage.
-    proc_env = dict(os.environ)
-    build_tmp = Path(cfg.nfs_root) / "tmp"
-    try:
-        build_tmp.mkdir(parents=True, exist_ok=True)
-        proc_env["TMPDIR"] = str(build_tmp)
-        proc_env["PIP_CACHE_DIR"] = str(build_tmp / "pipcache")
-    except OSError:
-        proc_env = None  # fall back to inherited environment
+    # is a 2 GB tmpfs on the login node that overflows mid-unpack ("No space
+    # left on device"). The old fix pointed TMPDIR at /shared/tmp, but that
+    # dir is root/iit-owned and NOT writable by the user running the install,
+    # so tempfile silently fell back to /tmp and the build still died. Route
+    # temp + pip cache to a per-user, writability-verified dir on shared NFS.
+    proc_env = shared_build_env(cfg, dict(os.environ))
 
     rc, lines = _run_with_progress(
         [conda_bin, "env", "create", "-p", env_path, "-f", spec_file, "--yes"],

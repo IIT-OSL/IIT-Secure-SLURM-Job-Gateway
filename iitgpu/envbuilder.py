@@ -1,6 +1,7 @@
 # iitgpu/envbuilder.py
 from __future__ import annotations
 
+import getpass
 import os
 import re
 import shutil
@@ -438,6 +439,48 @@ def _envs_root(cfg: Config) -> Path:
     return Path(cfg.nfs_root) / "envs"
 
 
+# ── Shared build temp/cache (avoid the login node's 2 GB /tmp tmpfs) ─────────────
+
+def _writable_user_dir(parent: Path) -> Path | None:
+    """Create (and verify-writable) a per-user dir <parent>/<username>.
+
+    Returns the path only if it actually ends up writable by us; otherwise
+    None. The per-user leaf guarantees ownership (and therefore writability)
+    even when several people build envs into the same world-writable parent.
+    """
+    leaf = parent / getpass.getuser()
+    try:
+        leaf.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return leaf if os.access(leaf, os.W_OK) else None
+
+
+def shared_build_env(cfg: Config, base_env: dict) -> dict:
+    """Return *base_env* with TMPDIR/TMP/TEMP + PIP_CACHE_DIR on shared NFS.
+
+    Multi-GB CUDA wheels (~2.7 GB for torch cu128) are unpacked through
+    tempfile, which honours TMPDIR **only when TMPDIR is writable**. The old
+    code pointed TMPDIR at /shared/tmp, which is root/iit-owned (0775) and NOT
+    writable by normal users, so tempfile silently fell back to the login
+    node's 2 GB /tmp tmpfs and the unpack died with ENOSPC ("No space left on
+    device"). We instead use a per-user directory under <nfs_root> (the share
+    root is world-writable, NFS-backed with ~1.4 TB free) and verify it is
+    writable before trusting it — so the build can never silently degrade onto
+    /tmp again. If shared storage is somehow unusable we leave the inherited
+    temp settings untouched rather than guess.
+    """
+    nfs_root = Path(cfg.nfs_root)
+    tmp   = _writable_user_dir(nfs_root / ".build-tmp")
+    cache = _writable_user_dir(nfs_root / ".pip-cache")
+    out = dict(base_env)
+    if tmp is not None:
+        out["TMPDIR"] = out["TMP"] = out["TEMP"] = str(tmp)
+    if cache is not None:
+        out["PIP_CACHE_DIR"] = str(cache)
+    return out
+
+
 # ── Main build function ────────────────────────────────────────────────────────
 
 # ── Post-install GPU smoke check ───────────────────────────────────────────────
@@ -535,13 +578,10 @@ def build_env(
     env_path = str(envs_root / name)
     pip_path = str(Path(env_path) / "bin" / "pip")
 
-    # Route pip cache + temp to /shared (1.7 TB free) so large CUDA wheels
-    # (~2-3 GB) don't hit the login VM's per-user home/tmp quota (EDQUOT).
-    pip_cache = Path(cfg.nfs_root) / ".pip-cache"
-    pip_tmp   = Path(cfg.nfs_root) / ".pip-tmp"
-    pip_cache.mkdir(parents=True, exist_ok=True)
-    pip_tmp.mkdir(parents=True, exist_ok=True)
-    pip_env = {**env, "PIP_CACHE_DIR": str(pip_cache), "TMPDIR": str(pip_tmp)}
+    # Route pip cache + temp to a per-user dir on /shared (~1.4 TB free) so the
+    # multi-GB CUDA wheel unpack never spills onto the login node's 2 GB /tmp
+    # tmpfs (ENOSPC). Per-user + writability-verified — see shared_build_env.
+    pip_env = shared_build_env(cfg, env)
 
     # ── Step 1: conda create ───────────────────────────────────────────────────
     info(f"Creating conda env at {env_path} ...")
