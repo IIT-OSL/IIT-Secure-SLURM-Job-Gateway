@@ -281,6 +281,50 @@ def test_notebook_run_command_container_does_not_pin_kernel():
     assert "kernel_name" not in cmd
 
 
+def test_notebook_run_command_streams_cells_via_papermill():
+    """Primary engine is papermill with --log-output so each cell's stdout
+    streams to the job log live (the job no longer looks hung during training)."""
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb")
+    assert "papermill --log-output" in cmd
+    assert '-k "$_IIT_KERNEL"' in cmd                  # reuses the per-job kernel
+    # nbconvert is kept as a runtime fallback when papermill is unavailable
+    assert "command -v papermill" in cmd
+    assert "jupyter nbconvert --to notebook --execute" in cmd
+
+
+def test_notebook_run_command_self_heals_papermill_outside_container():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb")
+    assert "command -v papermill" in cmd
+    assert "pip install --user --quiet --no-warn-script-location papermill" in cmd
+
+
+def test_notebook_run_command_no_papermill_install_in_container():
+    """Container images must already ship papermill/jupyter — no ~/.local install."""
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", in_container=True)
+    assert "install --user --quiet --no-warn-script-location papermill" not in cmd
+    # container still has a papermill→nbconvert runtime switch, just no self-heal
+    assert "command -v papermill" in cmd
+
+
+def test_notebook_run_command_has_progress_heartbeat():
+    """A background heartbeat keeps the job log advancing during a quiet cell so
+    a healthy run is not mistaken for a hung one."""
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb")
+    assert "_iit_heartbeat" in cmd
+    assert "still executing" in cmd
+    assert "_IIT_HB_PID" in cmd                         # started in background and later killed
+
+
+def test_notebook_run_command_heartbeat_present_in_container():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", in_container=True)
+    assert "_iit_heartbeat" in cmd
+
+
 def test_render_notebook_sbatch_installs_requirements(tmp_path):
     from iitgpu.jobs import render_notebook_sbatch
     folder = make_job_folder(str(tmp_path), _spec())

@@ -193,6 +193,84 @@ def _pip_self_heal_jupyter() -> str:
     )
 
 
+def _pip_self_heal_papermill() -> str:
+    """Bash that installs papermill into ~/.local when missing.
+
+    Separate from the jupyter self-heal: the prebuilt data-science env ships
+    nbconvert/jupyter but NOT papermill, so a `command -v jupyter` check passes
+    while papermill is still absent. papermill is what gives live, per-cell
+    streamed output (`--log-output`) so a running notebook job no longer looks
+    frozen. If it cannot be installed we fall back to nbconvert (still correct,
+    just without live cell streaming), so this is a warning, not a hard failure.
+    """
+    return (
+        "if ! command -v papermill >/dev/null 2>&1; then\n"
+        '    echo "papermill not found in this environment - installing it (one-time)..."\n'
+        "    python3 -m pip install --user --quiet --no-warn-script-location papermill \\\n"
+        '        || echo "WARNING: papermill could not be installed; falling back to nbconvert '
+        '(cell output will not stream live)." >&2\n'
+        '    export PATH="$HOME/.local/bin:$PATH"\n'
+        "fi\n"
+    )
+
+
+def _heartbeat_fn() -> str:
+    """Bash: a background ticker that prints a timestamped 'still executing' line
+    every 60s while a cell runs.
+
+    Notebook execution buffers each cell's stdout into the output notebook
+    instead of streaming it to slurm-<job>.out, so a long training cell makes the
+    job log (and the dashboard's Output panel) sit silent for minutes — users
+    reasonably conclude the job has hung and cancel a perfectly healthy run. The
+    heartbeat guarantees the log keeps advancing even during a quiet cell; live
+    per-cell output (papermill --log-output) streams above it.
+    """
+    return (
+        "_iit_heartbeat() {\n"
+        "    _hb_start=$(date +%s)\n"
+        "    while sleep 60; do\n"
+        "        _hb_min=$(( ($(date +%s) - _hb_start) / 60 ))\n"
+        '        echo ">> [$(date +%H:%M:%S)] notebook still executing — ${_hb_min}m elapsed '
+        '(live cell output streams above)"\n'
+        "    done\n"
+        "}\n"
+    )
+
+
+def _exec_nb_fn(nb_quoted: str, in_container: bool) -> str:
+    """Bash function `_iit_run_nb` that executes the notebook.
+
+    Prefers papermill (`--log-output` streams each cell's stdout/stderr — print,
+    tqdm bars, training loss — to the job log live, and emits "Executing Cell N"
+    markers so users see each step run). Falls back to `jupyter nbconvert` when
+    papermill is unavailable (e.g. inside a container image that lacks it) so the
+    notebook still runs correctly — just without live streaming. Both engines
+    write executed.ipynb in the cwd (the job folder)."""
+    if in_container:
+        # No per-job kernel is registered in container mode, so don't pin one.
+        pm = f"papermill --log-output --no-progress-bar {nb_quoted} executed.ipynb"
+        nbc = (
+            "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1"
+            f" --output executed.ipynb --output-dir . {nb_quoted}"
+        )
+    else:
+        pm = f'papermill --log-output --no-progress-bar -k "$_IIT_KERNEL" {nb_quoted} executed.ipynb'
+        nbc = (
+            "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1"
+            ' --ExecutePreprocessor.kernel_name="$_IIT_KERNEL"'
+            f" --output executed.ipynb --output-dir . {nb_quoted}"
+        )
+    return (
+        "_iit_run_nb() {\n"
+        "    if command -v papermill >/dev/null 2>&1; then\n"
+        f"        {pm}\n"
+        "    else\n"
+        f"        {nbc}\n"
+        "    fi\n"
+        "}\n"
+    )
+
+
 def pip_install_block(requirements: str = "", packages: str = "") -> str:
     """Bash that pip-installs declared deps into the user site (~/.local) BEFORE a
     run. --user keeps shared prebuilt envs unpolluted while staying importable
@@ -250,13 +328,20 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
        `from torch.utils.tensorboard import ...`). Bounded to 8 attempts.
     All installs use --user so shared prebuilt envs stay unpolluted.
 
-    Execution: every cell runs via `jupyter nbconvert --execute`; an executed copy
-    (executed.ipynb) and an HTML render land in the job folder (the script's cwd).
-    Outside a container a missing jupyter/nbconvert is self-installed into ~/.local;
-    inside a container jupyter must already ship in the image.
+    Execution: cells run via papermill (`--log-output`) so each cell's stdout/
+    stderr — print(), tqdm bars, training loss — STREAMS to the job log live, with
+    "Executing Cell N" markers, instead of being buffered into the notebook (which
+    made long training cells look hung). A 60s heartbeat (`_iit_heartbeat`) keeps
+    the log advancing even during a quiet cell. papermill is self-installed into
+    ~/.local when missing (the data-science env ships nbconvert but not papermill);
+    if it cannot be installed, execution falls back to `jupyter nbconvert --execute`
+    (correct, just no live streaming). An executed copy (executed.ipynb) and an HTML
+    render land in the job folder (the script's cwd). Inside a container papermill/
+    jupyter must already ship in the image (no self-install).
     """
     nb = shlex.quote(notebook_path)
     heal = "" if in_container else _pip_self_heal_jupyter()
+    pmheal = "" if in_container else _pip_self_heal_papermill()
     deps = pip_install_block(requirements, packages)
 
     # Pin the execution kernel to THIS env's python. Without this, nbconvert
@@ -265,8 +350,8 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
     # pandas" even though pandas is installed in the active env (and the
     # auto-install loop then spins forever: pip says "already satisfied", the
     # kernel still can't import it). Registering the active python as a per-job
-    # kernel and pinning nbconvert to it guarantees env + ~/.local are both on
-    # the kernel's path.
+    # kernel and pinning execution to it guarantees env + ~/.local are both on
+    # the kernel's path. papermill reuses the same kernel via `-k "$_IIT_KERNEL"`.
     kernel_setup = "" if in_container else (
         '_IIT_KERNEL="iit-nb-${SLURM_JOB_ID:-$$}"\n'
         "python3 -m pip install --user --quiet --no-warn-script-location ipykernel >/dev/null 2>&1 || true\n"
@@ -274,21 +359,21 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
         '    || { echo "ERROR: could not register a Jupyter kernel for this environment." >&2; exit 1; }\n'
         'echo "Notebook execution kernel: $_IIT_KERNEL"\n'
     )
-    kpin = "" if in_container else ' --ExecutePreprocessor.kernel_name="$_IIT_KERNEL"'
-    nbconvert = (
-        "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1"
-        + kpin
-        + f" --output executed.ipynb --output-dir . {nb}"
-    )
+
+    # _iit_run_nb (papermill→nbconvert) and _iit_heartbeat are defined once and
+    # reused by both the auto-install retry loop and the plain single-run path.
+    helpers = _heartbeat_fn() + _exec_nb_fn(nb, in_container)
 
     if auto_install and not in_container:
         run = (
             _auto_install_alias_fn()
             + f'echo "Executing notebook: {Path(notebook_path).name}"\n'
+            + "_iit_heartbeat & _IIT_HB_PID=$!\n"
+            + 'trap \'kill "$_IIT_HB_PID" 2>/dev/null\' EXIT\n'
             + "_iit_attempt=0; _iit_max=8\n"
             + "while : ; do\n"
             + '    _iit_log="$(mktemp)"\n'
-            + f"    {nbconvert} 2>&1 | tee \"$_iit_log\"\n"
+            + "    _iit_run_nb 2>&1 | tee \"$_iit_log\"\n"
             + "    _iit_rc=${PIPESTATUS[0]}\n"
             + '    [ "$_iit_rc" -eq 0 ] && { rm -f "$_iit_log"; break; }\n'
             # Match the clean "No module named 'X'" — nbconvert ANSI-colours the
@@ -312,16 +397,21 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
             + '        || { echo "Failed to pip install $_iit_pkg" >&2; exit 1; }\n'
             + '    export PATH="$HOME/.local/bin:$PATH"\n'
             + "done\n"
+            + 'kill "$_IIT_HB_PID" 2>/dev/null || true\n'
         )
     else:
         run = (
             f'echo "Executing notebook: {Path(notebook_path).name}"\n'
-            + nbconvert + " \\\n"
-            + '    || { echo "Notebook execution FAILED - see the traceback above." >&2; exit 1; }\n'
+            + "_iit_heartbeat & _IIT_HB_PID=$!\n"
+            + 'trap \'kill "$_IIT_HB_PID" 2>/dev/null\' EXIT\n'
+            + "_iit_run_nb \\\n"
+            + '    || { echo "Notebook execution FAILED - see the traceback above." >&2; '
+            'kill "$_IIT_HB_PID" 2>/dev/null; exit 1; }\n'
+            + 'kill "$_IIT_HB_PID" 2>/dev/null || true\n'
         )
 
     return (
-        heal + deps + kernel_setup + run
+        heal + pmheal + deps + kernel_setup + helpers + run
         + "jupyter nbconvert --to html --output-dir . executed.ipynb || true\n"
         + 'echo "Notebook finished. Results: executed.ipynb (+ executed.html) in this job folder."'
     )
