@@ -19,6 +19,8 @@ dependencies:
     - numpy
     - matplotlib
     - seaborn
+    - tensorboard
+    - tqdm
     - jupyterlab>=4.0
     - ipywidgets
     - plotly
