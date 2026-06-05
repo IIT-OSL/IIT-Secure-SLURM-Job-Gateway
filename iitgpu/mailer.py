@@ -9,8 +9,24 @@ performs new-IP dedup for login notices. See C1/M2/M3 in the security review.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone, timedelta
 from threading import Thread
+
+
+def _mail_flag_path() -> str:
+    """Path of the admin mail kill-switch file. Its mere presence disables ALL
+    outbound mail (both this transactional path and the SLURM-job MailProg)."""
+    try:
+        from iitgpu.config import load_config
+        return f"{load_config().nfs_root}/.mail-disabled"
+    except Exception:
+        return f"{os.environ.get('NFS_ROOT', '/shared')}/.mail-disabled"
+
+
+def mail_disabled() -> bool:
+    """True when an admin has turned the mail service off (see admin panel)."""
+    return os.path.exists(_mail_flag_path())
 
 
 def _cluster_tz():
@@ -45,6 +61,8 @@ def _daemon_mail(to: str, subject: str, html: str,
                  bcc: list[str] | None = None,
                  kind: str = "generic", ip: str = "") -> tuple[bool, str]:
     """Hand a built message to the daemon to send. Returns (ok, message)."""
+    if mail_disabled():
+        return False, "mail is disabled by an administrator"
     try:
         from iitgpu.auditclient import daemon_request
         resp = daemon_request("mail.send", {

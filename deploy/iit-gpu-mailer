@@ -350,6 +350,10 @@ def fallback_msmtp(to: str, subject: str, body_stdin: str) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
+    # Admin kill-switch: a flag file on the share disables ALL outbound mail.
+    # Exit cleanly so slurmctld doesn't log a MailProg failure.
+    if os.path.exists(os.path.join(os.environ.get("NFS_ROOT", "/shared"), ".mail-disabled")):
+        sys.exit(0)
     subject, recipient = parse_args(sys.argv)
     stdin_body = sys.stdin.read()
 

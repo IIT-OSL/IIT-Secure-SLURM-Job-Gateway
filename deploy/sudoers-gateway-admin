@@ -8,3 +8,9 @@ Defaults:%gpuadmins !lecture, !use_pty, timestamp_timeout=0
     /usr/sbin/chpasswd, \
     /usr/bin/sacctmgr, \
     /usr/bin/scancel
+
+# "Log in as user" (admin panel): admins may launch the TUI AS any gpuusers
+# member to inspect that account as the user sees it. Constrained to exactly the
+# TUI launcher run as a gpuusers member — not a general shell. Actions inside are
+# audited as the target user (SO_PEERCRED); the switch itself is logged by the panel.
+%gpuadmins ALL=(%gpuusers) NOPASSWD: /usr/local/bin/iit-gpu-manager

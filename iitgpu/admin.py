@@ -12,6 +12,7 @@ Permission gatekeepers applied to every privileged subprocess call:
 """
 from __future__ import annotations
 
+import getpass
 import re
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -276,6 +277,46 @@ def clear_maintenance() -> tuple[bool, str]:
         return False, str(exc)
     auditclient.log("admin_maintenance_clear", detail="")
     return True, "Maintenance notice cleared."
+
+
+# ── Mail service kill-switch ────────────────────────────────────────────────────
+# A single flag file on the share (presence = OFF) is checked at every send
+# point: the transactional client (mailer._daemon_mail), the daemon's authoritative
+# mail.send handler, AND the SLURM-job MailProg (iit-gpu-mailer). Toggling it here
+# stops/restores ALL outbound email immediately.
+
+def is_mail_disabled() -> bool:
+    from iitgpu.mailer import mail_disabled
+    return mail_disabled()
+
+
+def set_mail_disabled(set_by: str) -> tuple[bool, str]:
+    import json
+    import os
+    from iitgpu.mailer import _mail_flag_path
+    try:
+        p = _mail_flag_path()
+        with open(p, "w") as f:
+            json.dump({"disabled": True, "set_by": set_by,
+                       "since": datetime.now(timezone.utc).isoformat()}, f)
+        os.chmod(p, 0o666)  # readable by the daemon (root) + slurm MailProg
+        auditclient.log("admin_mail_disabled", detail=set_by)
+        return True, "Mail service DISABLED — no emails will be sent."
+    except OSError as exc:
+        return False, str(exc)
+
+
+def enable_mail(set_by: str = "") -> tuple[bool, str]:
+    import os
+    from iitgpu.mailer import _mail_flag_path
+    try:
+        os.remove(_mail_flag_path())
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return False, str(exc)
+    auditclient.log("admin_mail_enabled", detail=set_by)
+    return True, "Mail service ENABLED — emails will be sent again."
 
 
 # ── QOS / partitions ──────────────────────────────────────────────────────────────
@@ -761,6 +802,67 @@ def _maintenance_menu(style) -> None:
             (ok if good else err)(msg)
 
 
+def _mail_service_menu(style) -> None:
+    import questionary
+    from iitgpu.ui import header, info, ok, err, warn
+    header("Mail Service")
+    disabled = is_mail_disabled()
+    if disabled:
+        info("  [yellow]Current state: DISABLED[/] — no emails are being sent.")
+        if questionary.confirm(
+            "Re-ENABLE the mail service?", default=False, style=style
+        ).ask():
+            good, msg = enable_mail(getpass.getuser())
+            (ok if good else err)(msg)
+    else:
+        info("  [green]Current state: ENABLED[/] — emails are being sent.")
+        warn("Disabling stops ALL outbound email: welcome / login / offboard "
+             "notices AND SLURM job (BEGIN/END/FAIL) mail.")
+        if questionary.confirm(
+            "DISABLE the mail service now?", default=False, style=style
+        ).ask():
+            good, msg = set_mail_disabled(getpass.getuser())
+            (ok if good else err)(msg)
+    questionary.press_any_key_to_continue("").ask()
+
+
+def _login_as_menu(style) -> None:
+    """Drop the admin into another user's TUI via `sudo -iu <user>` so they can
+    inspect that account exactly as the user sees it. Requires the gpuadmins
+    sudoers Runas rule (deploy/sudoers-gateway-admin). Actions inside the spawned
+    session are audited as the TARGET user (kernel SO_PEERCRED), so the switch
+    itself is logged here for accountability."""
+    import questionary
+    from iitgpu.ui import header, info, ok, err, warn
+    header("Log in as user")
+    me = getpass.getuser()
+    targets = [u for u in list_gpuusers() if u != me]
+    if not targets:
+        warn("No other users found to log in as.")
+        questionary.press_any_key_to_continue("").ask()
+        return
+    target = questionary.select(
+        "Log in as which user?  (you'll get THEIR TUI; quit it to return here)",
+        choices=targets + ["[cancel]"], style=style,
+    ).ask()
+    if not target or target == "[cancel]":
+        return
+    if not valid_username(target):
+        err(f"invalid username {target!r}")
+        return
+    info(f"  Switching to [bold]{target}[/] via sudo -iu — you'll see exactly "
+         f"what they see.")
+    info("  Quit their TUI (main menu → Quit, or Ctrl-D) to come back here.")
+    auditclient.log("admin_login_as", detail=target)
+    try:
+        subprocess.run(["sudo", "-iu", target, "iit-gpu-manager"])
+    except (OSError, KeyboardInterrupt) as exc:
+        err(f"Could not start a session as {target}: {exc}")
+    auditclient.log("admin_login_as_end", detail=target)
+    info(f"  Returned from {target}'s session.")
+    questionary.press_any_key_to_continue("").ask()
+
+
 def admin_menu() -> None:
     import questionary
     from questionary import Style, Separator
@@ -777,6 +879,7 @@ def admin_menu() -> None:
 
     while True:
         header("Admin Panel")
+        _mail_state = "OFF — disabled" if is_mail_disabled() else "ON"
         choice = questionary.select(
             "Select action:",
             choices=[
@@ -784,6 +887,7 @@ def admin_menu() -> None:
                 "  Provision user",
                 "  Offboard user",
                 "  View users",
+                "  Log in as user",
                 Separator("──  Jobs & Usage  ─────────────────────────────"),
                 "  All-user job history",
                 "  Cluster usage (all users)",
@@ -798,6 +902,7 @@ def admin_menu() -> None:
                 "  Audit log",
                 "  Service health",
                 "  Mail delivery log",
+                f"  Mail service: {_mail_state}",
                 Separator("───────────────────────────────────────────────"),
                 "  Back",
             ],
@@ -894,6 +999,14 @@ def admin_menu() -> None:
 
         elif choice == "Mail delivery log":
             _view_maillog(style)
+            continue
+
+        elif choice == "Log in as user":
+            _login_as_menu(style)
+            continue
+
+        elif choice.startswith("Mail service:"):
+            _mail_service_menu(style)
             continue
 
         elif choice == "Service health":

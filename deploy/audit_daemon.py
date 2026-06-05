@@ -534,6 +534,10 @@ def _h_mail_send(payload: dict, peer_uid: int,
     - kind='login': the daemon does the new-IP dedup itself and only sends when
       the source IP is unseen (M3 fix — no standalone IP-seeding verb).
     """
+    # Admin kill-switch: a flag file on the share disables ALL outbound mail.
+    # Reported as a non-error "not sent" so callers don't treat it as a failure.
+    if os.path.exists(os.path.join(os.environ.get("NFS_ROOT", "/shared"), ".mail-disabled")):
+        return True, {"sent": False, "reason": "mail disabled by admin"}, ""
     to      = (payload.get("to") or "").strip()
     subject = payload.get("subject") or ""
     html    = payload.get("html") or ""

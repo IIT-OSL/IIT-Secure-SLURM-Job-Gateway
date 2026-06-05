@@ -185,3 +185,30 @@ def test_job_mailer_fallback_does_not_pass_dash_s():
     # Subject must travel in the message headers piped on stdin instead.
     assert "Subject: My Subject" in captured["input"]
     assert "the body" in captured["input"]
+
+
+# ── Mail kill-switch ────────────────────────────────────────────────────────────
+
+def test_daemon_mail_blocked_when_disabled(tmp_path, monkeypatch):
+    """When the admin kill-switch flag exists, _daemon_mail must refuse to send
+    (and never contact the daemon)."""
+    flag = tmp_path / ".mail-disabled"
+    flag.write_text("{}")
+    monkeypatch.setattr(mailer, "_mail_flag_path", lambda: str(flag))
+
+    called = {"n": 0}
+    monkeypatch.setattr("iitgpu.auditclient.daemon_request",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or {"ok": True})
+    ok, msg = mailer._daemon_mail("a@b.com", "subj", "<p>hi</p>")
+    assert ok is False
+    assert "disabled" in msg.lower()
+    assert called["n"] == 0, "must not contact the daemon when mail is disabled"
+
+
+def test_daemon_mail_allows_when_enabled(tmp_path, monkeypatch):
+    flag = tmp_path / ".mail-disabled"   # absent → enabled
+    monkeypatch.setattr(mailer, "_mail_flag_path", lambda: str(flag))
+    monkeypatch.setattr("iitgpu.auditclient.daemon_request",
+                        lambda *a, **k: {"ok": True})
+    ok, msg = mailer._daemon_mail("a@b.com", "subj", "<p>hi</p>")
+    assert ok is True

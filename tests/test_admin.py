@@ -386,3 +386,57 @@ def test_offboard_user_rejects_bad_username():
         ok, msg = admin.offboard_user("../../etc")
     assert not ok
     r.assert_not_called()
+
+
+# ── Mail service kill-switch ────────────────────────────────────────────────────
+
+def test_mail_kill_switch_toggle(tmp_path, monkeypatch):
+    from iitgpu import mailer
+    flag = tmp_path / ".mail-disabled"
+    monkeypatch.setattr(mailer, "_mail_flag_path", lambda: str(flag))
+    monkeypatch.setattr("iitgpu.admin.auditclient.log", lambda *a, **k: None)
+
+    assert admin.is_mail_disabled() is False
+    good, _ = admin.set_mail_disabled("tester")
+    assert good and flag.exists() and admin.is_mail_disabled() is True
+    good, _ = admin.enable_mail("tester")
+    assert good and not flag.exists() and admin.is_mail_disabled() is False
+
+
+def test_enable_mail_is_idempotent_when_already_on(tmp_path, monkeypatch):
+    from iitgpu import mailer
+    flag = tmp_path / ".mail-disabled"
+    monkeypatch.setattr(mailer, "_mail_flag_path", lambda: str(flag))
+    monkeypatch.setattr("iitgpu.admin.auditclient.log", lambda *a, **k: None)
+    good, _ = admin.enable_mail("tester")   # nothing to remove
+    assert good and not flag.exists()
+
+
+# ── Log in as user ─────────────────────────────────────────────────────────────
+
+def test_login_as_runs_sudo_iu_for_selected_user(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(admin, "list_gpuusers", lambda: ["sanuth", "alice", "dahamadmin"])
+    monkeypatch.setattr(admin.getpass, "getuser", lambda: "dahamadmin")
+    monkeypatch.setattr("questionary.select",
+                        lambda *a, **k: MagicMock(ask=lambda: "sanuth"))
+    monkeypatch.setattr("questionary.press_any_key_to_continue",
+                        lambda *a, **k: MagicMock(ask=lambda: None))
+    monkeypatch.setattr(admin.auditclient, "log", lambda *a, **k: None)
+    monkeypatch.setattr(admin.subprocess, "run",
+                        lambda cmd, *a, **k: calls.setdefault("cmd", cmd))
+
+    admin._login_as_menu(style=None)
+    assert calls["cmd"] == ["sudo", "-iu", "sanuth", "iit-gpu-manager"]
+
+
+def test_login_as_cancel_does_not_launch(monkeypatch):
+    ran = {"n": 0}
+    monkeypatch.setattr(admin, "list_gpuusers", lambda: ["sanuth"])
+    monkeypatch.setattr(admin.getpass, "getuser", lambda: "dahamadmin")
+    monkeypatch.setattr("questionary.select",
+                        lambda *a, **k: MagicMock(ask=lambda: "[cancel]"))
+    monkeypatch.setattr(admin.subprocess, "run",
+                        lambda *a, **k: ran.__setitem__("n", ran["n"] + 1))
+    admin._login_as_menu(style=None)
+    assert ran["n"] == 0
