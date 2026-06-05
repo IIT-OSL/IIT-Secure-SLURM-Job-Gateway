@@ -236,10 +236,44 @@ def test_notebook_run_command_quotes_unsafe_package_token():
     assert "'foo;rm'" in cmd
 
 
-def test_notebook_run_command_no_dep_install_when_unspecified():
+def test_notebook_run_command_no_upfront_dep_install_when_unspecified():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", auto_install=False)
+    assert "Installing dependencies" not in cmd  # no up-front pip block
+
+
+def test_notebook_run_command_auto_install_loop_is_default():
+    """Default: the run is wrapped in a retry loop that auto-installs missing
+    modules (incl. transitive ones like tensorboard) via an alias table."""
     from iitgpu.jobs import notebook_run_command
     cmd = notebook_run_command("/u/nb.ipynb")
-    assert "Installing notebook dependencies" not in cmd
+    assert "_iit_pkg_for" in cmd                       # alias function present
+    assert "No module named '" in cmd                  # detects the missing module (ANSI-safe)
+    assert "opencv-python" in cmd and "scikit-learn" in cmd  # alias entries
+    assert "pip install --user" in cmd                # installs the missing dep
+
+
+def test_notebook_run_command_auto_install_can_be_disabled():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", auto_install=False)
+    assert "_iit_pkg_for" not in cmd
+    assert 'Notebook execution FAILED' in cmd          # plain single run
+    assert "jupyter nbconvert --to notebook --execute" in cmd
+
+
+def test_render_notebook_sbatch_installs_requirements(tmp_path):
+    from iitgpu.jobs import render_notebook_sbatch
+    folder = make_job_folder(str(tmp_path), _spec())
+    script = render_notebook_sbatch(_spec(), folder, requirements="/u/r.txt")
+    assert "pip install --user" in script and "-r /u/r.txt" in script
+
+
+def test_render_notebook_sbatch_installs_packages(tmp_path):
+    from iitgpu.jobs import render_notebook_sbatch
+    folder = make_job_folder(str(tmp_path), _spec())
+    script = render_notebook_sbatch(_spec(), folder, packages="tensorboard tqdm")
+    assert "pip install --user" in script
+    assert "tensorboard" in script and "tqdm" in script
 
 
 def test_render_sbatch_runs_notebook_command_with_env(tmp_path):

@@ -169,19 +169,85 @@ def write_sbatch(spec: JobSpec, folder: str) -> str:
     return str(path)
 
 
+# import-name → PyPI-package aliases for auto-install (the common mismatches).
+_PIP_IMPORT_ALIASES: dict[str, str] = {
+    "cv2": "opencv-python", "sklearn": "scikit-learn", "PIL": "Pillow",
+    "yaml": "PyYAML", "bs4": "beautifulsoup4", "skimage": "scikit-image",
+    "Crypto": "pycryptodome", "dateutil": "python-dateutil", "OpenSSL": "pyOpenSSL",
+    "tensorboard": "tensorboard",
+}
+
+
+def _pip_self_heal_jupyter() -> str:
+    """Bash that installs jupyter/nbconvert into ~/.local when missing."""
+    return (
+        "if ! command -v jupyter >/dev/null 2>&1; then\n"
+        '    echo "jupyter not found in this environment - installing it (one-time)..."\n'
+        "    python3 -m pip install --user --quiet --no-warn-script-location "
+        "jupyterlab nbconvert ipykernel \\\n"
+        '        || { echo "ERROR: jupyter/nbconvert missing and could not be installed." >&2; \\\n'
+        '             echo "       Use an environment that includes them (e.g. the data-science prebuilt env)." >&2; exit 1; }\n'
+        '    export PATH="$HOME/.local/bin:$PATH"\n'
+        "fi\n"
+    )
+
+
+def pip_install_block(requirements: str = "", packages: str = "") -> str:
+    """Bash that pip-installs declared deps into the user site (~/.local) BEFORE a
+    run. --user keeps shared prebuilt envs unpolluted while staying importable
+    from any conda env (user site is on sys.path unless PYTHONNOUSERSITE)."""
+    if requirements:
+        req = shlex.quote(requirements)
+        return (
+            f'echo "Installing dependencies from {Path(requirements).name} ..."\n'
+            f"python3 -m pip install --user --no-warn-script-location -r {req} \\\n"
+            '    || { echo "Dependency install FAILED - see pip output above." >&2; exit 1; }\n'
+            'export PATH="$HOME/.local/bin:$PATH"\n'
+        )
+    if packages:
+        toks = " ".join(shlex.quote(t) for t in packages.split())
+        return (
+            f'echo "Installing dependencies: {packages} ..."\n'
+            f"python3 -m pip install --user --no-warn-script-location {toks} \\\n"
+            '    || { echo "Dependency install FAILED - see pip output above." >&2; exit 1; }\n'
+            'export PATH="$HOME/.local/bin:$PATH"\n'
+        )
+    return ""
+
+
+def _auto_install_alias_fn() -> str:
+    """Bash function mapping an import name to its PyPI package name."""
+    cases = "".join(
+        f"        {shlex.quote(imp)}) echo {shlex.quote(pkg)};;\n"
+        for imp, pkg in _PIP_IMPORT_ALIASES.items()
+    )
+    return (
+        "_iit_pkg_for() {\n"
+        "    case \"$1\" in\n"
+        + cases
+        + '        *) echo "$1";;\n'
+        "    esac\n"
+        "}\n"
+    )
+
+
 def notebook_run_command(notebook_path: str, *, in_container: bool = False,
-                         requirements: str = "", packages: str = "") -> str:
+                         requirements: str = "", packages: str = "",
+                         auto_install: bool = True) -> str:
     """Bash that installs a notebook's deps, runs it top-to-bottom, saves results.
 
     Returned as a JobSpec.run_command, so render_sbatch handles the SLURM header,
     env activation, DATA_PATH export and `cd <job folder>` around it.
 
-    Dependencies: if *requirements* (a requirements.txt path) or *packages* (a
-    space-separated list) is given, they're pip-installed into the user site
-    (~/.local) BEFORE the run — so the notebook's imports resolve even when the
-    chosen env lacks them (the tqdm-missing failure). --user keeps shared prebuilt
-    envs (e.g. data-science) unpolluted while staying importable from any conda
-    env (user site is on sys.path unless PYTHONNOUSERSITE).
+    Dependencies — three layers:
+    1. *requirements* (requirements.txt path) or *packages* (space list): installed
+       up front into ~/.local (authoritative / fastest when known).
+    2. *auto_install* (default True): the execution is wrapped in a retry loop —
+       on `ModuleNotFoundError: No module named 'X'` it maps X → PyPI package
+       (alias table) and pip-installs it, then re-runs. This catches TRANSITIVE /
+       hidden deps a static import scan misses (e.g. tensorboard, pulled in by
+       `from torch.utils.tensorboard import ...`). Bounded to 8 attempts.
+    All installs use --user so shared prebuilt envs stay unpolluted.
 
     Execution: every cell runs via `jupyter nbconvert --execute`; an executed copy
     (executed.ipynb) and an HTML render land in the job folder (the script's cwd).
@@ -189,42 +255,51 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
     inside a container jupyter must already ship in the image.
     """
     nb = shlex.quote(notebook_path)
-    heal = ""
-    if not in_container:
-        heal = (
-            "if ! command -v jupyter >/dev/null 2>&1; then\n"
-            '    echo "jupyter not found in this environment - installing it (one-time)..."\n'
-            "    python3 -m pip install --user --quiet --no-warn-script-location "
-            "jupyterlab nbconvert ipykernel \\\n"
-            '        || { echo "ERROR: jupyter/nbconvert missing and could not be installed." >&2; \\\n'
-            '             echo "       Use an environment that includes them (e.g. the data-science prebuilt env)." >&2; exit 1; }\n'
-            '    export PATH="$HOME/.local/bin:$PATH"\n'
-            "fi\n"
+    heal = "" if in_container else _pip_self_heal_jupyter()
+    deps = pip_install_block(requirements, packages)
+    nbconvert = (
+        "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1 "
+        f"--output executed.ipynb --output-dir . {nb}"
+    )
+
+    if auto_install and not in_container:
+        run = (
+            _auto_install_alias_fn()
+            + f'echo "Executing notebook: {Path(notebook_path).name}"\n'
+            + "_iit_attempt=0; _iit_max=8\n"
+            + "while : ; do\n"
+            + '    _iit_log="$(mktemp)"\n'
+            + f"    {nbconvert} 2>&1 | tee \"$_iit_log\"\n"
+            + "    _iit_rc=${PIPESTATUS[0]}\n"
+            + '    [ "$_iit_rc" -eq 0 ] && { rm -f "$_iit_log"; break; }\n'
+            # Match the clean "No module named 'X'" — nbconvert ANSI-colours the
+            # "ModuleNotFoundError" token, so don't anchor on it.
+            + "    _iit_miss=\"$(grep -oE \"No module named '[^']+'\" \"$_iit_log\" "
+              "| tail -1 | sed -E \"s/.*'([^']+)'.*/\\1/\")\"\n"
+            + '    rm -f "$_iit_log"\n'
+            + '    if [ -z "$_iit_miss" ]; then\n'
+            + '        echo "Notebook FAILED and it is not a missing-module error — see the traceback above." >&2; exit 1\n'
+            + "    fi\n"
+            + '    _iit_attempt=$((_iit_attempt+1))\n'
+            + '    if [ "$_iit_attempt" -gt "$_iit_max" ]; then\n'
+            + '        echo "Gave up after $_iit_max auto-installs (still missing: $_iit_miss)." >&2; exit 1\n'
+            + "    fi\n"
+            + '    _iit_pkg="$(_iit_pkg_for "$_iit_miss")"\n'
+            + '    echo ">> Auto-installing missing dependency \'$_iit_miss\' (pip: $_iit_pkg) [attempt $_iit_attempt/$_iit_max]"\n'
+            + '    python3 -m pip install --user --no-warn-script-location "$_iit_pkg" \\\n'
+            + '        || { echo "Failed to pip install $_iit_pkg" >&2; exit 1; }\n'
+            + '    export PATH="$HOME/.local/bin:$PATH"\n'
+            + "done\n"
         )
-    deps = ""
-    if requirements:
-        req = shlex.quote(requirements)
-        deps = (
-            f'echo "Installing notebook dependencies from {Path(requirements).name} ..."\n'
-            f"python3 -m pip install --user --no-warn-script-location -r {req} \\\n"
-            '    || { echo "Dependency install FAILED - see pip output above." >&2; exit 1; }\n'
-            'export PATH="$HOME/.local/bin:$PATH"\n'
+    else:
+        run = (
+            f'echo "Executing notebook: {Path(notebook_path).name}"\n'
+            + nbconvert + " \\\n"
+            + '    || { echo "Notebook execution FAILED - see the traceback above." >&2; exit 1; }\n'
         )
-    elif packages:
-        toks = " ".join(shlex.quote(t) for t in packages.split())
-        deps = (
-            f'echo "Installing notebook dependencies: {packages} ..."\n'
-            f"python3 -m pip install --user --no-warn-script-location {toks} \\\n"
-            '    || { echo "Dependency install FAILED - see pip output above." >&2; exit 1; }\n'
-            'export PATH="$HOME/.local/bin:$PATH"\n'
-        )
+
     return (
-        heal
-        + deps
-        + f'echo "Executing notebook: {Path(notebook_path).name}"\n'
-        + "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1 \\\n"
-        + f"    --output executed.ipynb --output-dir . {nb} \\\n"
-        + '    || { echo "Notebook execution FAILED - see the traceback above." >&2; exit 1; }\n'
+        heal + deps + run
         + "jupyter nbconvert --to html --output-dir . executed.ipynb || true\n"
         + 'echo "Notebook finished. Results: executed.ipynb (+ executed.html) in this job folder."'
     )
@@ -280,11 +355,16 @@ def render_notebook_sbatch(
     port: int = 8888,
     gateway_host: str = "localhost",
     gateway_port: int = 22,
+    requirements: str = "",
+    packages: str = "",
 ) -> str:
     """Generate an sbatch script that launches JupyterLab on the GPU node.
 
     The script:
     - Binds JupyterLab to 127.0.0.1 only (not exposed to network)
+    - Optionally pip-installs *requirements*/*packages* into ~/.local first, so the
+      interactive session starts with the user's deps ready (no first-cell import
+      failures)
     - Writes port + token to the job's stdout
     - Prints the exact SSH tunnel command for the user's laptop
     - Shuts JupyterLab down when the job's time limit is reached
@@ -347,6 +427,13 @@ def render_notebook_sbatch(
             "fi",
             "",
         ]
+
+        # Optional: pre-install the user's deps so the interactive session is
+        # ready (e.g. tensorboard/tqdm) instead of failing on the first cell.
+        _deps = pip_install_block(requirements, packages)
+        if _deps:
+            lines.append(_deps.rstrip("\n"))
+            lines.append("")
 
         launcher = (
             f"jupyter lab --no-browser --ip=$IIT_NODE_ADDR --port={port} "

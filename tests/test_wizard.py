@@ -477,3 +477,21 @@ def test_notebook_deps_prompt_skip_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr("questionary.select",
                         lambda *a, **k: MagicMock(ask=lambda: "Skip — my environment already has everything"))
     assert wiz._notebook_deps_prompt(str(nb), lambda p: True, str(tmp_path)) == ("", "")
+
+
+def test_notebook_deps_prompt_no_notebook_skips_autodetect(tmp_path, monkeypatch):
+    """For the JupyterLab flow (no notebook path) there is no auto-detect choice;
+    typing packages still works."""
+    import iitgpu.wizard as wiz
+    seen = {}
+
+    def _cap(*a, **k):
+        seen["choices"] = k.get("choices", [])
+        return MagicMock(ask=lambda: "Type package names (e.g. tqdm wfdb h5py)")
+
+    monkeypatch.setattr("questionary.select", _cap)
+    monkeypatch.setattr("questionary.text",
+                        lambda *a, **k: MagicMock(ask=lambda: "tensorboard tqdm"))
+    req, pkgs = wiz._notebook_deps_prompt("", lambda p: True, str(tmp_path))
+    assert req == "" and pkgs == "tensorboard tqdm"
+    assert not any("auto-detected" in c for c in seen["choices"])

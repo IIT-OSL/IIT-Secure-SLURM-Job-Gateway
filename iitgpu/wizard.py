@@ -106,13 +106,15 @@ def _valid_pkg_tokens(raw: str) -> list[str]:
 
 
 def _notebook_deps_prompt(notebook_path: str, browse_jail, start_dir: str) -> tuple[str, str]:
-    """Ask how to install the notebook's Python deps before it runs. Auto-detects
-    a requirements.txt next to the notebook or in its project root. Returns
-    (requirements_path, packages_str) — at most one is non-empty."""
-    nb = Path(notebook_path)
-    candidates = [nb.parent / "requirements.txt", nb.parent.parent / "requirements.txt"]
-    found = next((str(c) for c in candidates
-                  if c.is_file() and browse_jail(str(c))), "")
+    """Ask how to install Python deps before a notebook runs / a session starts.
+    When *notebook_path* is given, auto-detects a requirements.txt next to it or in
+    its project root. Returns (requirements_path, packages_str) — at most one set."""
+    found = ""
+    if notebook_path:
+        nb = Path(notebook_path)
+        candidates = [nb.parent / "requirements.txt", nb.parent.parent / "requirements.txt"]
+        found = next((str(c) for c in candidates
+                      if c.is_file() and browse_jail(str(c))), "")
     auto = f"Install from {found}  (auto-detected)" if found else None
     choices = ([auto] if auto else []) + [
         "Choose a requirements.txt file",
@@ -120,7 +122,7 @@ def _notebook_deps_prompt(notebook_path: str, browse_jail, start_dir: str) -> tu
         "Skip — my environment already has everything",
     ]
     sel = questionary.select(
-        "Install the notebook's Python dependencies first?",
+        "Install Python dependencies first?",
         choices=choices, style=_STYLE,
     ).ask()
     if not sel or sel.startswith("Skip"):
@@ -716,6 +718,11 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
         except ValueError:
             nb_port = 8888
 
+        # Optionally pre-install deps so the interactive session starts ready
+        # (no notebook selected here, so no auto-detect — choose a file or type).
+        info("Tip: install your project's deps now so cells don't fail on import.")
+        nb_requirements, nb_packages = _notebook_deps_prompt("", _browse_jail, _user_browse_start())
+
         spec = JobSpec(
             job_name=job_name,
             partition="gpu",
@@ -741,6 +748,7 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
         script_text = render_notebook_sbatch(
             spec, folder, port=nb_port,
             gateway_host=cfg.gateway_host, gateway_port=int(cfg.gateway_port),
+            requirements=nb_requirements, packages=nb_packages,
         )
         panel("Generated notebook sbatch script", script_text)
 
@@ -796,9 +804,17 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
 
     # ── Step 5a: Notebook dependencies (install before running the .ipynb) ────
     nb_requirements = nb_packages = ""
+    nb_auto_install = True
     if task_type == "notebook-script" and script_path:
         nb_requirements, nb_packages = _notebook_deps_prompt(
             script_path, _browse_jail, _user_browse_start())
+        nb_auto_install = questionary.confirm(
+            "Auto-install any other missing imports during the run? "
+            "(recommended — catches deps like tensorboard automatically)",
+            default=True, style=_STYLE,
+        ).ask()
+        if nb_auto_install is None:
+            return
 
     # ── Step 5b: Training config (train_cifar10.py special-case) ─────────────
     training_flags = ""
@@ -896,7 +912,8 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
         from iitgpu.jobs import notebook_run_command
         run_cmd = notebook_run_command(
             script_path, in_container=bool(chosen_container),
-            requirements=nb_requirements, packages=nb_packages)
+            requirements=nb_requirements, packages=nb_packages,
+            auto_install=nb_auto_install)
     elif script_path and script_path.endswith(".py"):
         run_cmd = f"python {script_path}"
     elif script_path:
