@@ -165,10 +165,14 @@ def _run_with_progress(
 
     When *pip_watch_dir* is given (the env path), `conda env create -f spec.yml`
     runs the spec's ``pip:`` block as a SILENT sub-step after its own
-    transaction. For big CUDA/scientific wheels that's 10+ minutes with no
-    output, so the bar froze at "Executing transaction N/N" and users thought
-    the install had hung. A background gauge polls the env's site-packages and
-    shows packages landing live ("Installing pip packages (182 installed)").
+    transaction — and crucially conda does NOT stream that pip output to a piped
+    stdout, so we never see an "Installing pip dependencies" line to key off.
+    For big CUDA/scientific wheels that tail is 10+ minutes with no output, so
+    the bar froze at "Executing transaction N/N" and users thought the install
+    had hung. Once the FINAL conda phase is reached (after which the only long
+    work left is package install/unpack), a background gauge polls the env's
+    site-packages and shows packages landing live ("Installing packages (182
+    installed)").
     """
     output_lines: list[str] = []
     phase_idx = -1
@@ -195,7 +199,7 @@ def _run_with_progress(
                 time.sleep(0.3)
             while not done.wait(2.0):
                 cnt = _count_site_packages(pip_watch_dir)
-                desc = "Installing pip packages"
+                desc = "Installing packages"
                 if cnt:
                     desc += f"  ({cnt} installed)"
                 prog.update(task, description=desc)
@@ -219,15 +223,17 @@ def _run_with_progress(
             # hundreds of times) so the captured log stays useful for errors.
             if line and (not output_lines or output_lines[-1] != line):
                 output_lines.append(line)
-            if not pip_started.is_set() and "installing pip dependencies" in line.lower():
-                pip_started.set()
-                prog.update(task, description="Installing pip packages")
             while phase_idx + 1 < n:
                 marker, display = phases[phase_idx + 1]
                 if marker.lower() in line.lower():
                     prog.advance(task, 1)
                     prog.update(task, description=display)
                     phase_idx += 1
+                    # Final conda phase reached — everything after this is the
+                    # long, silent package install/unpack. Hand off to the live
+                    # site-packages gauge so the bar never looks frozen again.
+                    if pip_watch_dir and phase_idx == n - 1:
+                        pip_started.set()
                 else:
                     break
 

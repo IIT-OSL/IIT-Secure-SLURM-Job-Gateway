@@ -272,3 +272,42 @@ def test_run_with_progress_dedupes_pip_spinner_and_completes(tmp_path):
     assert "Executing transaction" in lines
     # the two identical spinner ticks collapse to a single captured line
     assert lines.count("Installing pip dependencies: ...working...") == 1
+
+
+def test_run_with_progress_shows_live_count_after_final_phase(tmp_path, monkeypatch):
+    """Regression for the frozen bar: conda runs its pip step WITHOUT streaming
+    to our pipe, so the gauge must be triggered by reaching the final conda
+    phase — not by an 'Installing pip dependencies' line that never arrives.
+    After 'Executing transaction', the bar must show a live package count."""
+    import io
+    from rich.console import Console
+    from iitgpu import envbuilder
+
+    sp = tmp_path / "lib" / "python3.11" / "site-packages"
+    sp.mkdir(parents=True)
+    for pkg in ("numpy-2.0", "scipy-1.17", "pandas-2.2"):
+        (sp / f"{pkg}.dist-info").mkdir()
+
+    # force_terminal so Rich actually paints live frames into the StringIO.
+    rec = Console(file=io.StringIO(), force_terminal=True, width=120)
+    monkeypatch.setattr(envbuilder, "console", rec)
+
+    # Fake conda: emit all phase markers, then go SILENT for ~4s (the pip tail)
+    # so the 2s background gauge ticks and repaints — exactly the case that
+    # used to freeze. No "Installing pip dependencies" line is ever printed.
+    script = (
+        "import time\n"
+        "for line in ['Collecting package metadata','Solving environment',"
+        "'Downloading and Extracting packages','Preparing transaction',"
+        "'Verifying transaction','Executing transaction']:\n"
+        "    print(line, flush=True)\n"
+        "time.sleep(4)\n"
+    )
+    rc, _ = envbuilder._run_with_progress(
+        ["python3", "-c", script], envbuilder._CONDA_PHASES, "test",
+        pip_watch_dir=str(tmp_path),
+    )
+    assert rc == 0
+    out = rec.file.getvalue()
+    assert "Installing packages" in out, "gauge label never appeared"
+    assert "3 installed" in out, "live package count never appeared"
