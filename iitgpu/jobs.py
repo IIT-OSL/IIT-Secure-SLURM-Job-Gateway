@@ -3,6 +3,7 @@ from __future__ import annotations
 import getpass
 import grp
 import os
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -31,6 +32,7 @@ TASK_DEFAULTS: dict[str, TaskDefaults] = {
     "inference": TaskDefaults(gpus=1, cpus=8,  mem_gb=32, time_limit="04:00:00"),
     "test":      TaskDefaults(gpus=1, cpus=4,  mem_gb=16, time_limit="00:30:00"),
     "notebook":  TaskDefaults(gpus=1, cpus=8,  mem_gb=32, time_limit="08:00:00"),
+    "notebook-script": TaskDefaults(gpus=1, cpus=8, mem_gb=32, time_limit="08:00:00"),
     "custom":    TaskDefaults(gpus=1, cpus=16, mem_gb=60, time_limit=""),
 }
 
@@ -165,6 +167,41 @@ def write_sbatch(spec: JobSpec, folder: str) -> str:
     path.write_text(render_sbatch(spec, folder))
     path.chmod(0o644)
     return str(path)
+
+
+def notebook_run_command(notebook_path: str, *, in_container: bool = False) -> str:
+    """Bash that runs a Jupyter notebook (.ipynb) top-to-bottom and saves results.
+
+    Returned as a JobSpec.run_command, so render_sbatch handles the SLURM header,
+    env activation, DATA_PATH export and `cd <job folder>` around it. Every cell
+    is executed via `jupyter nbconvert --execute`; an executed copy
+    (executed.ipynb) and an HTML render land in the job folder (the script's cwd),
+    so output is viewable after the job finishes. Outside a container a missing
+    jupyter/nbconvert is self-installed into ~/.local (mirrors the interactive
+    notebook path); inside a container it must already ship in the image.
+    """
+    nb = shlex.quote(notebook_path)
+    heal = ""
+    if not in_container:
+        heal = (
+            "if ! command -v jupyter >/dev/null 2>&1; then\n"
+            '    echo "jupyter not found in this environment - installing it (one-time)..."\n'
+            "    python3 -m pip install --user --quiet --no-warn-script-location "
+            "jupyterlab nbconvert ipykernel \\\n"
+            '        || { echo "ERROR: jupyter/nbconvert missing and could not be installed." >&2; \\\n'
+            '             echo "       Use an environment that includes them (e.g. the data-science prebuilt env)." >&2; exit 1; }\n'
+            '    export PATH="$HOME/.local/bin:$PATH"\n'
+            "fi\n"
+        )
+    return (
+        heal
+        + f'echo "Executing notebook: {Path(notebook_path).name}"\n'
+        + "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1 \\\n"
+        + f"    --output executed.ipynb --output-dir . {nb} \\\n"
+        + '    || { echo "Notebook execution FAILED - see the traceback above." >&2; exit 1; }\n'
+        + "jupyter nbconvert --to html --output-dir . executed.ipynb || true\n"
+        + 'echo "Notebook finished. Results: executed.ipynb (+ executed.html) in this job folder."'
+    )
 
 
 

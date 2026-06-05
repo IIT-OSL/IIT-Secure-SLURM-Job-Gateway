@@ -168,3 +168,60 @@ def test_jobspec_has_task_type_default():
 def test_jobspec_task_type_can_be_set():
     spec = _spec(task_type="train")
     assert spec.task_type == "train"
+
+
+# ── notebook-as-batch-job (.ipynb execution) ───────────────────────────────────
+
+def test_resource_defaults_notebook_script():
+    from iitgpu.jobs import resource_defaults
+    d = resource_defaults("notebook-script")
+    assert d.gpus == 1 and d.time_limit  # has a concrete (non-empty) time limit
+
+
+def test_notebook_run_command_executes_via_nbconvert():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/shared/users/alice/analysis.ipynb")
+    assert "jupyter nbconvert --to notebook --execute" in cmd
+    assert "--output executed.ipynb" in cmd
+    assert "--output-dir ." in cmd
+    assert "/shared/users/alice/analysis.ipynb" in cmd
+    # also renders an HTML copy for easy viewing
+    assert "--to html" in cmd
+
+
+def test_notebook_run_command_self_heals_jupyter_outside_container():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/shared/users/alice/nb.ipynb")
+    assert "command -v jupyter" in cmd
+    assert "pip install --user" in cmd
+    assert "nbconvert" in cmd
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in cmd
+
+
+def test_notebook_run_command_no_pip_install_in_container():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/shared/users/alice/nb.ipynb", in_container=True)
+    assert "pip install --user" not in cmd
+    # but still actually executes the notebook
+    assert "jupyter nbconvert --to notebook --execute" in cmd
+
+
+def test_notebook_run_command_quotes_path_with_spaces():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/shared/users/alice/my notebook.ipynb")
+    assert "'/shared/users/alice/my notebook.ipynb'" in cmd
+
+
+def test_render_sbatch_runs_notebook_command_with_env(tmp_path):
+    """A notebook-script job reuses render_sbatch: conda activation + the
+    nbconvert execution must both land in the generated script."""
+    from iitgpu.jobs import notebook_run_command
+    folder = make_job_folder(str(tmp_path), _spec())
+    run_cmd = notebook_run_command("/shared/users/alice/nb.ipynb")
+    script = render_sbatch(
+        _spec(run_command=run_cmd, conda_env="/shared/envs/data-science",
+              task_type="notebook-script"),
+        folder,
+    )
+    assert "conda activate /shared/envs/data-science" in script
+    assert "jupyter nbconvert --to notebook --execute" in script
