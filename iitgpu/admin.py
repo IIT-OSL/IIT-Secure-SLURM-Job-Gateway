@@ -850,12 +850,18 @@ def _login_as_menu(style) -> None:
     if not valid_username(target):
         err(f"invalid username {target!r}")
         return
-    info(f"  Switching to [bold]{target}[/] via sudo -iu — you'll see exactly "
-         f"what they see.")
+    info(f"  Switching to [bold]{target}[/] — you'll see exactly what they see.")
     info("  Quit their TUI (main menu → Quit, or Ctrl-D) to come back here.")
     auditclient.log("admin_login_as", detail=target)
+    # `sudo -H -u <user> <launcher>`: runs the TUI with the target's real UID and
+    # HOME. We deliberately do NOT use `sudo -i` — login-shell mode makes sudo
+    # match `bash -c <cmd>`, which a tight "launcher-only" sudoers rule can't
+    # authorize without also whitelisting a full shell. -H gives the right HOME;
+    # USER/LOGNAME are set to the target by sudo; identity is enforced by the
+    # kernel (SO_PEERCRED) regardless.
     try:
-        subprocess.run(["sudo", "-iu", target, "iit-gpu-manager"])
+        subprocess.run(
+            ["sudo", "-H", "-u", target, "/usr/local/bin/iit-gpu-manager"])
     except (OSError, KeyboardInterrupt) as exc:
         err(f"Could not start a session as {target}: {exc}")
     auditclient.log("admin_login_as_end", detail=target)

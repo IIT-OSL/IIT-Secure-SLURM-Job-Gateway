@@ -427,7 +427,7 @@ def test_login_as_runs_sudo_iu_for_selected_user(monkeypatch):
                         lambda cmd, *a, **k: calls.setdefault("cmd", cmd))
 
     admin._login_as_menu(style=None)
-    assert calls["cmd"] == ["sudo", "-iu", "sanuth", "iit-gpu-manager"]
+    assert calls["cmd"] == ["sudo", "-H", "-u", "sanuth", "/usr/local/bin/iit-gpu-manager"]
 
 
 def test_login_as_cancel_does_not_launch(monkeypatch):
