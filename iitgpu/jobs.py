@@ -257,9 +257,27 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
     nb = shlex.quote(notebook_path)
     heal = "" if in_container else _pip_self_heal_jupyter()
     deps = pip_install_block(requirements, packages)
+
+    # Pin the execution kernel to THIS env's python. Without this, nbconvert
+    # resolves the notebook's "python3" kernelspec to a stray ~/.local/system
+    # python whose sys.path lacks the env's packages → spurious "No module named
+    # pandas" even though pandas is installed in the active env (and the
+    # auto-install loop then spins forever: pip says "already satisfied", the
+    # kernel still can't import it). Registering the active python as a per-job
+    # kernel and pinning nbconvert to it guarantees env + ~/.local are both on
+    # the kernel's path.
+    kernel_setup = "" if in_container else (
+        '_IIT_KERNEL="iit-nb-${SLURM_JOB_ID:-$$}"\n'
+        "python3 -m pip install --user --quiet --no-warn-script-location ipykernel >/dev/null 2>&1 || true\n"
+        'python3 -m ipykernel install --user --name "$_IIT_KERNEL" --display-name "IIT notebook job" >/dev/null 2>&1 \\\n'
+        '    || { echo "ERROR: could not register a Jupyter kernel for this environment." >&2; exit 1; }\n'
+        'echo "Notebook execution kernel: $_IIT_KERNEL"\n'
+    )
+    kpin = "" if in_container else ' --ExecutePreprocessor.kernel_name="$_IIT_KERNEL"'
     nbconvert = (
-        "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1 "
-        f"--output executed.ipynb --output-dir . {nb}"
+        "jupyter nbconvert --to notebook --execute --ExecutePreprocessor.timeout=-1"
+        + kpin
+        + f" --output executed.ipynb --output-dir . {nb}"
     )
 
     if auto_install and not in_container:
@@ -299,7 +317,7 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
         )
 
     return (
-        heal + deps + run
+        heal + deps + kernel_setup + run
         + "jupyter nbconvert --to html --output-dir . executed.ipynb || true\n"
         + 'echo "Notebook finished. Results: executed.ipynb (+ executed.html) in this job folder."'
     )

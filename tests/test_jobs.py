@@ -261,6 +261,24 @@ def test_notebook_run_command_auto_install_can_be_disabled():
     assert "jupyter nbconvert --to notebook --execute" in cmd
 
 
+def test_notebook_run_command_pins_env_kernel():
+    """Execution must be pinned to a kernel built from the active env's python
+    (registered per-job) so env-only packages like pandas are importable —
+    otherwise nbconvert may pick a stray python3 kernel that can't see them."""
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb")
+    assert "ipykernel install --user" in cmd
+    assert "iit-nb-${SLURM_JOB_ID:-$$}" in cmd          # per-job kernel name
+    assert '--ExecutePreprocessor.kernel_name="$_IIT_KERNEL"' in cmd
+
+
+def test_notebook_run_command_container_does_not_pin_kernel():
+    from iitgpu.jobs import notebook_run_command
+    cmd = notebook_run_command("/u/nb.ipynb", in_container=True)
+    assert "ipykernel install" not in cmd
+    assert "kernel_name" not in cmd
+
+
 def test_render_notebook_sbatch_installs_requirements(tmp_path):
     from iitgpu.jobs import render_notebook_sbatch
     folder = make_job_folder(str(tmp_path), _spec())
