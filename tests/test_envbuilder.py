@@ -227,3 +227,48 @@ def test_build_env_bare_skips_smoke_check(tmp_path, monkeypatch):
 
     assert success is True
     assert smoke_called == [], "smoke check should NOT be called for bare env"
+
+
+# ── live pip-phase gauge (frozen-bar fix) ──────────────────────────────────────
+
+def test_count_site_packages_counts_dist_info(tmp_path):
+    from iitgpu.envbuilder import _count_site_packages
+    sp = tmp_path / "lib" / "python3.11" / "site-packages"
+    sp.mkdir(parents=True)
+    (sp / "numpy-2.0.dist-info").mkdir()
+    (sp / "scipy-1.17.dist-info").mkdir()
+    (sp / "torch.egg-info").mkdir()      # not a dist-info → not counted
+    (sp / "module.py").write_text("x")   # plain file → not counted
+    assert _count_site_packages(str(tmp_path)) == 2
+
+
+def test_count_site_packages_missing_env_returns_zero(tmp_path):
+    from iitgpu.envbuilder import _count_site_packages
+    assert _count_site_packages(str(tmp_path / "does-not-exist")) == 0
+
+
+def test_run_with_progress_dedupes_pip_spinner_and_completes(tmp_path):
+    """conda's silent pip step floods stdout with an identical spinner line;
+    _run_with_progress must collapse consecutive duplicates and still finish
+    cleanly when pip_watch_dir is set (the frozen-bar fix path)."""
+    from iitgpu.envbuilder import _run_with_progress, _CONDA_PHASES
+    script = (
+        "for line in ["
+        "'Collecting package metadata',"
+        "'Solving environment',"
+        "'Preparing transaction',"
+        "'Verifying transaction',"
+        "'Executing transaction',"
+        "'Installing pip dependencies: ...working...',"
+        "'Installing pip dependencies: ...working...',"
+        "'Installing pip dependencies: done']:\n"
+        "    print(line)\n"
+    )
+    rc, lines = _run_with_progress(
+        ["python3", "-c", script], _CONDA_PHASES, "test",
+        pip_watch_dir=str(tmp_path),
+    )
+    assert rc == 0
+    assert "Executing transaction" in lines
+    # the two identical spinner ticks collapse to a single captured line
+    assert lines.count("Installing pip dependencies: ...working...") == 1

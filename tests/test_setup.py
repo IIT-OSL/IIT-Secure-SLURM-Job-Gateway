@@ -87,9 +87,10 @@ def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run_with_progress(argv, phases, label, env=None):
+    def fake_run_with_progress(argv, phases, label, env=None, pip_watch_dir=None):
         captured["argv"] = argv
         captured["env"] = env
+        captured["pip_watch_dir"] = pip_watch_dir
         return 0, []
 
     sel = MagicMock()
@@ -117,6 +118,12 @@ def test_install_prebuilt_uses_yes_not_removed_force(tmp_path, monkeypatch):
     assert env is not None, "installer must pass an env with TMPDIR set"
     assert env.get("TMPDIR", "").startswith(str(tmp_path)), (
         f"TMPDIR should be under nfs_root ({tmp_path}), got {env.get('TMPDIR')!r}"
+    )
+
+    # The env path must be handed to the live pip-phase gauge so the bar shows
+    # packages landing instead of freezing during conda's silent pip step.
+    assert captured.get("pip_watch_dir") == argv[argv.index("-p") + 1], (
+        "pip_watch_dir must be the env path passed to `conda env create -p`"
     )
 
 

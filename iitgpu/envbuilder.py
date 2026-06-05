@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import getpass
+import glob
 import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from rich.console import Group
@@ -139,17 +142,40 @@ def _pkg_display_name(wheel_filename: str) -> str:
 
 # ── conda phase-based progress ─────────────────────────────────────────────────
 
+def _count_site_packages(env_dir: str) -> int:
+    """Count installed ``*.dist-info`` packages in *env_dir* — a live gauge for
+    conda's silent internal pip step (see _run_with_progress)."""
+    try:
+        sps = glob.glob(os.path.join(env_dir, "lib", "python*", "site-packages"))
+        if not sps:
+            return 0
+        return sum(1 for e in os.scandir(sps[0]) if e.name.endswith(".dist-info"))
+    except OSError:
+        return 0
+
+
 def _run_with_progress(
     cmd: list[str],
     phases: list[tuple[str, str]],
     label: str,
     env: dict | None = None,
+    pip_watch_dir: str | None = None,
 ) -> tuple[int, list[str]]:
-    """Run *cmd* showing a Rich progress bar driven by conda phase markers."""
+    """Run *cmd* showing a Rich progress bar driven by conda phase markers.
+
+    When *pip_watch_dir* is given (the env path), `conda env create -f spec.yml`
+    runs the spec's ``pip:`` block as a SILENT sub-step after its own
+    transaction. For big CUDA/scientific wheels that's 10+ minutes with no
+    output, so the bar froze at "Executing transaction N/N" and users thought
+    the install had hung. A background gauge polls the env's site-packages and
+    shows packages landing live ("Installing pip packages (182 installed)").
+    """
     output_lines: list[str] = []
     phase_idx = -1
     n = len(phases)
     first_label = phases[0][1] if phases else label
+    pip_started = threading.Event()
+    done = threading.Event()
 
     with Progress(
         SpinnerColumn(),
@@ -161,6 +187,21 @@ def _run_with_progress(
         transient=False,
     ) as prog:
         task = prog.add_task(first_label, total=n)
+
+        def _pip_gauge() -> None:
+            if not pip_watch_dir:
+                return
+            while not (pip_started.is_set() or done.is_set()):
+                time.sleep(0.3)
+            while not done.wait(2.0):
+                cnt = _count_site_packages(pip_watch_dir)
+                desc = "Installing pip packages"
+                if cnt:
+                    desc += f"  ({cnt} installed)"
+                prog.update(task, description=desc)
+
+        gauge = threading.Thread(target=_pip_gauge, daemon=True)
+        gauge.start()
 
         proc = subprocess.Popen(
             cmd,
@@ -174,8 +215,13 @@ def _run_with_progress(
 
         for raw in proc.stdout:
             line = raw.replace("\r", "").strip()
-            if line:
+            # Dedupe consecutive duplicates (conda's pip spinner repeats a line
+            # hundreds of times) so the captured log stays useful for errors.
+            if line and (not output_lines or output_lines[-1] != line):
                 output_lines.append(line)
+            if not pip_started.is_set() and "installing pip dependencies" in line.lower():
+                pip_started.set()
+                prog.update(task, description="Installing pip packages")
             while phase_idx + 1 < n:
                 marker, display = phases[phase_idx + 1]
                 if marker.lower() in line.lower():
@@ -186,6 +232,8 @@ def _run_with_progress(
                     break
 
         proc.wait()
+        done.set()
+        gauge.join(timeout=3)
         remaining = n - (phase_idx + 1)
         if remaining > 0:
             prog.advance(task, remaining)

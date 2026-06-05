@@ -419,6 +419,7 @@ def _run_install_prebuilt(cfg: Config) -> None:
         _CONDA_PHASES,
         f"Installing {name}",
         env=proc_env,
+        pip_watch_dir=env_path,
     )
     if rc != 0:
         err(f"conda env create failed for '{name}'")
