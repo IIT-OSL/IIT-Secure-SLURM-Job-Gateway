@@ -11,6 +11,13 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mail_flag(tmp_path, monkeypatch):
+    """Point the daemon mail kill-switch at a clean per-test dir so the real
+    /shared/.mail-disabled (live operational state) can never affect these tests."""
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+
+
 def _load_daemon():
     spec = importlib.util.spec_from_file_location(
         "audit_daemon",
@@ -317,6 +324,23 @@ def test_mail_send_admin_honours_explicit_bcc():
         peer_uid=0, users_conn=conn)
     assert ok, err
     assert sent["bcc"] == ["ops@iit.lk"]
+
+
+def test_mail_send_blocked_by_kill_switch(tmp_path, monkeypatch):
+    """The admin kill-switch flag under NFS_ROOT makes the daemon report
+    'not sent' without ever calling _resend_send."""
+    d, conn = _users_db()
+    _insert_user(conn, "admin1", role="admin", email="a1@iit.lk")
+    monkeypatch.setenv("NFS_ROOT", str(tmp_path))
+    (tmp_path / ".mail-disabled").write_text('{"disabled": true}')
+    called = {"n": 0}
+    d._uid_is_admin = lambda uid: True
+    d._uid_to_username = lambda uid: "admin1"
+    d._resend_send = lambda *a, **k: called.__setitem__("n", called["n"] + 1) or (True, "ok")
+    ok, data, err = d._h_mail_send(
+        {"to": "x@iit.lk", "subject": "s", "html": "h"}, peer_uid=0, users_conn=conn)
+    assert ok and data.get("sent") is False
+    assert called["n"] == 0, "kill-switch must short-circuit before sending"
 
 
 def test_mail_send_non_admin_no_email_rejected():
