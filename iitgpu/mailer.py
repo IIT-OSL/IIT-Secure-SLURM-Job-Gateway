@@ -87,14 +87,32 @@ def send_welcome(username: str, email: str, full_name: str = "",
     ssh_cmd      = f"ssh -p {port} {username}@{host}"
     subject      = f"[{_cluster_name()}] Your account is ready — {username}"
 
-    # Render the initial-password row only when a password was provided.
-    password_row = ""
+    # Prominent credentials block — the user logs in with this plaintext
+    # password, then is forced to change it. Rendered only when a password
+    # was set during provisioning.
+    password_block = ""
     if password:
-        password_row = f"""
-            <tr>
-              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Initial Password</td>
-              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{_html.escape(password)}</td>
-            </tr>"""
+        password_block = f"""
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:8px 32px 4px">
+          <div style="border:1px solid #E5E7EB;border-radius:8px;overflow:hidden">
+            <div style="background:#111827;padding:12px 20px">
+              <p style="margin:0;color:#F9FAFB;font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase">Your Login Password</p>
+            </div>
+            <div style="background:#F9FAFB;padding:20px">
+              <p style="margin:0 0 10px;color:#6B7280;font-size:12px;line-height:1.5">Use this password the first time you log in:</p>
+              <div style="background:#FFFFFF;border:1px dashed #9CA3AF;border-radius:6px;padding:14px 18px;text-align:center">
+                <span style="color:#111827;font-size:20px;font-weight:700;letter-spacing:1px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;word-break:break-all">{_html.escape(password)}</span>
+              </div>
+            </div>
+          </div>
+        </td></tr>
+
+        <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:10px 32px 4px">
+          <div style="border-left:3px solid #EF4444;padding:14px 18px;background:#FEF2F2">
+            <p style="margin:0 0 6px;color:#B91C1C;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">⚠ Reset Your Password Immediately</p>
+            <p style="margin:0;color:#991B1B;font-size:13px;line-height:1.7">This is a temporary password. <strong>As soon as you log in, you will be required to set a new password — do this right away.</strong> Do not share this password with anyone, and do not reuse it on other systems.</p>
+          </div>
+        </td></tr>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -122,14 +140,14 @@ def send_welcome(username: str, email: str, full_name: str = "",
             <tr>
               <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">SSH Command</td>
               <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{ssh_cmd}</td>
-            </tr>{password_row}
+            </tr>
           </table>
         </td></tr>
-
+{password_block}
         <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:4px 32px 28px">
           <div style="margin-top:20px;border-left:3px solid #F59E0B;padding:14px 18px;background:#FFFBEB">
             <p style="margin:0 0 6px;color:#92400E;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">First Login — Password Change Required</p>
-            <p style="margin:0;color:#78350F;font-size:13px;line-height:1.7">Your initial password is shown in the <strong>Account Details</strong> above. <strong>You will be required to change it the first time you log in.</strong> For your security, change it promptly and do not reuse it elsewhere.</p>
+            <p style="margin:0;color:#78350F;font-size:13px;line-height:1.7">Log in with the temporary password shown above. <strong>The system will immediately prompt you to set a new personal password</strong> — choose a strong one you don't use anywhere else, and reset it the moment you log in.</p>
           </div>
 
           <div style="margin-top:14px;border-left:3px solid #3B82F6;padding:14px 18px;background:#EFF6FF">

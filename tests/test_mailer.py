@@ -61,15 +61,17 @@ def test_welcome_includes_password_when_given():
     ctx, store = _capture()
     with ctx:
         mailer.send_welcome("alice", "alice@iit.lk", "Alice", password="s3cr3t!")
-    assert "Initial Password" in store["html"]
+    assert "Your Login Password" in store["html"]
     assert "s3cr3t!" in store["html"]
+    # Must tell the user to reset it immediately on first login.
+    assert "Reset Your Password Immediately" in store["html"]
 
 
-def test_welcome_omits_password_row_when_blank():
+def test_welcome_omits_password_block_when_blank():
     ctx, store = _capture()
     with ctx:
         mailer.send_welcome("alice", "alice@iit.lk", "Alice")
-    assert "Initial Password" not in store["html"]
+    assert "Your Login Password" not in store["html"]
 
 
 def test_welcome_html_escapes_password():
