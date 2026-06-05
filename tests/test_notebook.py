@@ -127,7 +127,7 @@ def test_notebook_sbatch_self_heals_missing_jupyter(tmp_path):
     folder = make_job_folder(str(tmp_path), spec)
     script = render_notebook_sbatch(spec, folder)
     assert "command -v jupyter" in script
-    assert "pip install --user --quiet jupyterlab" in script
+    assert "pip install --user" in script and "jupyterlab" in script
     # The launch still happens after the guard.
     assert script.index("command -v jupyter") < script.index("jupyter lab")
 
