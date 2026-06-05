@@ -20,6 +20,7 @@ dependencies:
     - matplotlib
     - seaborn
     - tensorboard
+    - protobuf
     - tqdm
     - jupyterlab>=4.0
     - ipywidgets

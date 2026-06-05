@@ -250,6 +250,8 @@ def test_notebook_run_command_auto_install_loop_is_default():
     assert "_iit_pkg_for" in cmd                       # alias function present
     assert "No module named '" in cmd                  # detects the missing module (ANSI-safe)
     assert "opencv-python" in cmd and "scikit-learn" in cmd  # alias entries
+    assert "protobuf" in cmd                           # google -> protobuf alias (the SummaryWriter dep)
+    assert "${_iit_miss%%.*}" in cmd                   # maps the TOP-LEVEL import (google.protobuf -> google)
     assert "pip install --user" in cmd                # installs the missing dep
 
 

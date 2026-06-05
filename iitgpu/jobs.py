@@ -174,7 +174,8 @@ _PIP_IMPORT_ALIASES: dict[str, str] = {
     "cv2": "opencv-python", "sklearn": "scikit-learn", "PIL": "Pillow",
     "yaml": "PyYAML", "bs4": "beautifulsoup4", "skimage": "scikit-image",
     "Crypto": "pycryptodome", "dateutil": "python-dateutil", "OpenSSL": "pyOpenSSL",
-    "tensorboard": "tensorboard",
+    "google": "protobuf", "dotenv": "python-dotenv", "jwt": "PyJWT",
+    "attr": "attrs", "yaml_": "PyYAML",
 }
 
 
@@ -302,7 +303,10 @@ def notebook_run_command(notebook_path: str, *, in_container: bool = False,
             + '    if [ "$_iit_attempt" -gt "$_iit_max" ]; then\n'
             + '        echo "Gave up after $_iit_max auto-installs (still missing: $_iit_miss)." >&2; exit 1\n'
             + "    fi\n"
-            + '    _iit_pkg="$(_iit_pkg_for "$_iit_miss")"\n'
+            # Map the TOP-LEVEL import (e.g. google.protobuf -> google -> protobuf)
+            # to its PyPI package name; pip packages are keyed on the top module.
+            + '    _iit_top="${_iit_miss%%.*}"\n'
+            + '    _iit_pkg="$(_iit_pkg_for "$_iit_top")"\n'
             + '    echo ">> Auto-installing missing dependency \'$_iit_miss\' (pip: $_iit_pkg) [attempt $_iit_attempt/$_iit_max]"\n'
             + '    python3 -m pip install --user --no-warn-script-location "$_iit_pkg" \\\n'
             + '        || { echo "Failed to pip install $_iit_pkg" >&2; exit 1; }\n'
