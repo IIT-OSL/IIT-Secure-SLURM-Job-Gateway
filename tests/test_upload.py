@@ -419,7 +419,8 @@ class TestShowScpInstructions:
         assert '"/shared/my folder/' in out
 
     def test_data_ref_path_is_quoted(self, capsys, monkeypatch):
-        """The '--data ...' reference line must quote the folder path prefix."""
+        """The job-script reference line must quote the folder path prefix so
+        paths with spaces work when pasted into a job script."""
         monkeypatch.setenv("IIT_SITE_ENV", "/nonexistent")
         cfg = self._make_cfg()
 
@@ -429,4 +430,79 @@ class TestShowScpInstructions:
             _show_scp_instructions("/shared/my folder", cfg)
 
         out = capsys.readouterr().out
-        assert '--data "/shared/my folder/<your-data>"' in out
+        assert '"/shared/my folder/dataset/' in out
+
+
+class TestUnzip:
+    """_unzip_in_folder: extract uploaded archives into the user's own folder
+    with a progress bar, while refusing path-traversal (zip-slip) archives."""
+
+    def _cfg(self, tmp_path):
+        import dataclasses
+        from iitgpu.config import load_config
+        return dataclasses.replace(load_config(), nfs_root=str(tmp_path))
+
+    def _user_folder(self, tmp_path):
+        import getpass
+        from iitgpu.validate import user_upload_root
+        folder = Path(user_upload_root(str(tmp_path), getpass.getuser())) / "ds"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def test_extracts_zip_into_named_subfolder(self, tmp_path):
+        import zipfile
+        from iitgpu import upload
+        cfg = self._cfg(tmp_path)
+        folder = self._user_folder(tmp_path)
+        zpath = folder / "dataset.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("a.txt", "hello")
+            zf.writestr("sub/b.txt", "world")
+
+        sel = MagicMock(); sel.ask.return_value = str(zpath)
+        with patch("iitgpu.upload.questionary.select", return_value=sel), \
+             patch("iitgpu.upload.questionary.press_any_key_to_continue") as k, \
+             patch("iitgpu.upload.auditclient"), \
+             patch("iitgpu.upload.header"):
+            k.return_value.ask.return_value = None
+            upload._unzip_in_folder(str(folder), cfg)
+
+        dest = folder / "dataset"
+        assert (dest / "a.txt").read_text() == "hello"
+        assert (dest / "sub" / "b.txt").read_text() == "world"
+
+    def test_zip_slip_traversal_is_blocked(self, tmp_path):
+        import zipfile
+        import getpass
+        from iitgpu import upload
+        from iitgpu.validate import user_upload_root
+        cfg = self._cfg(tmp_path)
+        folder = self._user_folder(tmp_path)
+        zpath = folder / "evil.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("../../escape.txt", "pwned")
+
+        sel = MagicMock(); sel.ask.return_value = str(zpath)
+        with patch("iitgpu.upload.questionary.select", return_value=sel), \
+             patch("iitgpu.upload.questionary.press_any_key_to_continue") as k, \
+             patch("iitgpu.upload.auditclient"), \
+             patch("iitgpu.upload.header"):
+            k.return_value.ask.return_value = None
+            upload._unzip_in_folder(str(folder), cfg)
+
+        # The traversal target must never be written, anywhere outside dest.
+        user_root = Path(user_upload_root(str(tmp_path), getpass.getuser()))
+        assert not (user_root / "escape.txt").exists()
+        assert not (folder / "escape.txt").exists()
+
+    def test_no_zip_files_is_handled(self, tmp_path):
+        from iitgpu import upload
+        cfg = self._cfg(tmp_path)
+        folder = self._user_folder(tmp_path)
+        # No .zip present → must not raise, just inform and return.
+        with patch("iitgpu.upload.questionary.press_any_key_to_continue") as k, \
+             patch("iitgpu.upload.questionary.select") as sel, \
+             patch("iitgpu.upload.header"):
+            k.return_value.ask.return_value = None
+            upload._unzip_in_folder(str(folder), cfg)
+            sel.assert_not_called()

@@ -40,44 +40,167 @@ def _show_scp_instructions(folder_path: str, cfg) -> None:
     user = getpass.getuser()
     host = cfg.gateway_host
     port = cfg.gateway_port
-    header("Upload via SCP / rsync")
+    header("Upload via SCP  (zip first — it's faster & more reliable)")
+
     console.print(
-        "\nOpen a [bold]new terminal on your local machine[/] and run one of these.\n"
-        "[dim]Replace the example path with your actual data folder.[/]\n"
+        "\n[bold]Step 1 — On your computer, split your work into two folders[/] "
+        "and zip each one [bold]separately[/]:\n"
+        "  • [cyan]dataset/[/]  — your data files (images, csv, etc.)\n"
+        "  • [cyan]scripts/[/]  — your code (.py, requirements.txt, notebooks)\n"
+        "[dim]Two small zips upload far faster and more reliably than thousands of\n"
+        "loose files, and keep your data and code cleanly separated here.[/]\n"
     )
 
+    console.print("[bold]Linux / macOS[/]  [dim](in the folder that holds dataset/ and scripts/)[/]")
+    console.print("  [bold cyan]zip -r dataset.zip dataset/[/]")
+    console.print("  [bold cyan]zip -r scripts.zip scripts/[/]")
+    console.print()
+    console.print("[bold]Windows  (PowerShell)[/]")
+    console.print("  [bold cyan]Compress-Archive -Path dataset -DestinationPath dataset.zip[/]")
+    console.print("  [bold cyan]Compress-Archive -Path scripts -DestinationPath scripts.zip[/]")
+    console.print()
+
+    console.print(
+        "[bold]Step 2 — Upload the two .zip files[/] "
+        "(run in a [bold]new terminal on your computer[/]):\n"
+    )
     console.print("[bold]Linux / macOS[/]")
     console.print(
-        f"  [bold cyan]scp[/]   -P {port} -r  \"/path/to/your-data\"  "
+        f"  [bold cyan]scp[/]   -P {port}  dataset.zip scripts.zip  "
         f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
     )
     console.print(
-        f"  [bold cyan]rsync[/] -avz --progress -e \"ssh -p {port}\"  "
-        f"\"/path/to/your-data/\"  [cyan]{user}@{host}:\"{folder_path}/\"[/]"
+        f"  [dim]big dataset? resumable:[/] [bold cyan]rsync[/] -avz --progress "
+        f"-e \"ssh -p {port}\"  dataset.zip scripts.zip  "
+        f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
     )
     console.print()
-
     console.print("[bold]Windows  (PowerShell / CMD)[/]")
     console.print(
-        f"  [bold cyan]scp[/]   -P {port} -r  \"C:\\Users\\You\\your-data\"  "
+        f"  [bold cyan]scp[/]   -P {port}  dataset.zip scripts.zip  "
         f"[cyan]{user}@{host}:\"{folder_path}/\"[/]"
     )
     console.print()
 
     console.print(
-        f"[dim]Your local folder becomes a sub-folder here:[/]  "
-        f"[cyan]{folder_path}[bold]/<your-data>/[/][/]"
+        "[bold]Step 3 — Back here, choose[/] [cyan]\"Unzip an uploaded .zip\"[/] "
+        "to extract each archive\n          into its own folder (with a progress bar).\n"
     )
     console.print(
-        "[dim]Reference it in your job script as:[/]  "
-        f"[cyan]--data \"{folder_path}/<your-data>\"[/]\n"
+        "[dim]After unzipping, reference your files in a job script as:[/]  "
+        f"[cyan]\"{folder_path}/dataset/...\"[/]\n",
+        soft_wrap=True,
     )
     console.print(
-        "[dim]Note: paths with spaces or special characters ( ' [ ] ) must be\n"
-        "      quoted exactly as shown above.  Do not add extra quotes around\n"
-        "      the remote path on Windows — the outer \" \" are sufficient.[/]\n"
+        "[dim]Note: keep the outer \" \" quotes on the remote path exactly as shown.\n"
+        "      Don't add extra quotes on Windows.[/]\n"
     )
     questionary.press_any_key_to_continue("Press any key when done").ask()
+
+
+def _unzip_in_folder(folder_path: str, cfg) -> None:
+    """Extract a user-uploaded .zip into its own sub-folder, with a live
+    byte-progress bar. Stays strictly inside the user's upload jail and guards
+    against zip-slip (archive members that try to escape the target dir)."""
+    import zipfile
+    from rich.progress import (
+        BarColumn, MofNCompleteColumn, Progress, SpinnerColumn,
+        TextColumn, TimeElapsedColumn,
+    )
+    from iitgpu.validate import in_user_upload_jail
+
+    user = getpass.getuser()
+    header("Unzip an uploaded .zip")
+    try:
+        zips = sorted(
+            p for p in Path(folder_path).iterdir()
+            if p.is_file() and p.suffix.lower() == ".zip"
+        )
+    except OSError as exc:
+        err(str(exc)); return
+    if not zips:
+        info("No .zip files found in this folder.")
+        console.print(
+            "[dim]Upload your zipped dataset/scripts first (see the SCP "
+            "instructions), then come back here to extract them.[/]"
+        )
+        questionary.press_any_key_to_continue("Press any key to continue").ask()
+        return
+
+    choices = [
+        questionary.Choice(f"{z.name}   ({z.stat().st_size:,} bytes)", str(z))
+        for z in zips
+    ] + [questionary.Choice("[cancel]", "__cancel__")]
+    sel = questionary.select(
+        "Which archive do you want to unzip?", choices=choices, style=_STYLE
+    ).ask()
+    if not sel or sel == "__cancel__":
+        return
+
+    zip_path = Path(sel)
+    dest = Path(folder_path) / zip_path.stem
+    # The extraction target must stay inside the user's own upload folder.
+    if not in_user_upload_jail(str(dest), cfg.nfs_root, user):
+        err("Refusing to extract outside your folder."); return
+    if dest.exists() and any(dest.iterdir()):
+        if not questionary.confirm(
+            f"'{dest.name}/' already exists and is not empty. Extract into it anyway?",
+            default=False, style=_STYLE,
+        ).ask():
+            return
+    dest.mkdir(parents=True, exist_ok=True)
+    make_shared_writable(str(dest))
+    dest_resolved = dest.resolve()
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            members = [m for m in zf.infolist() if not m.is_dir()]
+            if not members:
+                err("Archive is empty."); return
+            # zip-slip guard: every member must resolve inside the target dir.
+            for m in members:
+                target = (dest / m.filename).resolve()
+                if target != dest_resolved and not str(target).startswith(
+                    str(dest_resolved) + os.sep
+                ):
+                    err(f"Archive contains an unsafe path ('{m.filename}') — "
+                        "aborting for safety.")
+                    return
+
+            auditclient.log("data_unzip", detail=str(zip_path))
+            total = sum(m.file_size for m in members) or 1
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=30, complete_style="green"),
+                TextColumn("[dim]{task.fields[fname]:<36}"),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                console=console,
+            ) as prog:
+                task = prog.add_task("Unzipping", total=total, fname="")
+                for m in members:
+                    target = dest / m.filename
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(m) as src, open(target, "wb") as out:
+                        while True:
+                            chunk = src.read(256 * 1024)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            prog.update(task, advance=len(chunk),
+                                        fname=Path(m.filename).name[:36])
+                prog.update(task, completed=total, fname="done")
+    except zipfile.BadZipFile:
+        err("That file is not a valid .zip archive."); return
+    except OSError as exc:
+        err(f"Extraction failed: {exc}"); return
+
+    ok(f"Extracted {len(members)} file(s)  →  [cyan]{dest}[/]")
+    console.print(
+        f"[dim]Reference it in a job script as:[/]  [cyan]\"{dest}/...\"[/]"
+    )
+    questionary.press_any_key_to_continue("Press any key to continue").ask()
 
 
 def _browse_folder(folder_path: str) -> None:
@@ -212,10 +335,11 @@ def run_upload() -> None:
     auditclient.log("data_folder_open", detail=folder_path)
 
     choices = [
-        questionary.Choice("Upload from my computer  (SCP / rsync instructions)", "scp"),
-        questionary.Choice("Download from a URL  (wget / curl on the server)",    "url"),
-        questionary.Choice("Browse folder contents",                               "browse"),
-        questionary.Choice("Back to main menu",                                    "back"),
+        questionary.Choice("Upload from my computer  (zip + SCP instructions)",    "scp"),
+        questionary.Choice("Unzip an uploaded .zip  (extract here, with progress)", "unzip"),
+        questionary.Choice("Download from a URL  (wget / curl on the server)",      "url"),
+        questionary.Choice("Browse folder contents",                                "browse"),
+        questionary.Choice("Back to main menu",                                     "back"),
     ]
 
     while True:
@@ -226,6 +350,8 @@ def run_upload() -> None:
             break
         elif action == "scp":
             _show_scp_instructions(folder_path, cfg)
+        elif action == "unzip":
+            _unzip_in_folder(folder_path, cfg)
         elif action == "url":
             _download_from_url(folder_path)
         elif action == "browse":
