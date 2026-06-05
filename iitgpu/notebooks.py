@@ -93,6 +93,13 @@ def launch_tensorboard() -> None:
     spec = JobSpec(job_name="tensorboard", partition=cfg.partition, gpus=0,
                    cpus=2, mem_gb=8, time_limit="08:00:00", run_command="",
                    task_type="tensorboard")
+    # Auto-populate SLURM mail directive from users.db if an MTA is available.
+    from iitgpu.notify import mta_present
+    from iitgpu import daemonclient
+    if mta_present():
+        _tb_email = daemonclient.email_for(getpass.getuser())
+        if _tb_email:
+            spec.mail_user = _tb_email
     folder = make_job_folder(jobs_dir(cfg), spec)
     script = render_tensorboard_sbatch(spec, folder, logdir.strip(), port=port,
                                        gateway_host=cfg.gateway_host,

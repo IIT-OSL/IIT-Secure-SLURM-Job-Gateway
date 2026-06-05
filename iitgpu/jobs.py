@@ -213,6 +213,11 @@ def render_notebook_sbatch(
     ]
     if spec.time_limit:
         lines.append(f"#SBATCH --time={spec.time_limit}")
+    if spec.mail_user:
+        from iitgpu.config import load_config
+        mail_types = load_config().notify_mail_types
+        lines.append(f"#SBATCH --mail-user={spec.mail_user}")
+        lines.append(f"#SBATCH --mail-type={mail_types}")
     lines += [
         f"#SBATCH --output={folder}/slurm-%j.out",
         f"#SBATCH --error={folder}/slurm-%j.err",
@@ -302,6 +307,11 @@ def render_tensorboard_sbatch(spec, folder, logdir, port=6006,
     ]
     if spec.time_limit:
         lines.append(f"#SBATCH --time={spec.time_limit}")
+    if spec.mail_user:
+        from iitgpu.config import load_config
+        mail_types = load_config().notify_mail_types
+        lines.append(f"#SBATCH --mail-user={spec.mail_user}")
+        lines.append(f"#SBATCH --mail-type={mail_types}")
     lines += [
         f"#SBATCH --output={folder}/slurm-%j.out",
         f"#SBATCH --error={folder}/slurm-%j.err",

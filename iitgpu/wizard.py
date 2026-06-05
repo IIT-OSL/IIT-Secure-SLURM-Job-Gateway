@@ -673,6 +673,13 @@ def run_wizard(prefill: dict | None = None) -> None:  # noqa: C901 (complexity o
             venv_path=chosen_env.path if chosen_env and chosen_env.kind == "venv" else "",
             container_image=chosen_container,
         )
+        # Auto-populate SLURM mail directive from users.db if an MTA is available.
+        from iitgpu.notify import mta_present
+        from iitgpu import daemonclient
+        if mta_present():
+            _registered_email = daemonclient.email_for(user)
+            if _registered_email:
+                spec.mail_user = _registered_email
         folder = make_job_folder(jdir, spec)
         from iitgpu.jobs import render_notebook_sbatch
         script_text = render_notebook_sbatch(

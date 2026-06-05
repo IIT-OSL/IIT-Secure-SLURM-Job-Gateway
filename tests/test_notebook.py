@@ -139,3 +139,31 @@ def test_notebook_sbatch_no_self_heal_for_container(tmp_path):
     folder = make_job_folder(str(tmp_path), spec)
     script = render_notebook_sbatch(spec, folder)
     assert "pip install --user --quiet jupyterlab" not in script
+
+
+def test_notebook_sbatch_emits_mail_directives_when_mail_user_set(tmp_path):
+    from iitgpu.jobs import make_job_folder, render_notebook_sbatch
+    spec = _nb_spec(mail_user="dahamadmin@iit.ac.lk")
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_notebook_sbatch(spec, folder)
+    assert "#SBATCH --mail-user=dahamadmin@iit.ac.lk" in script
+    assert "#SBATCH --mail-type=" in script
+
+
+def test_notebook_sbatch_no_mail_directives_without_mail_user(tmp_path):
+    from iitgpu.jobs import make_job_folder, render_notebook_sbatch
+    spec = _nb_spec()
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_notebook_sbatch(spec, folder)
+    assert "--mail-user" not in script
+
+
+def test_tensorboard_sbatch_emits_mail_directives_when_mail_user_set(tmp_path):
+    from iitgpu.jobs import JobSpec, make_job_folder, render_tensorboard_sbatch
+    spec = JobSpec(job_name="tensorboard", partition="gpu", gpus=0, cpus=2,
+                   mem_gb=8, time_limit="08:00:00", run_command="",
+                   task_type="tensorboard", mail_user="dahamadmin@iit.ac.lk")
+    folder = make_job_folder(str(tmp_path), spec)
+    script = render_tensorboard_sbatch(spec, folder, "/shared/logs")
+    assert "#SBATCH --mail-user=dahamadmin@iit.ac.lk" in script
+    assert "#SBATCH --mail-type=" in script
