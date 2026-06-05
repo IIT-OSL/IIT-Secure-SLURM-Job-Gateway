@@ -4,8 +4,12 @@
 #
 # Open-source deploy model (M03 §A): ONE git clone at /opt/iit-gpu IS the live
 # tool. Every user's launcher points PYTHONPATH there. To ship an update:
-#   git pull --ff-only  +  pytest
+#   git fetch <source>  +  git merge --ff-only  +  pytest
 # The next TUI launch by any gpuusers member picks it up. No rsync, no per-user copy.
+#
+# Deploy SOURCE: the GitHub remote (origin) has diverged from the deployed line,
+# so updates are pulled from the canonical dev clone on this host by default.
+# Override with IIT_GPU_SOURCE=<git-remote-or-path> to deploy from elsewhere.
 set -euo pipefail
 
 # -- Self-modification guard (CRITICAL) ----------------------------------------
@@ -27,6 +31,10 @@ rm -f "$0" 2>/dev/null || true
 
 INSTALL="${IIT_GPU_HOME:-/opt/iit-gpu}"
 BRANCH="${IIT_GPU_BRANCH:-main}"
+# Where to pull updates FROM. Defaults to the canonical dev clone on this host
+# because the GitHub origin has diverged from the deployed history. Can be any
+# git remote name, URL, or local path that holds the blessed $BRANCH.
+SOURCE="${IIT_GPU_SOURCE:-/home/slurmadmin/IIT-Secure-SLURM-Job-Gateway}"
 
 ok()   { echo "  ✔  $*"; }
 warn() { echo "  ⚠  $*"; }
@@ -35,11 +43,14 @@ step() { echo; echo "==> $*"; }
 
 [ -d "$INSTALL/.git" ] || fail "$INSTALL is not a git clone. Run deploy/bootstrap-install.md first."
 
-step "Updating canonical clone at $INSTALL ..."
+step "Updating canonical clone at $INSTALL (source: $SOURCE) ..."
 cd "$INSTALL"
 git config --global --add safe.directory "$INSTALL" 2>/dev/null || true
-git fetch --quiet origin "$BRANCH" || fail "git fetch failed — check network/token"
-git pull --ff-only origin "$BRANCH" 2>&1 || fail "git pull --ff-only failed (local commits? resolve manually)"
+git config --global --add safe.directory "$SOURCE" 2>/dev/null || true
+git fetch --quiet "$SOURCE" "$BRANCH" \
+    || fail "git fetch from '$SOURCE' failed — check the source path/remote and network/token"
+git merge --ff-only FETCH_HEAD 2>&1 \
+    || fail "git merge --ff-only failed — the deployed clone has local commits or has diverged from '$SOURCE'. Resolve manually."
 ok "HEAD: $(git log --oneline -1)"
 
 step "Running test suite ..."
