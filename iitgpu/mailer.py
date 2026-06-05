@@ -72,8 +72,12 @@ def _fire(to: str, subject: str, html: str, bcc: list[str] | None = None,
            daemon=False).start()
 
 
-def send_welcome(username: str, email: str, full_name: str = "") -> tuple[bool, str]:
-    """Send welcome email. No password, no admin BCC — this email is for the user only."""
+def send_welcome(username: str, email: str, full_name: str = "",
+                 password: str = "") -> tuple[bool, str]:
+    """Send welcome email with the user's initial password. No admin BCC —
+    this email is for the user only. The password is shown so the user can
+    log in themselves; they are forced to change it on first login."""
+    import html as _html
     from iitgpu.config import load_config
     cfg  = load_config()
     host = cfg.gateway_host
@@ -82,6 +86,15 @@ def send_welcome(username: str, email: str, full_name: str = "") -> tuple[bool, 
     display_name = full_name or username
     ssh_cmd      = f"ssh -p {port} {username}@{host}"
     subject      = f"[{_cluster_name()}] Your account is ready — {username}"
+
+    # Render the initial-password row only when a password was provided.
+    password_row = ""
+    if password:
+        password_row = f"""
+            <tr>
+              <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">Initial Password</td>
+              <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{_html.escape(password)}</td>
+            </tr>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -109,14 +122,14 @@ def send_welcome(username: str, email: str, full_name: str = "") -> tuple[bool, 
             <tr>
               <td style="padding:10px 0;color:#6B7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;width:120px;border-bottom:1px solid #F3F4F6">SSH Command</td>
               <td style="padding:10px 0 10px 20px;color:#111827;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;border-bottom:1px solid #F3F4F6">{ssh_cmd}</td>
-            </tr>
+            </tr>{password_row}
           </table>
         </td></tr>
 
         <tr><td bgcolor="#FFFFFF" style="background:#FFFFFF;padding:4px 32px 28px">
           <div style="margin-top:20px;border-left:3px solid #F59E0B;padding:14px 18px;background:#FFFBEB">
             <p style="margin:0 0 6px;color:#92400E;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px">First Login — Password Change Required</p>
-            <p style="margin:0;color:#78350F;font-size:13px;line-height:1.7">Your administrator has set an initial password for you. <strong>You will be required to change it the first time you log in.</strong> Your initial password will be provided by your administrator in person.</p>
+            <p style="margin:0;color:#78350F;font-size:13px;line-height:1.7">Your initial password is shown in the <strong>Account Details</strong> above. <strong>You will be required to change it the first time you log in.</strong> For your security, change it promptly and do not reuse it elsewhere.</p>
           </div>
 
           <div style="margin-top:14px;border-left:3px solid #3B82F6;padding:14px 18px;background:#EFF6FF">
@@ -136,7 +149,7 @@ def send_welcome(username: str, email: str, full_name: str = "") -> tuple[bool, 
               <li>Open a terminal and run:<br>
                 <code style="display:inline-block;margin-top:4px;background:#F3F4F6;padding:5px 10px;border-radius:4px;font-family:'SF Mono',Consolas,monospace;font-size:12px;color:#111827">{ssh_cmd}</code>
               </li>
-              <li>Enter your initial password (provided by your administrator) when prompted.</li>
+              <li>Enter your initial password (shown in Account Details above) when prompted.</li>
               <li>You will immediately be asked to set a new personal password.</li>
               <li>The GPU Manager interface will launch automatically after that.</li>
             </ol>

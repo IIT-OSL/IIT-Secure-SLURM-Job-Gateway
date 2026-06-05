@@ -124,8 +124,8 @@ def test_provision_user_sets_password_via_chpasswd():
     assert "alice:s3cr3t\n" in (chpasswd_call[1].get("input") or "")
 
 
-def test_provision_user_welcome_sent_without_password():
-    """send_welcome must be called without the password — never passed to mailer."""
+def test_provision_user_welcome_sent_with_password():
+    """send_welcome must receive the initial password so it can be emailed to the user."""
     with patch("subprocess.run", return_value=_proc(out="done")), \
          patch("iitgpu.admin.daemonclient.create_user", return_value=(True, "ok")), \
          patch("iitgpu.admin.auditclient.log"), \
@@ -135,8 +135,8 @@ def test_provision_user_welcome_sent_without_password():
         import time; time.sleep(0.05)
     assert mock_welcome.called
     args, kwargs = mock_welcome.call_args
-    assert "s3cr3t" not in str(args) and "s3cr3t" not in str(kwargs), \
-        "send_welcome must not receive the password"
+    assert "s3cr3t" in str(args) or "s3cr3t" in str(kwargs), \
+        "send_welcome must receive the initial password"
 
 
 def test_provision_user_must_change_pw_flag_set_when_password_given():

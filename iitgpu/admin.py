@@ -180,9 +180,9 @@ def provision_user(username: str, admin: bool = False,
             auditclient.log("password_change_required", detail=username)
     if email and ok_pw:
         from iitgpu import mailer as _mailer
-        mail_ok, mail_msg = _mailer.send_welcome(username, email, full_name)
+        mail_ok, mail_msg = _mailer.send_welcome(username, email, full_name, password)
         if mail_ok:
-            msg += "\n  ✔  welcome email sent"
+            msg += "\n  ✔  welcome email sent (with initial password)"
             auditclient.log("welcome_sent", detail=username, meta={"email": email})
         else:
             msg += f"\n  ⚠  welcome email failed: {mail_msg} — hand credentials in person"
