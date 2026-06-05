@@ -66,6 +66,19 @@ print(f'    config OK | NFS_ROOT={cfg.nfs_root} | shared_user_mode={cfg.gateway_
 " || fail "Import check failed"
 ok "Import OK"
 
+# site.env MUST be world-readable. It holds only non-secret cluster config
+# (GATEWAY_HOST/PORT, CLUSTER_NAME, …); the Resend API key lives ONLY in
+# secrets.env (locked 0640 root:gpusync). Welcome/login emails are built
+# CLIENT-SIDE in each user's TUI process, so every TUI user must be able to
+# read site.env — otherwise load_config() silently falls back to defaults
+# (localhost:22) and the welcome email shows the wrong ssh command.
+if [ -f "$INSTALL/deploy/site.env" ]; then
+    step "Ensuring site.env is readable by all TUI users ..."
+    sudo chmod 0644 "$INSTALL/deploy/site.env" \
+        && ok "site.env is 0644 (TUI users read GATEWAY_HOST/PORT for emails)" \
+        || warn "could not chmod site.env — non-root TUI emails may show localhost:22"
+fi
+
 
 # Sync mailer script to /usr/local/bin (MailProg for SLURM).
 if [ -f "$INSTALL/deploy/iit-gpu-mailer" ]; then
