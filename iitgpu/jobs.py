@@ -187,6 +187,30 @@ def build_interactive_cmd(spec: "JobSpec", partition: str = "gpu") -> list[str]:
     cmd += ["--pty", "bash", "-l"]
     return cmd
 
+
+# Bash that resolves the compute node's gateway-reachable address at runtime.
+#
+# Interactive services (JupyterLab / TensorBoard) run on a GPU *compute* node,
+# but users only ever SSH into the *login/gateway* node — a different host. If
+# the service binds to 127.0.0.1 it lives on the compute node's loopback, which
+# the gateway cannot reach, so the user's `-L <port>:localhost:<port>` tunnel
+# (terminating on the login node) connects to nothing. The job therefore looks
+# "started" yet is unreachable, and users give up and cancel it.
+#
+# Fix: bind to the node's SLURM NodeAddr — routable from the gateway over the
+# cluster network but NOT the public-facing interface — and forward the tunnel
+# to that same address. The per-job random token still gates access. We resolve
+# NodeAddr via scontrol (authoritative), falling back to the first local IP and
+# finally loopback so the script is always well-defined.
+_NODE_ADDR_SNIPPET = [
+    'IIT_NODE_ADDR=$(scontrol show node "${SLURMD_NODENAME:-$(hostname -s)}" 2>/dev/null'
+    ' | sed -n "s/.*NodeAddr=\\([^ ]*\\).*/\\1/p")',
+    '[ -z "$IIT_NODE_ADDR" ] && IIT_NODE_ADDR=$(hostname -I | awk "{print \\$1}")',
+    '[ -z "$IIT_NODE_ADDR" ] && IIT_NODE_ADDR=127.0.0.1',
+    "",
+]
+
+
 def render_notebook_sbatch(
     spec: "JobSpec",
     folder: str,
@@ -230,7 +254,7 @@ def render_notebook_sbatch(
         # Notebook inside container — wrap the entire jupyter launch
         launcher = (
             f"apptainer exec --nv --bind /shared {spec.container_image} "
-            f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
+            f"jupyter lab --no-browser --ip=$IIT_NODE_ADDR --port={port} "
             f"--notebook-dir=/shared --ServerApp.token=\"$JUPYTER_TOKEN\""
         )
     else:
@@ -262,10 +286,11 @@ def render_notebook_sbatch(
         ]
 
         launcher = (
-            f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
+            f"jupyter lab --no-browser --ip=$IIT_NODE_ADDR --port={port} "
             f"--notebook-dir=/shared --ServerApp.token=\"$JUPYTER_TOKEN\""
         )
 
+    lines += _NODE_ADDR_SNIPPET
     lines += [
         "# Generate a random per-job token (not logged beyond this script's stdout)",
         'JUPYTER_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(24))")',
@@ -273,7 +298,7 @@ def render_notebook_sbatch(
         "echo '================================================='",
         "echo 'JupyterLab is starting on the GPU node.'",
         "echo 'Run this SSH tunnel command from YOUR LAPTOP:'",
-        f"echo '  ssh -p {gateway_port} -L {port}:localhost:{port} public@{gateway_host}'",
+        f'echo "  ssh -p {gateway_port} -L {port}:$IIT_NODE_ADDR:{port} $USER@{gateway_host}"',
         f"echo 'Then open: http://localhost:{port}'",
         "echo '================================================='",
         "",
@@ -321,7 +346,7 @@ def render_tensorboard_sbatch(spec, folder, logdir, port=6006,
     if spec.container_image:
         launcher = (
             f"apptainer exec --bind /shared {spec.container_image} "
-            f"tensorboard --logdir {logdir} --port {port} --host 127.0.0.1"
+            f"tensorboard --logdir {logdir} --port {port} --host $IIT_NODE_ADDR"
         )
     else:
         if spec.conda_env:
@@ -331,11 +356,12 @@ def render_tensorboard_sbatch(spec, folder, logdir, port=6006,
                 f"conda activate {spec.conda_env}",
                 "",
             ]
-        launcher = f"tensorboard --logdir {logdir} --port {port} --host 127.0.0.1"
+        launcher = f"tensorboard --logdir {logdir} --port {port} --host $IIT_NODE_ADDR"
+    lines += _NODE_ADDR_SNIPPET
     lines += [
         "echo \'=================================================\'",
         "echo \'TensorBoard starting. SSH tunnel from your laptop:\'",
-        f"echo \'  ssh -p {gateway_port} -L {port}:localhost:{port} $(whoami)@{gateway_host}\'",
+        f'echo "  ssh -p {gateway_port} -L {port}:$IIT_NODE_ADDR:{port} $USER@{gateway_host}"',
         f"echo \'Then open: http://localhost:{port}\'",
         "echo \'=================================================\'",
         "",

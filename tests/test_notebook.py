@@ -45,16 +45,28 @@ def test_notebook_sbatch_has_jupyter_launch(tmp_path):
     script = render_notebook_sbatch(spec, folder, port=8888)
     assert "jupyter lab" in script
     assert "--no-browser" in script
-    assert "--ip=127.0.0.1" in script
+    assert "--ip=$IIT_NODE_ADDR" in script
     assert "--port=8888" in script
 
 
-def test_notebook_sbatch_binds_to_localhost_only(tmp_path):
+def test_notebook_sbatch_binds_to_node_addr_not_loopback(tmp_path):
+    """The notebook runs on a GPU compute node but users tunnel in through the
+    login/gateway node — a *different* host. Binding to 127.0.0.1 (loopback)
+    made Jupyter unreachable through the tunnel. It must bind to the node's
+    SLURM NodeAddr (routable from the gateway) and forward the tunnel there,
+    never to loopback or the public-facing 0.0.0.0."""
     from iitgpu.jobs import make_job_folder, render_notebook_sbatch
     spec = _nb_spec()
     folder = make_job_folder(str(tmp_path), spec)
-    script = render_notebook_sbatch(spec, folder)
-    assert "127.0.0.1" in script
+    script = render_notebook_sbatch(spec, folder, port=8888)
+    # Resolves the node's reachable address at runtime …
+    assert "IIT_NODE_ADDR=" in script
+    assert "NodeAddr=" in script
+    # … binds the server to it …
+    assert "--ip=$IIT_NODE_ADDR" in script
+    # … and the tunnel forwards to that address, not localhost.
+    assert "-L 8888:$IIT_NODE_ADDR:8888" in script
+    # Never exposed on all interfaces (public network).
     assert "0.0.0.0" not in script
 
 

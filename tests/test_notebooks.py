@@ -18,16 +18,22 @@ def test_tensorboard_sbatch_has_launch_and_tunnel(tmp_path):
     s = render_tensorboard_sbatch(spec, folder, "/shared/u/logs", port=6006,
                                   gateway_host="gw.edu", gateway_port=2225)
     assert "tensorboard --logdir /shared/u/logs" in s
-    assert "--host 127.0.0.1" in s
+    assert "--host $IIT_NODE_ADDR" in s
     assert "ssh -p 2225" in s
+    assert "-L 6006:$IIT_NODE_ADDR:6006" in s
     assert "6006" in s
 
 
-def test_tensorboard_binds_localhost_only(tmp_path):
+def test_tensorboard_binds_node_addr_not_loopback(tmp_path):
+    """TensorBoard, like Jupyter, runs on a compute node reached only through
+    the gateway. It must bind the node's NodeAddr (not loopback, which the
+    gateway can't reach; not 0.0.0.0, which would expose it publicly)."""
     spec = _spec()
     folder = make_job_folder(str(tmp_path), spec)
     s = render_tensorboard_sbatch(spec, folder, "/shared/logs")
-    assert "127.0.0.1" in s
+    assert "IIT_NODE_ADDR=" in s
+    assert "NodeAddr=" in s
+    assert "--host $IIT_NODE_ADDR" in s
     assert "0.0.0.0" not in s
 
 
